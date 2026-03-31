@@ -14,3 +14,4 @@ Target version is OTP 28.3. Before running any Erlang/OTP or rebar3 commands, fi
 - Write messages like a developer would: casual, direct, no AI tone
   - bad: "Refactor the authentication module to improve code maintainability"
   - good: "clean up auth module"
+- Never amend commits or rewrite history; use `git revert` in a new commit to undo changes
