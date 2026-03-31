@@ -254,11 +254,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Socket functions
 %%%===================================================================
 
--if(?OTP_RELEASE =< 23).
--define(BIND_OK, {ok, _}).
--else.
 -define(BIND_OK, ok).
--endif.
 
 -record(sx_request, {
 	  key		:: term(),

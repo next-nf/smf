@@ -7,7 +7,8 @@
 
 -module(ergw_dist_test_lib).
 
--compile([{parse_transform, cut}]).
+-compile([{parse_transform, cut},
+	  {nowarn_deprecated_function, [{ct_slave, start, 2}, {ct_slave, stop, 1}]}]).
 
 -define(ERGW_NO_IMPORTS, true).
 

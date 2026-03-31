@@ -13,9 +13,6 @@
 -export([static_ip/2]).
 -export([validate_options/2, validate_name/2]).
 
--if(?OTP_RELEASE =< 23).
--ignore_xref([behaviour_info/1]).
--endif.
 
 -include_lib("kernel/include/logger.hrl").
 -include("ergw_core_config.hrl").

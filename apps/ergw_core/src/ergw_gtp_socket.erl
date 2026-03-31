@@ -16,10 +16,6 @@
 
 -ignore_xref([info/1, send/5]).
 
--if(?OTP_RELEASE =< 23).
--ignore_xref([behaviour_info/1]).
--endif.
-
 -include_lib("gtplib/include/gtp_packet.hrl").
 -include("include/ergw.hrl").
 
@@ -109,11 +105,7 @@ invoke_handler(#socket{type = 'gtp-u'} = Socket, F, A) ->
 %%% Socket Helper
 %%%===================================================================
 
--if(?OTP_RELEASE =< 23).
--define(BIND_OK, {ok, _}).
--else.
 -define(BIND_OK, ok).
--endif.
 
 family({_,_,_,_}) -> inet;
 family({_,_,_,_,_,_,_,_}) -> inet6.

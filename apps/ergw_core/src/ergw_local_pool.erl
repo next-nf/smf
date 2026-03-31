@@ -79,35 +79,11 @@ release({_, Server, {IP, _}, Pool, _Opts}) ->
     %% see alloc_reply
     gen_server:cast(Server, {release, IP, Pool}).
 
--if(?OTP_RELEASE >= 23).
 send_request(Server, Request) ->
     gen_server:send_request(Server, Request).
 
 wait_response(Mref, Timeout) ->
     gen_server:wait_response(Mref, Timeout).
--else.
-send_request(Server, Request) ->
-    ReqF = fun() -> exit({reply, gen_server:call(Server, Request)}) end,
-    try spawn_monitor(ReqF) of
-	{_, Mref} -> Mref
-    catch
-	error: system_limit = E ->
-	    %% Make send_request async and fake a down message
-	    Ref = erlang:make_ref(),
-	    self() ! {'DOWN', Ref, process, Server, {error, E}},
-	    Ref
-    end.
-
-wait_response(Mref, Timeout)
-  when is_reference(Mref) ->
-    receive
-	{'DOWN', Mref, _, _, Reason} ->
-	    Reason
-    after Timeout ->
-	    timeout
-    end.
-
--endif.
 
 ip({?MODULE, _, IP, _, _}) -> IP.
 opts({?MODULE, _, _, _, Opts}) -> Opts.
