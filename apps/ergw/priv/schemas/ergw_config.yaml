@@ -210,7 +210,10 @@ components:
                 enum:
                   - "*"
         ipv6_ue_interface_id:
-          $ref: TS29571_CommonData.yaml#/components/schemas/Ipv6Addr
+          oneOf:
+            - $ref: TS29571_CommonData.yaml#/components/schemas/Ipv6Addr
+            - type: string
+              enum: [default]
         upf_selection:
           type: array
           items:
