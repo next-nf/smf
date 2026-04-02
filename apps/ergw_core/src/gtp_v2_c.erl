@@ -244,7 +244,7 @@ validate_teid(_MsgType, _TEID) ->
     ok.
 
 get_indication_flags(#{?'Indication Flags' := #v2_indication{flags = Flags}}) ->
-    Flags;
+    maps:keys(Flags);
 get_indication_flags(_) ->
     [].
 

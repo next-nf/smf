@@ -170,7 +170,7 @@ init({Name, #{ip := IP, socket := GtpSocketName, burst_size := BurstSize} = Opts
     self() ! {'$socket', SendSocket, select, undefined},
     self() ! {'$socket', RecvSocket, select, undefined},
 
-    gen_server:enter_loop(?MODULE, [], State, ?SERVER).
+    gen_server:enter_loop(?MODULE, [], State, {local, ?SERVER}).
 
 handle_call(id, _From, #state{send_socket = Socket, node = Node,
 			      gtp_socket = GtpSocket,
