@@ -572,18 +572,20 @@
 
 	    apps =>
 		[{default,
-		  [{init, [#{service => 'Default'}]},
-		   {authenticate, []},
-		   {authorize, []},
-		   {start, []},
-		   {interim, []},
-		   {stop, []},
-		   {{gx,'CCR-Initial'},   [#{service => 'Default', answer => 'Initial-Gx'}]},
-		   {{gx,'CCR-Terminate'}, [#{service => 'Default', answer => 'Final-Gx'}]},
-		   {{gx,'CCR-Update'},    [#{service => 'Default', answer => 'Update-Gx'}]},
-		   {{gy, 'CCR-Initial'},   []},
-		   {{gy, 'CCR-Update'},    []},
-		   {{gy, 'CCR-Terminate'}, []}
+		  [{procedures,
+		    [{init, [#{service => 'Default'}]},
+		     {authenticate, []},
+		     {authorize, []},
+		     {start, []},
+		     {interim, []},
+		     {stop, []},
+		     {{gx,'CCR-Initial'},   [#{service => 'Default', answer => 'Initial-Gx'}]},
+		     {{gx,'CCR-Terminate'}, [#{service => 'Default', answer => 'Final-Gx'}]},
+		     {{gx,'CCR-Update'},    [#{service => 'Default', answer => 'Update-Gx'}]},
+		     {{gy, 'CCR-Initial'},   []},
+		     {{gy, 'CCR-Update'},    []},
+		     {{gy, 'CCR-Terminate'}, []}
+		    ]}
 		  ]}
 		]
 	   }

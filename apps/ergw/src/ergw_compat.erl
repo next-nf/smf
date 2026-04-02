@@ -1321,14 +1321,15 @@ aaa_translate_app(App, Opts, Config) ->
     AppDef = translate_options(aaa_translate_app_option(App, _, _, Config), Opts, [], map),
     Init = maps:get(session, AppDef, []),
     Procedures = maps:get(procedures, AppDef, #{}),
-    maps:map(
-      fun(_, V) ->
-	      lists:map(
-		fun({S, [{answer, A}]}) -> #{service => S, answer => A};
-		   ({S, _}) -> #{service => S};
-		   (S) -> #{service => S}
-		end, V)
-      end, Procedures#{init => Init}).
+    #{procedures =>
+	  maps:map(
+	    fun(_, V) ->
+		    lists:map(
+		      fun({S, [{answer, A}]}) -> #{service => S, answer => A};
+			 ({S, _}) -> #{service => S};
+			 (S) -> #{service => S}
+		      end, V)
+	    end, Procedures#{init => Init})}.
 
 aaa_translate_app_option(App, session, Services, Config)
   when is_list(Services) ->

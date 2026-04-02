@@ -742,7 +742,7 @@ delegate_aaa_service(Map) when is_map(Map) ->
     normalize_meta(Meta).
 
 config_meta_aaa_apps() ->
-    {kvlist, {application, default_or_binary}, {procedures, aaa_procedures}}.
+    {klist, {application, default_or_binary}, #{procedures => aaa_procedures}}.
 
 config_meta_aaa_application() ->
     Service = #{service => binary,

@@ -915,6 +915,7 @@ match_map(Match, Map, File, Line) ->
 maps_key_length(Key, Map) when is_map(Map) ->
     case maps:get(Key, Map, undefined) of
 	X when is_list(X) -> length(X);
+	X when is_map(X) -> 1;
 	X when is_tuple(X) -> 1;
 	_ -> 0
     end.
@@ -941,9 +942,9 @@ cfg_get_value([H|T], Cfg) when is_list(Cfg) ->
 
 load_aaa_answer_config(AnswerCfg) ->
     Cfg0 = ergw_aaa:get_application(default),
-    [Session] = cfg_get_value([init], Cfg0),
+    [Session] = cfg_get_value([procedures, init], Cfg0),
     Answers = [{Proc, [Session#{answer => Answer}]} || {Proc, Answer} <- AnswerCfg],
-    UpdCfg = ergw_core_config:to_map(Answers),
+    UpdCfg = #{procedures => ergw_core_config:to_map(Answers)},
     Cfg = maps_recusive_merge(Cfg0, UpdCfg),
     ok = set_aaa_config(apps, default, Cfg).
 
