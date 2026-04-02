@@ -7,8 +7,7 @@
 
 -module(ergw_dist_test_lib).
 
--compile([{parse_transform, cut},
-	  {nowarn_deprecated_function, [{ct_slave, start, 2}, {ct_slave, stop, 1}]}]).
+-compile([{parse_transform, cut}]).
 
 -define(ERGW_NO_IMPORTS, true).
 
@@ -45,54 +44,47 @@
 %%% Init/End helper
 %%%===================================================================
 
-mk_node_id(Id) ->
-    binary_to_atom(
-      iolist_to_binary(
-	io_lib:format("node~w@127.0.0.1", [Id]))).
+start_node(Id) ->
+    Opts = #{name => ?CT_PEER_NAME(Id),
+             args => ["-pa"|code:get_path()],
+             wait_boot => 20000},
+    {ok, Peer, Node} = ?CT_PEER(Opts),
+    unlink(Peer),
+    {Id, Peer, Node}.
 
-start_node({_Id, NodeName}) ->
-    %% need to set the code path so the same modules are available in the slave
-    CodePath = code:get_path(),
-    PathFlag = "-pa " ++ lists:concat(lists:join(" ", CodePath)),
-    Opts = [{monitor_master, true},
-	    {erl_flags, PathFlag}],
-    {ok, _} = ct_slave:start(NodeName, Opts),
-    ok.
-
-stop_node({_Id, NodeName}) ->
-    ct_slave:stop(NodeName).
+stop_node({_Id, Peer, _Node}) ->
+    peer:stop(Peer).
 
 random_node(Config, Fun) ->
     Nodes = proplists:get_value(nodes, Config),
-    {_, Node} = lists:nth(rand:uniform(length(Nodes)), Nodes),
+    {_, _Peer, Node} = lists:nth(rand:uniform(length(Nodes)), Nodes),
     erpc:call(Node, Fun).
 
 random_node(Config, Module, Function, Args) ->
     Nodes = proplists:get_value(nodes, Config),
-    {_, Node} = lists:nth(rand:uniform(length(Nodes)), Nodes),
+    {_, _Peer, Node} = lists:nth(rand:uniform(length(Nodes)), Nodes),
     erpc:call(Node, Module, Function, Args).
 
 foreach_node(Config, Fun) ->
     Nodes = proplists:get_value(nodes, Config),
-    ReqIds = [erpc:send_request(Node, fun() -> Fun(Id) end) || {Id, Node} <- Nodes],
+    ReqIds = [erpc:send_request(Node, fun() -> Fun(Id) end) || {Id, _Peer, Node} <- Nodes],
     [erpc:wait_response(ReqId, infinity) || ReqId <- ReqIds].
 
 foreach_node(Config, Module, Function, Args) ->
     Nodes = proplists:get_value(nodes, Config),
     ReqIds = [erpc:send_request(Node, Module, Function, [Id | Args]) ||
-		 {Id, Node} <- Nodes],
+		 {Id, _Peer, Node} <- Nodes],
     [erpc:wait_response(ReqId, infinity) || ReqId <- ReqIds].
 
 init_per_suite(Config) ->
     NodeCnt = proplists:get_value(node_count, Config, 3),
-    Nodes = [{Id, mk_node_id(Id)} || Id <- lists:seq(0, NodeCnt - 1)],
-    lists:foreach(fun start_node/1, Nodes),
+    Nodes = [start_node(Id) || Id <- lists:seq(0, NodeCnt - 1)],
 
     %% needed because of rebar3 parse transform for ct:pal
     case code:ensure_loaded(cthr) of
 	{module, _} ->
 	    {Module, Binary, Filename} = code:get_object_code(cthr),
-	    {_, NodeNames} = lists:unzip(Nodes),
+	    NodeNames = [N || {_, _, N} <- Nodes],
 	    erpc:multicall(NodeNames, code, load_binary, [Module, Filename, Binary]),
 	    ok;
 	_ ->
@@ -107,7 +99,7 @@ end_per_suite(Config) ->
 
 build_cluster(Config) ->
     Nodes = proplists:get_value(nodes, Config),
-    [Us|NodeNames] = [X || {_, X} <- Nodes],
+    [Us|NodeNames] = [X || {_, _, X} <- Nodes],
     JoinRes = lists:map(fun (Node) -> join_cluster(10, Us, Node) end, NodeNames),
     ?match([], lists:filter(fun(X) -> X /= ok end, JoinRes)),
     ok = build_cluster_commit(10, Us).
@@ -279,7 +271,7 @@ reconnect_all_sx_nodes(Config) ->
 
 match_dist_metric(Type, Name, LabelValues, Cond, Expected, File, Line, Cnt, Config) ->
     Nodes = proplists:get_value(nodes, Config),
-    {_, NodeNames} = lists:unzip(Nodes),
+    NodeNames = [N || {_, _, N} <- Nodes],
     Res = erpc:multicall(NodeNames, ergw_dist_test_lib, match_metric,
 		       [Type, Name, LabelValues, Expected, Cnt]),
     Fails = lists:filter(fun(X) -> X /= {ok, ok} end, Res),
@@ -339,7 +331,7 @@ wait4contexts(Cnt) ->
 
 wait4contexts(Cnt, Config) ->
     Nodes = proplists:get_value(nodes, Config),
-    {_, NodeNames} = lists:unzip(Nodes),
+    NodeNames = [N || {_, _, N} <- Nodes],
     Res = erpc:multicall(NodeNames, fun() -> wait4contexts(Cnt) end),
     Fails = lists:filter(fun(X) -> X /= {ok, ok} end, Res),
     case Fails of
