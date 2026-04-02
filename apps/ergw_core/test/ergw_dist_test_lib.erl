@@ -108,7 +108,7 @@ end_per_suite(Config) ->
 build_cluster(Config) ->
     Nodes = proplists:get_value(nodes, Config),
     [Us|NodeNames] = [X || {_, X} <- Nodes],
-    JoinRes = plists:map(fun (Node) -> join_cluster(10, Us, Node) end, NodeNames),
+    JoinRes = lists:map(fun (Node) -> join_cluster(10, Us, Node) end, NodeNames),
     ?match([], lists:filter(fun(X) -> X /= ok end, JoinRes)),
     ok = build_cluster_commit(10, Us).
 
