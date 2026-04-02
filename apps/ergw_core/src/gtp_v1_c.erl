@@ -228,10 +228,10 @@ get_element(Key, IEs, Pos, Default) ->
     end.
 
 get_common_flags(IEs) ->
-    get_element(?'Common Flags', IEs, #common_flags.flags, []).
+    maps:keys(get_element(?'Common Flags', IEs, #common_flags.flags, #{})).
 
 get_ext_common_flags(IEs) ->
-    get_element(?'Extended Common Flags', IEs, #extended_common_flags.flags, []).
+    maps:keys(get_element(?'Extended Common Flags', IEs, #extended_common_flags.flags, #{})).
 
 get_context_id(#gtp{version = v1, ie = IEs}) ->
     NSAPI = get_element(?'NSAPI', IEs, #nsapi.nsapi, '_'),
