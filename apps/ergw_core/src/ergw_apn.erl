@@ -9,9 +9,8 @@
 
 -compile({no_auto_import,[get/1]}).
 
--export([add/2, get/1, get/2,
-	 validate_options/1,
-	 validate_apn_name/1]).
+-export([add/2, get/1,
+	 validate_options/1]).
 
 -include("ergw_core_config.hrl").
 -include("include/ergw.hrl").

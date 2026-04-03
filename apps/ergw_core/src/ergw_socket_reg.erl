@@ -14,7 +14,9 @@
 -export([register/3, lookup/2, waitfor/2]).
 -export([all/0]).
 
--ignore_xref([start_link/0]).
+-ignore_xref([start_link/0,
+	      lookup/2		% used in tests
+	     ]).
 
 %% regine_server callbacks
 -export([init/1, handle_register/4, handle_unregister/3, handle_pid_remove/3,

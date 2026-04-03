@@ -13,7 +13,7 @@
 -export([start_link/0]).
 -export([register/2, unregister/1, lookup/1, maybe_new_path/4]).
 -export([all/0, all/1]).
--export([state/1, state/2]).
+-export([state/2]).
 
 -ignore_xref([start_link/0, register/2]).
 
@@ -56,14 +56,6 @@ maybe_new_path(Socket, Version, RemoteIP, Trigger) ->
 
 state(Key, State) ->
     regine_server:call(?SERVER, {state, Key, State}).
-
-state(Key) ->
-    case ets:lookup(?SERVER, Key) of
-	[{Key, _, State}] ->
-	    State;
-	_ ->
-	    undefined
-    end.
 
 all() ->
     ets:tab2list(?SERVER).

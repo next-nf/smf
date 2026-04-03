@@ -16,13 +16,12 @@
 -export([handle_response/4,
 	 start_link/6,
 	 send_request/8,
-	 send_response/2, send_response/3,
-	 send_request/7, resend_request/2,
+	 send_response/3,
 	 request_finished/1,
 	 peer_down/3,
 	 terminate_colliding_context/2, terminate_context/1,
 	 trigger_delete_context/1,
-	 remote_context_register/3, remote_context_register_new/3,
+	 remote_context_register_new/3,
 	 tunnel_reg_update/2,
 	 info/1,
 	 validate_options/3,
@@ -39,7 +38,8 @@
 
 -ignore_xref([start_link/6,
 	      delete_context/1,			% used by Ops through Erlang CLI
-	      handle_response/4			% used from callback handler
+	      handle_response/4,		% used from callback handler
+	      usage_report_to_accounting/1	% used in tests
 	      ]).
 
 %% gen_statem callbacks
@@ -75,28 +75,12 @@ send_request(#tunnel{socket = Socket}, Src, DstIP, DstPort, T3, N3, Msg, ReqInfo
     CbInfo = {?MODULE, handle_response, [self(), ReqInfo, Msg]},
     ergw_gtp_c_socket:send_request(Socket, Src, DstIP, DstPort, T3, N3, Msg, CbInfo).
 
-%% send_request/7
-send_request(Socket, Src, DstIP, DstPort, ReqId, Msg, ReqInfo)
-  when is_record(Socket, socket) ->
-    CbInfo = {?MODULE, handle_response, [self(), ReqInfo, Msg]},
-    ergw_gtp_c_socket:send_request(Socket, Src, DstIP, DstPort, ReqId, Msg, CbInfo);
-send_request(#tunnel{socket = Socket}, Src, DstIP, DstPort, ReqId, Msg, ReqInfo) ->
-    send_request(Socket, Src, DstIP, DstPort, ReqId, Msg, ReqInfo).
-
-resend_request(#tunnel{socket = Socket}, ReqId) ->
-    ergw_gtp_c_socket:resend_request(Socket, ReqId).
-
 start_link(Socket, Info, Version, Interface, IfOpts, Opts) ->
     proc_lib:start_link(?MODULE, init, [{[Socket, Info, Version, Interface, IfOpts], Opts}]).
 
 peer_down(Context, Path, Notify) ->
     Fun = fun() -> (catch gen_statem:call(Context, {peer_down, Path, Notify})) end,
     jobs:run(path_restart, Fun).
-
-remote_context_register(LeftTunnel, Bearer, Context)
-  when is_record(Context, context) ->
-    Keys = context2keys(LeftTunnel, Bearer, Context),
-    gtp_context_reg:register(Keys, ?MODULE, self()).
 
 remote_context_register_new(LeftTunnel, Bearer, Context) ->
     Keys = context2keys(LeftTunnel, Bearer, Context),

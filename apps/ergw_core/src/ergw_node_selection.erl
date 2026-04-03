@@ -15,11 +15,13 @@
 
 -compile({parse_transform, cut}).
 
--export([validate_options/1, expand_apn/2, split_apn/1,
-	 apn_to_fqdn/2, apn_to_fqdn/1,
+-export([validate_options/1, split_apn/1,
+	 apn_to_fqdn/1,
 	 topology_match/2,
 	 candidates/3, snaptr_candidate/1, topology_select/4,
 	 lookup/2]).
+
+-ignore_xref([candidates/3]).		% used in tests
 
 -include_lib("kernel/include/logger.hrl").
 -include("ergw_core_config.hrl").
@@ -113,10 +115,6 @@ split_apn([H|_] = APN)
   when is_binary(H) ->
     L = expand_apn(APN, undefined),
     lists:split(length(L) - 3, L).
-
-apn_to_fqdn([H|_] = APN, IMSI)
-  when is_binary(H) ->
-    apn_to_fqdn(expand_apn(lowercase_apn(APN), IMSI)).
 
 apn_to_fqdn([H|_] = APN)
   when is_binary(H) ->

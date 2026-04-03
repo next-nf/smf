@@ -25,8 +25,7 @@
 	 update_pfcp_rules/3,
 	 update_teids/3]).
 -export([get_urr_id/4, get_urr_group/2,
-	 get_urr_ids/1, get_urr_ids/2,
-	 find_urr_by_id/2]).
+	 get_urr_ids/1, get_urr_ids/2]).
 -export([set_timer/3, apply_timers/2, timer_expired/2]).
 
 -ifdef(TEST).
@@ -258,9 +257,6 @@ get_urr_ids(#pfcp_ctx{urr_by_id = M}) ->
 
 get_urr_ids(Names, #pfcp_ctx{idmap = IdMap}) ->
     lists:map(fun(N) -> maps:get({urr, N}, IdMap, undefined) end, Names).
-
-find_urr_by_id(Id, #pfcp_ctx{urr_by_id = M}) ->
-    maps:find(Id, M).
 
 %%%===================================================================
 %%% Timer handling

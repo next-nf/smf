@@ -17,7 +17,7 @@
 	 usage_report_to_charging_events/3,
 	 query_usage_report/1, query_usage_report/2
 	]).
--export([select_upf/1, select_upf/3, reselect_upf/4]).
+-export([select_upf/3, reselect_upf/4]).
 -export([send_g_pdu/3]).
 -export([register_ctx_ids/3, unregister_ctx_ids/3]).
 -export([update_dp_seid/2, make_request_bearer/3, update_bearer/3]).
@@ -907,14 +907,6 @@ select(_, []) -> undefined;
 select(first, L) -> hd(L);
 select(random, L) when is_list(L) ->
     lists:nth(rand:uniform(length(L)), L).
-
-%% select_upf/1
-select_upf(Candidates) ->
-    do([error_m ||
-	   Available = ergw_sx_node_reg:available(),
-	   Pid <- select_upf_with(fun(_, {Pid, _}) -> {ok, Pid} end, Candidates, Available),
-	   ergw_sx_node:attach(Pid)
-       ]).
 
 %% select_upf_with/3
 select_upf_with(_, [], _) ->

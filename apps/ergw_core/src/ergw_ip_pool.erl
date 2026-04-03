@@ -10,7 +10,6 @@
 %% API
 -export([start_ip_pool/2, send_request/2, wait_response/1, release/1,
 	 addr/1, ip/1, opts/1]).
--export([static_ip/2]).
 -export([validate_options/2, validate_name/2]).
 
 
@@ -57,9 +56,6 @@ ip(AllocInfo) ->
 
 opts(AllocInfo) ->
     alloc_info(AllocInfo, opts).
-
-static_ip(IP, PrefixLen) ->
-    {'$static', {IP, PrefixLen}}.
 
 %%%====================================================================
 %%% Options Validation

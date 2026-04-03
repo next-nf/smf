@@ -14,10 +14,8 @@
 
 %% API
 -export([start_link/5, new_path/4, all/1,
-	 gateway_nodes/3,
 	 handle_request/2, handle_response/4,
 	 activity/2, activity/5,
-	 aquire_lease/1, release_lease/2,
 	 bind_tunnel/1, unbind_tunnel/1,
 	 icmp_error/2, path_restart/2,
 	 get_handler/2, info/1, sync_state/3]).
@@ -82,16 +80,6 @@ get_peer_opts(Peer) ->
     {ok, Peers} = ergw_core_config:get([gtp_peers], #{}),
     maps:get(Peer, Peers, #{}).
 
-gateway_nodes(Socket, Version, Nodes) ->
-    proc_lib:spawn(
-      fun() ->
-	      lists:foreach(
-		fun({_Name, _, _, IP4, IP6}) ->
-			lists:foreach(maybe_new_path(Socket, Version, _, detect), IP4),
-			lists:foreach(maybe_new_path(Socket, Version, _, detect), IP6)
-		end, Nodes)
-      end).
-
 maybe_new_path(Socket, Version, RemoteIP, Trigger) ->
     case get(Socket, Version, RemoteIP) of
 	Path when is_pid(Path) ->
@@ -112,12 +100,6 @@ handle_request(#request{socket = Socket, ip = IP} = ReqKey, #gtp{version = Versi
 
 handle_response(Path, Request, Ref, Response) ->
     gen_statem:cast(Path, {handle_response, Request, Ref, Response}).
-
-aquire_lease(Tunnel) ->
-    safe_aquire_lease(get_path(Tunnel, lease)).
-
-release_lease(LRef, #tunnel{path = Path}) ->
-    gen_statem:cast(Path, {release_lease, LRef}).
 
 activity(#request{socket = Socket, ip = IP, version = Version, arrival_ts = TS}, Event) ->
     Path = maybe_new_path(Socket, Version, IP, activity),
@@ -750,18 +732,6 @@ get_path(#tunnel{socket = Socket, version = Version,
 		 remote = #fq_teid{ip = RemoteCntlIP}} = Tunnel, Trigger) ->
     Path = maybe_new_path(Socket, Version, RemoteCntlIP, Trigger),
     Tunnel#tunnel{path = Path}.
-
-%% path might have died, returned a sensible error regardless
-safe_aquire_lease(#tunnel{path = Path} = Tunnel) ->
-    try gen_statem:call(Path, {aquire_lease, self()}) of
-	{ok, {LRef, PathRestartCounter}} ->
-	    {ok, {LRef, Tunnel#tunnel{remote_restart_counter = PathRestartCounter}}};
-	{error, _} = Error ->
-	    Error
-    catch
-	exit:{noproc, _} ->
-	    {error, rejected}
-    end.
 
 %% path might have died, returned a sensible error regardless
 safe_bind_tunnel(#tunnel{path = Path} = Tunnel) ->

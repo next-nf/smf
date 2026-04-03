@@ -15,8 +15,8 @@
 %% API
 -export([start_link/2,
 	 info/1, send/5, send_response/3,
-	 send_request/7, send_request/8, resend_request/2]).
--export([get_seq_no/2, get_uniq_id/1]).
+	 send_request/8]).
+-export([get_uniq_id/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -101,18 +101,6 @@ send_request(Socket, Src, DstIP, DstPort, T3, N3, Msg, CbInfo) ->
     ?LOG(debug, "~p: gtp_socket send_request to ~s(~0p):~w: ~0p",
 	 [self(), inet:ntoa(DstIP), DstIP, DstPort, Msg]),
     cast(Socket, ?MAKE_SEND_REQ(undefined, Src, DstIP, DstPort, T3, N3, Msg, CbInfo)).
-
-%% send_request/7
-send_request(Socket, Src, DstIP, DstPort, ReqId, Msg, CbInfo) ->
-    ?LOG(debug, "~p: gtp_socket send_request ~0p to ~s:~w: ~0p",
-		[self(), ReqId, inet:ntoa(DstIP), DstPort, Msg]),
-    cast(Socket, ?MAKE_SEND_REQ(ReqId, Src, DstIP, DstPort, ?T3 * 2, 0, Msg, CbInfo)).
-
-resend_request(Socket, ReqId) ->
-    cast(Socket, {resend_request, ReqId}).
-
-get_seq_no(Socket, ReqId) ->
-    call(Socket, {get_seq_no, ReqId}).
 
 get_uniq_id(Socket) ->
     call(Socket, get_uniq_id).

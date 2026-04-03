@@ -34,9 +34,9 @@
 	 make_gy_credit_request/3]).
 -export([select_vrf/3,
 	 allocate_ips/7, release_context_ips/1]).
+-ignore_xref([select_vrf/3]).		% used in tests
 -export([init_tunnel/4,
 	 assign_tunnel_teid/3,
-	 reassign_tunnel_teid/1,
 	 assign_local_data_teid/5
 	]).
 
@@ -901,9 +901,6 @@ icmpv6(_TC, _FlowLabel, _SrcAddr, _DstAddr, _PayLoad,
 %%% Tunnel helpers
 %%%===================================================================
 
-update_field_with(Field, Rec, Fun) ->
-    '#set-'([{Field, Fun('#get-'(Field, Rec))}], Rec).
-
 %% init_tunnel/4
 init_tunnel(Interface, #gtp_socket_info{vrf = VRF}, Socket, Version) ->
     #tunnel{interface = Interface, vrf = VRF, socket = Socket, version = Version}.
@@ -916,16 +913,6 @@ assign_tunnel_teid(TunnelSide, #gtp_socket_info{vrf = VRF} = Info, Tunnel) ->
 assign_tunnel_teid_f(#gtp_socket_info{ip = IP}, #tunnel{socket = Socket}) ->
     {ok, TEI} = ergw_tei_mngr:alloc_tei(Socket),
     #fq_teid{ip = IP, teid = TEI}.
-
-%% assign_tunnel_teid/1
-reassign_tunnel_teid(Tunnel) ->
-    update_field_with(
-      local, Tunnel, reassign_tunnel_teid_f(Tunnel, _)).
-
-%% reassign_tunnel_teid_f/2
-reassign_tunnel_teid_f(#tunnel{socket = Socket}, FqTEID) ->
-    {ok, TEI} = ergw_tei_mngr:alloc_tei(Socket),
-    FqTEID#fq_teid{teid = TEI}.
 
 ip_ver(IP) when ?IS_IPv4(IP) -> v4;
 ip_ver(IP) when ?IS_IPv6(IP) -> v6.

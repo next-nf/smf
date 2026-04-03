@@ -22,12 +22,6 @@
 %% PFCP context API's
 %%-export([defered_usage_report/3]).
 
-%% shared API's
--export([init_session/4,
-	 init_session_from_gtp_req/5,
-	 update_tunnel_from_gtp_req/3,
-	 update_context_from_gtp_req/2
-	]).
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("gtplib/include/gtp_packet.hrl").

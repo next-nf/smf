@@ -12,7 +12,7 @@
 
 -export([connect_upf_candidates/4, create_session/10]).
 -export([triggered_charging_event/4, usage_report/3, close_context/3, close_context/4]).
--export([handle_peer_change/3, update_tunnel_endpoint/2,
+-export([update_tunnel_endpoint/2,
 	 apply_bearer_change/5]).
 
 -include_lib("kernel/include/logger.hrl").
@@ -185,13 +185,6 @@ update_tunnel_endpoint(TunnelOld, Tunnel0) ->
        true ->
 	    ok
     end,
-    Tunnel.
-
-handle_peer_change(#tunnel{remote = NewFqTEID},
-		   #tunnel{remote = OldFqTEID}, TunnelOld)
-  when OldFqTEID /= NewFqTEID ->
-    ergw_gsn_lib:reassign_tunnel_teid(TunnelOld);
-handle_peer_change(_, _, Tunnel) ->
     Tunnel.
 
 %%====================================================================
