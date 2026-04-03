@@ -121,9 +121,6 @@ setopts(required_upff = What, Opts) when is_record(Opts, up_function_features) -
 setopts(path_management = What, Opts0) ->
     Opts = gtp_path:validate_options(Opts0),
     gen_statem:call(?SERVER, {setopts, What, Opts});
-setopts(proxy_map = What, Opts0) ->
-    Opts = gtp_proxy_ds:validate_options(Opts0),
-    gen_statem:call(?SERVER, {setopts, What, Opts});
 setopts(What, Opts) ->
     error(badarg, [What, Opts]).
 
@@ -140,9 +137,6 @@ add_socket(Name, Opts0) ->
 add_handler(Name, Opts0) ->
     Opts = ergw_context:validate_options(Name, Opts0),
     gen_statem:call(?SERVER, {add_handler, Name, Opts}).
-
-do_add_handler(_Name, #{protocol := ip, nodes := Nodes} = Opts) ->
-    lists:foreach(attach_tdf(_, Opts), Nodes);
 
 do_add_handler(Name, #{handler  := Handler,
 		       protocol := Protocol,
@@ -191,35 +185,6 @@ add_charging_rule(Name, Opts0) ->
 add_charging_rulebase(Name, Opts0) ->
     Opts = ergw_charging:validate_rulebase(Name, Opts0),
     gen_statem:call(?SERVER, {add_charging_rulebase, Name, Opts}).
-
-%%
-%% start a TDF instance
-%%
-%% attach_tdf/2
-attach_tdf(SxNode, Opts) ->
-    Result = ergw_sx_node_reg:lookup(SxNode),
-    attach_tdf(SxNode, Opts, Result, true).
-
-%% attach_tdf/4
-attach_tdf(_SxNode, Opts, {ok, Pid} = Result, _) when is_pid(Pid) ->
-    ergw_sx_node:attach_tdf(Pid, Opts),
-    Result;
-attach_tdf(_SxNode, _Opts, Result, false) ->
-    Result;
-attach_tdf(SxNode, #{node_selection := NodeSelections} = Opts, _, true) ->
-    Result =
-	(fun NodeLookup([]) ->
-		 {error, not_found};
-	     NodeLookup([NodeSelection | NextSelection]) ->
-		 case ergw_node_selection:lookup(SxNode, NodeSelection) of
-		     {Node, IP4, IP6} ->
-			 ergw_sx_node_reg:connect(Node, NodeSelection, IP4, IP6);
-		     _Other ->
-			 ?LOG(warning, "TDF lookup for ~p failed ~p", [SxNode, _Other]),
-			 NodeLookup(NextSelection)
-		 end
-	 end)(NodeSelections),
-    attach_tdf(SxNode, Opts, Result, false).
 
 %%
 %% attach a GTP protocol (Gn, S5, S2a...) to a socket
@@ -406,10 +371,6 @@ handle_event({call, From}, {setopts, required_upff, Opts}, running, _) ->
 
 handle_event({call, From}, {setopts, path_management, Opts}, running, _) ->
     Reply = gtp_path:setopts(Opts),
-    {keep_state_and_data, [{reply, From, Reply}]};
-
-handle_event({call, From}, {setopts, proxy_map, Opts}, running, _) ->
-    Reply = gtp_proxy_ds:setopts(Opts),
     {keep_state_and_data, [{reply, From, Reply}]};
 
 handle_event({call, From}, _, State, _) when State /= running ->

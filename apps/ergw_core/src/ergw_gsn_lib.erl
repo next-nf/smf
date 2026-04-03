@@ -54,7 +54,7 @@
 -include("ergw_core_config.hrl").
 -include("include/ergw.hrl").
 
--export_records([context, tdf_ctx, tunnel, bearer, fq_teid]).
+-export_records([context, tunnel, bearer, fq_teid]).
 
 -define(SECONDS_PER_DAY, 86400).
 -define(DAYS_FROM_0_TO_1970, 719528).

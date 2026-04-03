@@ -161,13 +161,11 @@ init_per_group(Config) ->
 	true ->
 	    {ok, _} = ergw_test_sx_up:start('pgw-u01', proplists:get_value(pgw_u01_sx, Config)),
 	    {ok, _} = ergw_test_sx_up:start('pgw-u02', proplists:get_value(pgw_u02_sx, Config)),
-	    {ok, _} = ergw_test_sx_up:start('sgw-u', proplists:get_value(sgw_u_sx, Config)),
-	    {ok, _} = ergw_test_sx_up:start('tdf-u', proplists:get_value(tdf_u_sx, Config));
+	    {ok, _} = ergw_test_sx_up:start('sgw-u', proplists:get_value(sgw_u_sx, Config));
 	_ ->
 	    ok = ergw_test_sx_up:stop('pgw-u01'),
 	    ok = ergw_test_sx_up:stop('pgw-u02'),
-	    ok = ergw_test_sx_up:stop('sgw-u'),
-	    ok = ergw_test_sx_up:stop('tdf-u')
+	    ok = ergw_test_sx_up:stop('sgw-u')
     end,
 
     foreach_node(Config, ?MODULE, node_init_per_group, [Config]),
@@ -184,7 +182,6 @@ end_per_group(Config) ->
     ok = ergw_test_sx_up:stop('pgw-u01'),
     ok = ergw_test_sx_up:stop('pgw-u02'),
     ok = ergw_test_sx_up:stop('sgw-u'),
-    ok = ergw_test_sx_up:stop('tdf-u'),
 
     foreach_node(Config, ?MODULE, node_end_per_group, [Config]),
     ?config(table_owner, Config) ! stop,

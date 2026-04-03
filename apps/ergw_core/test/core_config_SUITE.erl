@@ -28,11 +28,8 @@ all() ->
      gtp_u_socket,
      pfcp_socket,
      ggsn_handler,
-     ggsn_proxy_handler,
      pgw_handler,
-     pgw_proxy_handler,
      saegw_handler,
-     tdf_handler,
      ip_pool,
      vrf,
      apn,
@@ -40,7 +37,6 @@ all() ->
      upf_node_defaults,
      upf_node,
      %% metrics,				% TBD: does not work yet
-     proxy_map,
      charging,
      charging_rule,
      charging_rulebase,
@@ -217,20 +213,6 @@ handler(ValF, Handler) ->
     ?ok(ValF(set_cfg_value([node_selection], [static], Handler))),
     ok.
 
-proxy_handler(ValF, Handler) ->
-    gen_handler(ValF, Handler),
-
-    ?bad(ValF(set_cfg_value([contexts, invalid], [], Handler))),
-    ?bad(ValF(set_cfg_value([contexts, <<"ams">>], invalid, Handler))),
-    ?bad(ValF(set_cfg_value([contexts, <<"ams">>, proxy_sockets], invalid, Handler))),
-    ?ok(ValF(set_cfg_value([proxy_data_source], gtp_proxy_ds, Handler))),
-    ?bad(ValF(set_cfg_value([proxy_data_source], invalid, Handler))),
-
-    ?bad(ValF(set_cfg_value([contexts, <<"ams">>, node_selection], invalid, Handler))),
-    ?bad(ValF(set_cfg_value([contexts, <<"ams">>, node_selection], [], Handler))),
-    ?ok(ValF(set_cfg_value([contexts, <<"ams">>, node_selection], [static], Handler))),
-    ok.
-
 ggsn_handler() ->
     [{doc, "Test validation of the GGSN handler configuration"}].
 ggsn_handler(_Config)  ->
@@ -249,24 +231,6 @@ ggsn_handler(_Config)  ->
     ValF = fun(Values) -> ergw_context:validate_options(name, Values) end,
 
     handler(ValF, Handler),
-    ok.
-
-ggsn_proxy_handler() ->
-    [{doc, "Test validation of the GGSN handler configuration"}].
-ggsn_proxy_handler(_Config)  ->
-    Handler = [{handler, ggsn_gn_proxy},
-	       {protocol, gn},
-	       {sockets, [irx]},
-	       {proxy_sockets, ['irx']},
-	       {node_selection, [static]},
-	       {contexts,
-		[{<<"ams">>,
-		  [{proxy_sockets, ['irx']}]}]}
-	      ],
-
-    ValF = fun(Values) -> ergw_context:validate_options(name, Values) end,
-
-    proxy_handler(ValF, Handler),
     ok.
 
 pgw_handler() ->
@@ -289,24 +253,6 @@ pgw_handler(_Config)  ->
     handler(ValF, Handler),
     ok.
 
-pgw_proxy_handler() ->
-    [{doc, "Test validation of the PGW handler configuration"}].
-pgw_proxy_handler(_Config)  ->
-    Handler = [{handler, pgw_s5s8_proxy},
-	       {protocol, s5s8},
-	       {sockets, [irx]},
-	       {proxy_sockets, ['irx']},
-	       {node_selection, [static]},
-	       {contexts,
-		[{<<"ams">>,
-		  [{proxy_sockets, ['irx']}]}]}
-	      ],
-
-    ValF = fun(Values) -> ergw_context:validate_options(name, Values) end,
-
-    proxy_handler(ValF, Handler),
-    ok.
-
 saegw_handler() ->
     [{doc, "Test validation of the SAEGW handler configuration"}].
 saegw_handler(_Config)  ->
@@ -325,39 +271,6 @@ saegw_handler(_Config)  ->
     ValF = fun(Values) -> ergw_context:validate_options(name, Values) end,
 
     handler(ValF, Handler),
-    ok.
-
-tdf_handler() ->
-    [{doc, "Test validation of the TDF handler configuration"}].
-tdf_handler(_Config)  ->
-    Handler = [{handler, tdf},
-	       {protocol, ip},
-	       {apn, ?'APN-EXAMPLE'},
-	       {nodes, [<<"topon.sx.prox01.mnc001.mcc001.3gppnetwork.org">>]},
-	       {node_selection, [default]}
-	      ],
-
-    ValF = fun(Values) -> ergw_context:validate_options(name, Values) end,
-
-    ?ok(ValF(Handler)),
-    ?bad(ValF([])),
-    ?bad(ValF(invalid)),
-
-    %% missing mandatory options
-    ?bad(ValF(lists:keydelete(handler, 1, Handler))),
-    ?bad(ValF(lists:keydelete(protocol, 1, Handler))),
-    ?bad(ValF(lists:keydelete(apn, 1, Handler))),
-    ?bad(ValF(lists:keydelete(nodes, 1, Handler))),
-    ?bad(ValF(lists:keydelete(node_selection, 1, Handler))),
-
-    ?bad(ValF(set_cfg_value([handler], invalid, Handler))),
-    ?bad(ValF(set_cfg_value([protocol], invalid, Handler))),
-    ?bad(ValF(set_cfg_value([protocol], ipv6, Handler))),
-
-    ?bad(ValF(set_cfg_value([nodes], [], Handler))),
-    ?bad(ValF(set_cfg_value([node_selection], [], Handler))),
-    ?ok(ValF(set_cfg_value([node_selection], ["default"], Handler))),
-    ?ok(ValF(set_cfg_value([node_selection], [<<"default">>], Handler))),
     ok.
 
 ip_pool() ->
@@ -702,25 +615,6 @@ metrics(_Config)  ->
     ?bad(ValF(set_cfg_value([gtp_path_rtt_millisecond_intervals], [invalid], Metrics))),
     ?bad(ValF(set_cfg_value([gtp_path_rtt_millisecond_intervals], [-100], Metrics))),
     ?ok(ValF(set_cfg_value([gtp_path_rtt_millisecond_intervals], [10, 100], Metrics))),
-    ok.
-
-proxy_map() ->
-    [{doc, "Test validation of the proxy map configuration"}].
-proxy_map(_Config)  ->
-    Map = [{apn,  [{?'APN-EXAMPLE', ?'APN-PROXY'}]},
-	   {imsi, [{?'IMSI', [{imsi, ?'PROXY-IMSI'}, {msisdn, ?'PROXY-MSISDN'}]}]}],
-    ValF = fun(Values) -> gtp_proxy_ds:validate_options(Values) end,
-
-    ?ok(ValF(Map)),
-
-    ?bad(ValF(set_cfg_value([invalid], [], Map))),
-    ?ok(ValF(set_cfg_value([imsi], [{<<"222222222222222">>, [{imsi, <<"333333333333333">>}]}], Map))),
-    ?bad(ValF(set_cfg_value([imsi], [{invalid, [{imsi, <<"333333333333333">>}]}], Map))),
-    ?bad(ValF(set_cfg_value([imsi], [{<<"222222222222222">>, invalid}], Map))),
-    ?bad(ValF(set_cfg_value([apn], [{[invalid, <<"label">>], [<<"test">>]}], Map))),
-    ?bad(ValF(set_cfg_value([apn], [{[<<"label">>], [invalid, <<"test">>]}], Map))),
-    ?bad(ValF(set_cfg_value([apn], [{invalid, [<<"test">>]}], Map))),
-    ?bad(ValF(set_cfg_value([apn], [{[<<"test">>], invalid}], Map))),
     ok.
 
 charging() ->

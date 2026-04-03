@@ -26,7 +26,7 @@
 %%%===================================================================
 
 all() ->
-    [pgw, pgw_proxy, ggsn, ggsn_proxy, saegw_s11, tdf].
+    [pgw, ggsn, saegw_s11].
 
 init_per_suite(Config) ->
     logger:set_primary_config(level, debug),
@@ -79,18 +79,6 @@ pgw(Config)  ->
 	}, Rules),
     ok.
 
-pgw_proxy() ->
-    [{doc, "Test the PGW proxy function"}].
-pgw_proxy(Config)  ->
-    Dir  = ?config(data_dir, Config),
-    application:load(ergw),
-    CfgSet = #{type => json, file => filename:join(Dir, "pgw_proxy.json")},
-    application:set_env(ergw, config, CfgSet),
-    application:ensure_all_started(ergw),
-
-    ergw:wait_till_running(),
-    ok.
-
 ggsn() ->
     [{doc, "Test the GGSN function"}].
 ggsn(Config)  ->
@@ -103,36 +91,12 @@ ggsn(Config)  ->
     ergw:wait_till_running(),
     ok.
 
-ggsn_proxy() ->
-    [{doc, "Test the GGSN proxy function"}].
-ggsn_proxy(Config)  ->
-    Dir  = ?config(data_dir, Config),
-    application:load(ergw),
-    CfgSet = #{type => json, file => filename:join(Dir, "ggsn_proxy.json")},
-    application:set_env(ergw, config, CfgSet),
-    application:ensure_all_started(ergw),
-
-    ergw:wait_till_running(),
-    ok.
-
 saegw_s11() ->
     [{doc, "Test the SAE-GW function"}].
 saegw_s11(Config)  ->
     Dir  = ?config(data_dir, Config),
     application:load(ergw),
     CfgSet = #{type => json, file => filename:join(Dir, "saegw_s11.json")},
-    application:set_env(ergw, config, CfgSet),
-    application:ensure_all_started(ergw),
-
-    ergw:wait_till_running(),
-    ok.
-
-tdf() ->
-    [{doc, "Test the TDF function"}].
-tdf(Config)  ->
-    Dir  = ?config(data_dir, Config),
-    application:load(ergw),
-    CfgSet = #{type => json, file => filename:join(Dir, "tdf.json")},
     application:set_env(ergw, config, CfgSet),
     application:ensure_all_started(ergw),
 

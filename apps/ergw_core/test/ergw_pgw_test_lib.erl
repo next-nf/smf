@@ -1169,7 +1169,6 @@ apn(M) when is_map(M) ->
     apn(maps:get(apn, M, default));
 apn(invalid_apn) -> [<<"IN", "VA", "LID">>];
 apn(dotted_apn)  -> ?'APN-EXA.MPLE';
-apn(proxy_apn)   -> ?'APN-PROXY';
 apn(async_sx)    -> [<<"async-sx">>];
 apn(multi_vrf)    -> [<<"multi-vrf">>];
 apn({_, _, APN})

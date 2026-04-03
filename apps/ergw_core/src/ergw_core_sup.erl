@@ -52,12 +52,10 @@ init([]) ->
 				 VPathDbMaster,
 				 ?CHILD(gtp_context_reg, worker, []),
 				 ?CHILD(gtp_context_sup, supervisor, []),
-				 ?CHILD(tdf_sup, supervisor, []),
 				 ?CHILD(ergw_socket_reg, worker, []),
 				 ?CHILD(ergw_socket_sup, supervisor, []),
 				 ?CHILD(ergw_sx_node_reg, worker, []),
 				 ?CHILD(ergw_sx_node_sup, supervisor, []),
-				 ?CHILD(gtp_proxy_ds, worker, []),
 				 ?CHILD(ergw_ip_pool_sup, supervisor, []),
 				 ?CHILD(ergw_core, worker, [])
 				]} }.

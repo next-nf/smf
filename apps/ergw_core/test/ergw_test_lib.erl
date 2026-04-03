@@ -97,13 +97,11 @@ lib_init_per_group(Config0) ->
 	true ->
 	    {ok, _} = ergw_test_sx_up:start('pgw-u01', proplists:get_value(pgw_u01_sx, Config)),
 	    {ok, _} = ergw_test_sx_up:start('pgw-u02', proplists:get_value(pgw_u02_sx, Config)),
-	    {ok, _} = ergw_test_sx_up:start('sgw-u', proplists:get_value(sgw_u_sx, Config)),
-	    {ok, _} = ergw_test_sx_up:start('tdf-u', proplists:get_value(tdf_u_sx, Config));
+	    {ok, _} = ergw_test_sx_up:start('sgw-u', proplists:get_value(sgw_u_sx, Config));
 	_ ->
 	    ok = ergw_test_sx_up:stop('pgw-u01'),
 	    ok = ergw_test_sx_up:stop('pgw-u02'),
-	    ok = ergw_test_sx_up:stop('sgw-u'),
-	    ok = ergw_test_sx_up:stop('tdf-u')
+	    ok = ergw_test_sx_up:stop('sgw-u')
     end,
     {ok, AppsCfg} = application:get_env(ergw_aaa, apps),
     [{aaa_cfg, AppsCfg} |Config].
@@ -113,7 +111,6 @@ lib_end_per_group(Config) ->
     ok = ergw_test_sx_up:stop('pgw-u01'),
     ok = ergw_test_sx_up:stop('pgw-u02'),
     ok = ergw_test_sx_up:stop('sgw-u'),
-    ok = ergw_test_sx_up:stop('tdf-u'),
     ?config(table_owner, Config) ! stop,
     [application:stop(App) || App <- [ranch, cowboy, ergw_core, ergw_aaa, ergw_cluster, riak_core]],
     ok.
@@ -173,26 +170,20 @@ group_config(ipv4, Config) ->
 	    {ue_ip, ?LOCALHOST_IPv4},
 	    {client_ip, ?CLIENT_IP_IPv4},
 	    {test_gsn, ?TEST_GSN_IPv4},
-	    {proxy_gsn, ?PROXY_GSN_IPv4},
 	    {final_gsn, ?FINAL_GSN_IPv4},
-	    {final_gsn_2, ?FINAL_GSN2_IPv4},
 	    {sgw_u_sx, ?SGW_U_SX_IPv4},
 	    {pgw_u01_sx, ?PGW_U01_SX_IPv4},
-	    {pgw_u02_sx, ?PGW_U02_SX_IPv4},
-	    {tdf_u_sx, ?TDF_U_SX_IPv4}],
+	    {pgw_u02_sx, ?PGW_U02_SX_IPv4}],
     merge_config(Opts, Config);
 group_config(ipv6, Config) ->
     Opts = [{localhost, ?LOCALHOST_IPv6},
 	    {ue_ip, ?LOCALHOST_IPv6},
 	    {client_ip, ?CLIENT_IP_IPv6},
 	    {test_gsn, ?TEST_GSN_IPv6},
-	    {proxy_gsn, ?PROXY_GSN_IPv6},
 	    {final_gsn, ?FINAL_GSN_IPv6},
-	    {final_gsn_2, ?FINAL_GSN2_IPv6},
 	    {sgw_u_sx, ?SGW_U_SX_IPv6},
 	    {pgw_u01_sx, ?PGW_U01_SX_IPv6},
-	    {pgw_u02_sx, ?PGW_U02_SX_IPv6},
-	    {tdf_u_sx, ?TDF_U_SX_IPv6}],
+	    {pgw_u02_sx, ?PGW_U02_SX_IPv6}],
     merge_config(Opts, Config).
 
 
@@ -224,7 +215,7 @@ init_app(App, Fun, Cfg) ->
 
 ergw_core_init(Config) ->
     Init = [node, wait_till_running, path_management, node_selection,
-	    sockets, upf_nodes, handlers, ip_pools, apns, charging, proxy_map],
+	    sockets, upf_nodes, handlers, ip_pools, apns, charging],
     lists:foreach(ergw_core_init(_, Config), Init).
 
 ergw_core_init(node, #{node := Node}) ->
@@ -249,8 +240,6 @@ ergw_core_init(apns, #{apns := APNs}) ->
 ergw_core_init(charging, #{charging := Charging}) ->
     Init = [rules, rulebase, profile],
     lists:foreach(ergw_charging_init(_, Charging), Init);
-ergw_core_init(proxy_map, #{proxy_map := Map}) ->
-    ok = ergw_core:setopts(proxy_map, Map);
 ergw_core_init(_, _) ->
     ok.
 
@@ -327,8 +316,6 @@ validate_option(apns, Value) when ?is_opts(Value) ->
     ergw_core_config:validate_options(fun ergw_apn:validate_options/1, Value, []);
 validate_option(charging, Opts) ->
     ergw_core_config:validate_options(fun validate_charging_options/2, Opts, []);
-validate_option(proxy_map, Opts) ->
-    gtp_proxy_ds:validate_options(Opts);
 validate_option(path_management, Opts) when ?is_opts(Opts) ->
     gtp_path:validate_options(Opts);
 validate_option(metrics, Opts) ->
@@ -357,7 +344,7 @@ validate_charging_options(rulebase, RuleBase) ->
 
 meck_modules() ->
     [ergw_sx_socket, ergw_gtp_c_socket, ergw_aaa_session, ergw_gsn_lib,
-     ergw_pfcp_context, ergw_proxy_lib, gtp_context].
+     ergw_pfcp_context, gtp_context].
 
 meck_init_hut_handle_request(Hut) ->
     meck:expect(Hut, handle_request,

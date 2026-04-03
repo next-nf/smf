@@ -123,10 +123,6 @@
 				     {'v2', boolean()}]
 	 }).
 
--record(tdf_ctx, {
-	  ms_ip                  :: #ue_ip{}
-	 }).
-
 -record(gtp_socket_info, {
 	  vrf              :: term(),
 	  ip               :: inet:ip_address()
@@ -143,15 +139,6 @@
 	  type		:: atom(),
 	  arrival_ts    :: integer()
 	 }).
-
--record(proxy_request, {
-	  direction	:: atom(),
-	  request	:: #request{},
-	  lease         :: reference(),
-	  seq_no	:: non_neg_integer(),
-	  right_tunnel	:: #tunnel{},
-	  new_peer	:: boolean()
-}).
 
 -record(vrf, {
 	  name                   :: atom(),

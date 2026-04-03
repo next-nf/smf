@@ -46,26 +46,20 @@
 -define(LOCALHOST_IPv4, {127,0,0,1}).
 -define(CLIENT_IP_IPv4, {127,127,127,127}).
 -define(TEST_GSN_IPv4, ?LOCALHOST_IPv4).
--define(PROXY_GSN_IPv4, {127,0,100,1}).
 -define(FINAL_GSN_IPv4, {127,0,200,1}).
--define(FINAL_GSN2_IPv4, {127,0,200,2}).
 
 -define(SGW_U_SX_IPv4, {127,0,100,1}).
 -define(PGW_U01_SX_IPv4, {127,0,200,1}).
 -define(PGW_U02_SX_IPv4, {127,0,200,2}).
--define(TDF_U_SX_IPv4, {127,0,210,1}).
 
 -define(LOCALHOST_IPv6, {0,0,0,0,0,0,0,1}).
 -define(CLIENT_IP_IPv6, {16#fd96, 16#dcd2, 16#efdb, 16#41c3, 0, 0, 16#100, 1}).
 -define(TEST_GSN_IPv6,  {16#fd96, 16#dcd2, 16#efdb, 16#41c3, 0, 0, 16#20, 1}).
--define(PROXY_GSN_IPv6, {16#fd96, 16#dcd2, 16#efdb, 16#41c3, 0, 0, 16#200, 1}).
 -define(FINAL_GSN_IPv6, {16#fd96, 16#dcd2, 16#efdb, 16#41c3, 0, 0, 16#300, 1}).
--define(FINAL_GSN2_IPv6, {16#fd96, 16#dcd2, 16#efdb, 16#41c3, 0, 0, 16#400, 1}).
 
 -define(SGW_U_SX_IPv6, {16#fd96, 16#dcd2, 16#efdb, 16#41c3, 0, 0, 16#10, 1}).
 -define(PGW_U01_SX_IPv6, {16#fd96, 16#dcd2, 16#efdb, 16#41c3, 0, 0, 16#10, 2}).
 -define(PGW_U02_SX_IPv6, {16#fd96, 16#dcd2, 16#efdb, 16#41c3, 0, 0, 16#10, 3}).
--define(TDF_U_SX_IPv6, {16#fd96, 16#dcd2, 16#efdb, 16#41c3, 0, 0, 16#10, 4}).
 
 -define('APN-EXAMPLE', [<<"example">>, <<"net">>]).
 -define('APN-ExAmPlE', [<<"eXaMpLe">>, <<"net">>]).
@@ -73,10 +67,6 @@
 -define('APN-LB-1', [<<"lb-1">>]).
 -define('IMSI', <<"111111111111111">>).
 -define('MSISDN', <<"440000000000">>).
-
--define('APN-PROXY',   [<<"proxy">>, <<"example">>, <<"net">>]).
--define('PROXY-IMSI', <<"222222222222222">>).
--define('PROXY-MSISDN', <<"491111111111">>).
 
 -define('IMEISV', <<"3520990017614823">>).			%% found on wikipedia
 

@@ -88,13 +88,11 @@ lib_init_per_group(Config0) ->
 	true ->
 	    {ok, _} = ergw_test_sx_up:start('pgw-u01', proplists:get_value(pgw_u01_sx, Config)),
 	    {ok, _} = ergw_test_sx_up:start('pgw-u02', proplists:get_value(pgw_u02_sx, Config)),
-	    {ok, _} = ergw_test_sx_up:start('sgw-u', proplists:get_value(sgw_u_sx, Config)),
-	    {ok, _} = ergw_test_sx_up:start('tdf-u', proplists:get_value(tdf_u_sx, Config));
+	    {ok, _} = ergw_test_sx_up:start('sgw-u', proplists:get_value(sgw_u_sx, Config));
 	_ ->
 	    ok = ergw_test_sx_up:stop('pgw-u01'),
 	    ok = ergw_test_sx_up:stop('pgw-u02'),
-	    ok = ergw_test_sx_up:stop('sgw-u'),
-	    ok = ergw_test_sx_up:stop('tdf-u')
+	    ok = ergw_test_sx_up:stop('sgw-u')
     end,
 
     Dir = ?config(data_dir, Config),
@@ -114,7 +112,6 @@ lib_end_per_group(Config) ->
     ok = ergw_test_sx_up:stop('pgw-u01'),
     ok = ergw_test_sx_up:stop('pgw-u02'),
     ok = ergw_test_sx_up:stop('sgw-u'),
-    ok = ergw_test_sx_up:stop('tdf-u'),
     ?config(table_owner, Config) ! stop,
     clear_app_env(),
     ok.
@@ -132,26 +129,22 @@ group_config(ipv4, Config) ->
 	    {ue_ip, ?LOCALHOST_IPv4},
 	    {client_ip, ?CLIENT_IP_IPv4},
 	    {test_gsn, ?TEST_GSN_IPv4},
-	    {proxy_gsn, ?PROXY_GSN_IPv4},
 	    {final_gsn, ?FINAL_GSN_IPv4},
 	    {final_gsn_2, ?FINAL_GSN2_IPv4},
 	    {sgw_u_sx, ?SGW_U_SX_IPv4},
 	    {pgw_u01_sx, ?PGW_U01_SX_IPv4},
-	    {pgw_u02_sx, ?PGW_U02_SX_IPv4},
-	    {tdf_u_sx, ?TDF_U_SX_IPv4}],
+	    {pgw_u02_sx, ?PGW_U02_SX_IPv4}],
     merge_config(Opts, Config);
 group_config(ipv6, Config) ->
     Opts = [{localhost, ?LOCALHOST_IPv6},
 	    {ue_ip, ?LOCALHOST_IPv6},
 	    {client_ip, ?CLIENT_IP_IPv6},
 	    {test_gsn, ?TEST_GSN_IPv6},
-	    {proxy_gsn, ?PROXY_GSN_IPv6},
 	    {final_gsn, ?FINAL_GSN_IPv6},
 	    {final_gsn_2, ?FINAL_GSN2_IPv6},
 	    {sgw_u_sx, ?SGW_U_SX_IPv6},
 	    {pgw_u01_sx, ?PGW_U01_SX_IPv6},
-	    {pgw_u02_sx, ?PGW_U02_SX_IPv6},
-	    {tdf_u_sx, ?TDF_U_SX_IPv6}],
+	    {pgw_u02_sx, ?PGW_U02_SX_IPv6}],
     merge_config(Opts, Config).
 
 %%%===================================================================
@@ -160,7 +153,7 @@ group_config(ipv6, Config) ->
 
 meck_modules() ->
     [ergw_sx_socket, ergw_gtp_c_socket, ergw_aaa_session, ergw_gsn_lib,
-     ergw_pfcp_context, ergw_proxy_lib, gtp_context].
+     ergw_pfcp_context, gtp_context].
 
 meck_init_hut_handle_request(Hut) ->
     meck:expect(Hut, handle_request,

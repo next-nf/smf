@@ -94,7 +94,6 @@ init_per_suite(Config0) ->
     {ok, _} = ergw_test_sx_up:start('pgw-u01', proplists:get_value(pgw_u01_sx, Config)),
     {ok, _} = ergw_test_sx_up:start('pgw-u02', proplists:get_value(pgw_u02_sx, Config)),
     {ok, _} = ergw_test_sx_up:start('sgw-u', proplists:get_value(sgw_u_sx, Config)),
-    {ok, _} = ergw_test_sx_up:start('tdf-u', proplists:get_value(tdf_u_sx, Config)),
 
     Config.
 
@@ -103,7 +102,6 @@ end_per_suite(Config) ->
     ok = ergw_test_sx_up:stop('pgw-u01'),
     ok = ergw_test_sx_up:stop('pgw-u02'),
     ok = ergw_test_sx_up:stop('sgw-u'),
-    ok = ergw_test_sx_up:stop('tdf-u'),
     ?config(table_owner, Config) ! stop,
     [application:stop(App) || App <- [ergw_core, ergw_aaa, ergw_cluster, ergw]],
     inets:stop(),

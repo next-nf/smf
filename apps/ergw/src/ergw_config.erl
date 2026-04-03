@@ -137,7 +137,7 @@ ergw_sbi_client_init(Opts) ->
 
 ergw_core_init(Config) ->
     Init = [node, aaa, wait_till_running, path_management, gtp_peers, node_selection,
-	    sockets, upf_nodes, handlers, ip_pools, apns, charging, proxy_map,
+	    sockets, upf_nodes, handlers, ip_pools, apns, charging,
 	    http_api, sbi_client],
     lists:foreach(ergw_core_init(_, Config), Init).
 
@@ -181,8 +181,6 @@ ergw_core_init(apns, #{apns := APNs}) ->
 ergw_core_init(charging, #{charging := Charging}) ->
     Init = [rules, rulebase, profile],
     lists:foreach(ergw_charging_init(_, Charging), Init);
-ergw_core_init(proxy_map, #{proxy_map := Map}) ->
-    ok = ergw_core:setopts(proxy_map, Map);
 ergw_core_init(http_api, #{http_api := Opts}) ->
     ergw_http_api:init(Opts);
 ergw_core_init(_K, _) ->
@@ -225,7 +223,6 @@ config_raw_meta() ->
       upf_nodes       => config_meta_nodes(),
       path_management => config_meta_path_management(),
       gtp_peers       => config_meta_gtp_peers(),
-      proxy_map       => config_meta_proxy_map(),
       sockets         => config_meta_socket(),
       teid            => config_meta_tei_mngr(),
       aaa             => config_meta_aaa(),
@@ -337,13 +334,7 @@ delegate_handler(Map) when is_map(Map) ->
 	    pgw_s5s8 ->
 		config_meta_gtp_context();
 	    saegw_s11 ->
-		config_meta_gtp_context();
-	    ggsn_gn_proxy ->
-		config_meta_gtp_proxy_context();
-	    pgw_s5s8_proxy ->
-		config_meta_gtp_proxy_context();
-	    tdf ->
-		config_meta_tdf()
+		config_meta_gtp_context()
 	end,
     normalize_meta(Meta).
 
@@ -367,28 +358,6 @@ config_meta_aaa_opts() ->
 config_meta_aaa_attr_mapping() ->
     #{default            => passthrough,
       from_protocol_opts => boolean}.
-
-config_meta_gtp_proxy_context() ->
-    Context = #{proxy_sockets => {list, binary},
-		node_selection => {list, binary}},
-    #{handler           => atom,
-      protocol          => atom,
-      sockets           => {list, binary},
-      node_selection    => {list, binary},
-      aaa               => config_meta_aaa_opts(),
-      proxy_data_source => module,
-
-      proxy_sockets     => {list, binary},
-      contexts          => {klist, {name, binary}, Context}
-     }.
-
-config_meta_tdf() ->
-    #{handler        => atom,
-      protocol       => atom,
-      node_selection => {list, binary},
-      nodes          => {list, binary},
-      apn            => apn
-     }.
 
 config_meta_http_api() ->
     #{enabled       => boolean,
@@ -535,12 +504,6 @@ config_meta_path_management() ->
 
 config_meta_gtp_peers() ->
     {klist, {ip, ip_address}, config_meta_path_management()}.
-
-config_meta_proxy_map() ->
-    To = #{imsi => binary, msisdn => binary},
-    IMSI = {kvlist, {from, binary}, {to, To}},
-    APN = {kvlist, {from, apn}, {to, apn}},
-    #{imsi => IMSI, apn => APN}.
 
 config_meta_socket() ->
     {klist, {name, binary}, {delegate, fun delegate_socket_type/1}}.

@@ -14,7 +14,7 @@
 
 %% API
 -export([request_connect/3, request_connect/5, wait_connect/1,
-	 attach/1, attach_tdf/2, notify_up/2,
+	 attach/1, notify_up/2,
 	 set_defaults/1, set_required_upff/1, add_sx_node/2]).
 -export([start_link/5, send/4, call/2,
 	 handle_request/3, response/3]).
@@ -58,7 +58,6 @@
 	       dp,
 	       ue_ip_pools,
 	       vrfs,
-	       tdf,
 	       notify_up = []    :: [{pid(), reference()}]}).
 
 -ifdef(TEST).
@@ -85,10 +84,6 @@
 attach(Node) when is_pid(Node) ->
     monitor(process, Node),
     gen_statem:call(Node, attach).
-
-%% attach_tdf/2
-attach_tdf(Node, Tdf) when is_pid(Node) ->
-    gen_statem:call(Node, {attach_tdf, Tdf}).
 
 start_link(Node, NodeSelect, IP4, IP6, NotifyUp) ->
     proc_lib:start_link(?MODULE, init, [[self(), Node, NodeSelect, IP4, IP6, NotifyUp]]).
@@ -199,7 +194,7 @@ connect_sx_node(Node, #{node_selection := NodeSelect} = Opts) ->
 validate_node_vrf_option(features, Features)
   when length(Features) /= 0 ->
     Rem = lists:usort(Features) --
-	['Access', 'Core', 'SGi-LAN', 'CP-Function', 'LI Function', 'TDF-Source'],
+	['Access', 'Core', 'SGi-LAN', 'CP-Function', 'LI Function'],
     if Rem /= [] ->
 	    erlang:error(badarg, [features, Features]);
        true ->
@@ -380,7 +375,6 @@ init([Parent, Node, NodeSelect, IP4, IP6, NotifyUp]) ->
 		  cp_socket = Socket,
 		  cp_info = SockInfo,
 		  cp = CP,
-		  tdf = #{},
 		  notify_up = NotifyUp
 		 },
     Data = init_node_cfg(Data0),
@@ -434,9 +428,6 @@ handle_event({call, _From}, {?TestCmdTag, wait4nodeup}, _, _) ->
 
 handle_event({call, From}, {?TestCmdTag, stop}, _, Data) ->
     {stop_and_reply, normal, [{reply, From, ok}], Data};
-
-handle_event({call, From}, {attach_tdf, Tdf}, _, Data) ->
-    {keep_state, Data#data{tdf = Tdf}, [{reply, From, ok}]};
 
 handle_event({call, From}, _Evt, dead, _Data) ->
     ?LOG(warning, "Call from ~p, ~p failed with {error, dead}", [From, _Evt]),
@@ -605,43 +596,6 @@ handle_event(cast, {handle_pdu, _Request, #gtp{type=g_pdu, ie = PDU}}, _, Data) 
     end,
     keep_state_and_data;
 
-handle_event({call, From},
-	     {sx, #pfcp{
-		     type = session_report_request,
-		     ie =
-			 #{report_type := #report_type{usar = 1},
-			   usage_report_srr :=
-			       #usage_report_srr{
-				  group =
-				      #{urr_id := #urr_id{id = Id},
-					usage_report_trigger :=
-					    #usage_report_trigger{start = 1},
-					ue_ip_address :=
-					    #ue_ip_address{
-					       type = src,
-					       ipv4 = IP4,
-					       ipv6 = IP6}
-				       }
-				 }
-			  }
-		    }
-	     },
-	     _State,
-	     #data{pfcp_ctx = #pfcp_ctx{seid = #seid{dp = SEID}} = PCtx, tdf = Tdf}) ->
-    {ok, {tdf, VRF}} = ergw_pfcp:find_urr_by_id(Id, PCtx),
-    ?LOG(debug, "Sx Node TDF Report on ~p for UE IPv4 ~s IPv6 ~s",
-         [VRF, bin2ntoa(IP4), bin2ntoa(IP6)]),
-
-    Handler = maps:get(handler, Tdf, tdf),
-    try
-	Handler:unsolicited_report(self(), VRF, IP4, IP6, Tdf)
-    catch
-	Class:Error:ST ->
-	    ?LOG(error, "Unsolicited Report Handler '~p' failed with ~p:~p~n~p",
-			[Handler, Class, Error, ST])
-    end,
-
-    {keep_state_and_data, [{reply, From, {ok, SEID}}]};
 handle_event({call, From}, {sx, Report}, _State,
 	     #data{pfcp_ctx = #pfcp_ctx{seid = #seid{dp = SEID}}}) ->
     ?LOG(error, "Sx Node Session Report unexpected: ~p", [Report]),
@@ -1000,40 +954,6 @@ generate_per_feature_pfcp_rule('Access', #vrf{name = Name} = VRF, Bearer, PCtx0)
     ergw_pfcp_rules:add(
       [{pdr, PdrId, PDR},
        {far, FarId, FAR}], PCtx);
-generate_per_feature_pfcp_rule('TDF-Source', #vrf{name = Name} = VRF, _Bearer, PCtx0) ->
-    Key = {tdf, Name},
-    {PdrId, PCtx1} = ergw_pfcp:get_id(pdr, Key, PCtx0),
-    {FarId, PCtx2} = ergw_pfcp:get_id(far, Key, PCtx1),
-    {UrrId, PCtx} = ergw_pfcp:get_urr_id(Key, [], Key, PCtx2),
-
-    %% detect traffic from Access interface (TDF)
-    PDI = #pdi{
-	     group =
-		 [#source_interface{interface = 'Access'},
-		  ergw_pfcp:network_instance(VRF),
-		  %% WildCard SDF
-		  #sdf_filter{
-		     flow_description =
-			 <<"permit out ip from any to any">>}
-		 ]},
-    PDR = [#pdr_id{id = PdrId},
-	   #precedence{precedence = 65000},
-	   PDI,
-	   #far_id{id = FarId},
-	   #urr_id{id = UrrId}],
-    %% default drop rule for TDF
-    FAR = [#far_id{id = FarId},
-	   #apply_action{drop = 1}],
-    %% Start of Traffic report rule
-    URR = [#urr_id{id = UrrId},
-	   #measurement_method{event = 1},
-	   #reporting_triggers{start_of_traffic = 1},
-	   #time_quota{quota = 60}],
-
-    ergw_pfcp_rules:add(
-      [{pdr, PdrId, PDR},
-       {far, FarId, FAR},
-       {urr, UrrId, URR}], PCtx);
 generate_per_feature_pfcp_rule(_, _VRF, _DpGtpIP, Acc) ->
     Acc.
 

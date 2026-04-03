@@ -278,8 +278,6 @@ translate_option(charging, Opts)
 		  {Profiles, Rules, RuleBases}
 	  end, {#{}, #{}, #{}}, C0),
     #{profiles => P, rules => R, rulebase => RB};
-translate_option(proxy_map, Opts) ->
-    gtp_proxy_ds_translate_options(Opts);
 translate_option(path_management, Opts) when ?is_opts(Opts) ->
     gtp_path_translate_options(Opts);
 translate_option(teid, Value) ->
@@ -299,7 +297,6 @@ translate_option(Opt, Value)
        Opt == apns;
        Opt == http_api;
        Opt == charging;
-       Opt == proxy_map;
        Opt == path_management ->
     throw({error, {options, {Opt, Value}}});
 translate_option(_Opt, Value) ->
@@ -341,16 +338,10 @@ translate_handlers_option(Opt, Values0)
     case get_opt(handler, Values) of
 	ggsn_gn ->
 	    ggsn_gn_translate_options(Values);
-	ggsn_gn_proxy ->
-	    ggsn_gn_proxy_translate_options(Values);
 	pgw_s5s8 ->
 	    pgw_s5s8_translate_options(Values);
-	pgw_s5s8_proxy ->
-	    pgw_s5s8_proxy_translate_options(Values);
 	saegw_s11 ->
 	    saegw_s11_translate_options(Values);
-	tdf ->
-	    tdf_translate_options(Values);
 	_ ->
 	    throw({error, {options, {Opt, Values}}})
     end;
@@ -370,7 +361,7 @@ translate_node_selection_option(Opt, Values) ->
 translate_node_vrf_option(features, Features)
   when is_list(Features), length(Features) /= 0 ->
     Rem = lists:usort(Features) --
-	['Access', 'Core', 'SGi-LAN', 'CP-Function', 'LI Function', 'TDF-Source'],
+	['Access', 'Core', 'SGi-LAN', 'CP-Function', 'LI Function'],
     if Rem /= [] ->
 	    throw({error, {options, {features, Features}}});
        true ->
@@ -856,31 +847,6 @@ ergw_charging_translate_charging_options(Key, Opts) ->
     throw({error, {options, {charging, {Key, Opts}}}}).
 
 
-gtp_proxy_ds_translate_options(Values) ->
-    translate_options(fun gtp_proxy_ds_translate_option/2, Values, [], map).
-
-gtp_proxy_ds_translate_imsi(From, To) when is_binary(From), is_binary(To) ->
-    To;
-gtp_proxy_ds_translate_imsi(From, {IMSI, MSISDN} = To)
-  when is_binary(From), is_binary(IMSI), is_binary(MSISDN) ->
-    To;
-gtp_proxy_ds_translate_imsi(From, To) ->
-    throw({error, {options, {From, To}}}).
-
-gtp_proxy_ds_translate_apn([From|_], [To|_] = APN) when is_binary(From), is_binary(To) ->
-    APN;
-gtp_proxy_ds_translate_apn(From, To) ->
-    throw({error, {options, {From, To}}}).
-
-gtp_proxy_ds_translate_option(imsi, Opts) when ?non_empty_opts(Opts) ->
-    check_unique_keys(imsi, Opts),
-    translate_options(fun gtp_proxy_ds_translate_imsi/2, Opts, [], map);
-gtp_proxy_ds_translate_option(apn, Opts) when ?non_empty_opts(Opts) ->
-    check_unique_keys(apn, Opts),
-    translate_options(fun gtp_proxy_ds_translate_apn/2, Opts, [], map);
-gtp_proxy_ds_translate_option(Opt, Value) ->
-    throw({error, {options, {Opt, Value}}}).
-
 -define(PathDefaults, [
     {t3, 10 * 1000},                  % echo retry interval
     {n3,  5},                         % echo retry count
@@ -1140,47 +1106,6 @@ gtp_context_translate_aaa_attr_option('Password', default, Default, Attr) ->
 gtp_context_translate_aaa_attr_option(Key, Setting, Value, _Attr) ->
     throw({error, {options, {aaa_attr, {Key, Setting, Value}}}}).
 
--define(ProxyDefaults, [{proxy_data_source, gtp_proxy_ds},
-			{proxy_sockets,     []},
-			{contexts,          []}]).
-
--define(ProxyContextDefaults, []).
-
-ergw_proxy_lib_translate_options(Fun, Opts, Defaults) ->
-    gtp_context_translate_options(Fun, Opts, Defaults ++ ?ProxyDefaults).
-
-ergw_proxy_lib_translate_option(proxy_data_source, Value) ->
-    case code:ensure_loaded(Value) of
-	{module, _} ->
-	    ok;
-	_ ->
-	    throw({error, {options, {proxy_data_source, Value}}})
-    end,
-    Value;
-ergw_proxy_lib_translate_option(Opt, Value)
-  when Opt == proxy_sockets ->
-    ergw_proxy_lib_translate_context_option(Opt, Value);
-ergw_proxy_lib_translate_option(contexts, Values) when is_list(Values); is_map(Values) ->
-    opts_fold(fun ergw_proxy_lib_translate_context/3, #{}, Values);
-ergw_proxy_lib_translate_option(Opt, Value) ->
-    gtp_context_translate_option(Opt, Value).
-
-ergw_proxy_lib_translate_context_option(proxy_sockets, Value) when is_list(Value), Value /= [] ->
-    Value;
-ergw_proxy_lib_translate_context_option(node_selection, [S|_] = Value)
-  when is_atom(S) ->
-    Value;
-ergw_proxy_lib_translate_context_option(Opt, Value) ->
-    throw({error, {options, {Opt, Value}}}).
-
-ergw_proxy_lib_translate_context(Name, Opts0, Acc)
-  when is_binary(Name) andalso ?is_opts(Opts0) ->
-    Opts = translate_options(
-	     fun ergw_proxy_lib_translate_context_option/2, Opts0, ?ProxyContextDefaults, map),
-    Acc#{Name => Opts};
-ergw_proxy_lib_translate_context(Name, Opts, _Acc) ->
-    throw({error, {options, {contexts, {Name, Opts}}}}).
-
 ggsn_gn_translate_options(Options) ->
     gtp_context_translate_options(fun ggsn_gn_translate_option/2, Options, []).
 
@@ -1198,41 +1123,6 @@ saegw_s11_translate_options(Options) ->
 
 saegw_s11_translate_option(Opt, Value) ->
     gtp_context_translate_option(Opt, Value).
-
-ggsn_gn_proxy_translate_options(Opts) ->
-    ergw_proxy_lib_translate_options(fun ggsn_gn_proxy_translate_option/2, Opts, ?ProxyContextDefaults).
-
-ggsn_gn_proxy_translate_option(Opt, Value) ->
-    ergw_proxy_lib_translate_option(Opt, Value).
-
-pgw_s5s8_proxy_translate_options(Opts) ->
-    ergw_proxy_lib_translate_options(fun pgw_s5s8_proxy_translate_option/2, Opts, ?ProxyContextDefaults).
-
-pgw_s5s8_proxy_translate_option(Opt, Value) ->
-    ergw_proxy_lib_translate_option(Opt, Value).
-
--define(TdfHandlerDefaults, [{node_selection, undefined},
-			  {nodes, undefined},
-			  {apn, undefined}]).
-
-tdf_translate_options(Options) ->
-    translate_options(fun tdf_translate_option/2, Options, ?TdfHandlerDefaults, map).
-
-tdf_translate_option(protocol, ip) ->
-    ip;
-tdf_translate_option(handler, Value) when is_atom(Value) ->
-    Value;
-tdf_translate_option(node_selection, [S|_] = Value)
-  when is_atom(S) ->
-    Value;
-tdf_translate_option(nodes, [S|_] = Value)
-  when is_list(S) ->
-    Value;
-tdf_translate_option(apn, APN)
-  when is_list(APN) ->
-    translate_apn_name(APN);
-tdf_translate_option(Opt, Value) ->
-    throw({error, {options, {Opt, Value}}}).
 
 %%%===================================================================
 %%% ergw_aaa
