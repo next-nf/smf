@@ -1643,108 +1643,66 @@ simple_session_request(Config) ->
     ?LOG(debug, "URR: ~s", [pfcp_packet:pretty_print([URR])]),
 
     ?match(
-       [#create_pdr{
-	   group =
-	       #{pdr_id := #pdr_id{id = _},
-		 precedence := #precedence{precedence = 100},
-		 pdi :=
-		     #pdi{
-			group =
-			    #{network_instance :=
-				  #network_instance{instance = <<3, "sgi">>},
-			      sdf_filter :=
-				  #sdf_filter{
-				     flow_description =
-					 <<"permit out ip from any to assigned">>},
-			      source_interface :=
-				  #source_interface{interface='SGi-LAN'},
-			      ue_ip_address := #ue_ip_address{type = dst}
-			     }
-		       },
-		 far_id := #far_id{id = _},
-		 urr_id := [#urr_id{id = _}|_]
-		}
-	  },
-	#create_pdr{
-	   group =
-	       #{
-		 pdr_id := #pdr_id{id = _},
-		 precedence := #precedence{precedence = 100},
-		 pdi :=
-		     #pdi{
-			group =
-			    #{f_teid := #f_teid{teid = choose},
-			      network_instance :=
-				  #network_instance{instance = <<3, "irx">>},
-			      sdf_filter :=
-				  #sdf_filter{
-				     flow_description =
-					 <<"permit out ip from any to assigned">>},
-			      source_interface :=
-				  #source_interface{interface='Access'},
-			      ue_ip_address := #ue_ip_address{type = src}
-			     }
-		       },
-		 far_id := #far_id{id = _},
-		 urr_id := [#urr_id{id = _}|_]
-		}
-	  }], PDRs),
+       [#{pdr_id := #pdr_id{id = _},
+	  precedence := #precedence{precedence = 100},
+	  pdi :=
+	      #{network_instance := <<3, "sgi">>,
+		sdf_filter :=
+		    #sdf_filter{
+		       flow_description =
+			   <<"permit out ip from any to assigned">>},
+		source_interface :=
+		    #source_interface{interface='SGi-LAN'},
+		ue_ip_address := #ue_ip_address{type = dst}
+	       },
+	  far_id := #far_id{id = _},
+	  urr_id := [#urr_id{id = _}|_]
+	 },
+	#{pdr_id := #pdr_id{id = _},
+	  precedence := #precedence{precedence = 100},
+	  pdi :=
+	      #{f_teid := #f_teid{teid = choose},
+		network_instance := <<3, "irx">>,
+		sdf_filter :=
+		    #sdf_filter{
+		       flow_description =
+			   <<"permit out ip from any to assigned">>},
+		source_interface :=
+		    #source_interface{interface='Access'},
+		ue_ip_address := #ue_ip_address{type = src}
+	       },
+	  far_id := #far_id{id = _},
+	  urr_id := [#urr_id{id = _}|_]
+	 }], PDRs),
 
     ?match(
-       [#create_far{
-	   group =
-	       #{far_id := #far_id{id = _},
-		 apply_action :=
-		     #apply_action{forw = 1},
-		 forwarding_parameters :=
-		     #forwarding_parameters{
-			group =
-			    #{destination_interface :=
-				  #destination_interface{interface='Access'},
-			      network_instance :=
-				  #network_instance{instance = <<3, "irx">>}
-			     }
-		       }
-		}
-	  },
-	#create_far{
-	   group =
-	       #{far_id := #far_id{id = _},
-		 apply_action :=
-		     #apply_action{forw = 1},
-		 forwarding_parameters :=
-		     #forwarding_parameters{
-			group =
-			    #{destination_interface :=
-				  #destination_interface{interface='SGi-LAN'},
-			      network_instance :=
-				  #network_instance{instance = <<3, "sgi">>}
-			     }
-		       }
-		}
-	  }], FARs),
+       [#{far_id := #far_id{id = _},
+	  apply_action := #{'FORW' := _},
+	  forwarding_parameters :=
+	      #{destination_interface :=
+		    #destination_interface{interface='Access'},
+		network_instance := <<3, "irx">>}
+	 },
+	#{far_id := #far_id{id = _},
+	  apply_action := #{'FORW' := _},
+	  forwarding_parameters :=
+	      #{destination_interface :=
+		    #destination_interface{interface='SGi-LAN'},
+		network_instance := <<3, "sgi">>}
+	 }], FARs),
 
     ?match(
-       [#create_urr{
-	   group =
-	       #{urr_id := #urr_id{id = _},
-		 measurement_method :=
-		     #measurement_method{volum = 1, durat = 1},
-		reporting_triggers :=
-		    #reporting_triggers{}
-	       }
-	  },
-	#create_urr{
-	   group =
-	       #{urr_id := #urr_id{id = _},
-		 measurement_method :=
-		     #measurement_method{volum = 1}
-		 %% measurement_period :=
-		 %%     #measurement_period{period = 600},
-		 %% reporting_triggers :=
-		 %%     #reporting_triggers{periodic_reporting=1}
-		}
-	  }
+       [#{urr_id := #urr_id{id = _},
+	  measurement_method := #{'VOLUM' := _, 'DURAT' := _},
+	  reporting_triggers := _
+	 },
+	#{urr_id := #urr_id{id = _},
+	  measurement_method := #{'VOLUM' := _}
+	  %% measurement_period :=
+	  %%     #measurement_period{period = 600},
+	  %% reporting_triggers :=
+	  %%     #reporting_triggers{periodic_reporting=1}
+	 }
        ], URR),
 
     meck_validate(Config),
@@ -1785,12 +1743,10 @@ simple_session_request_cp_teid(Config) ->
     ?LOG(debug, "PDRs: ~s", [pfcp_packet:pretty_print(PDRs)]),
 
     ?match(
-       [#create_pdr{},
-	#create_pdr{group =
-			#{pdi :=
-			      #pdi{group =
-				       #{f_teid :=
-					     #f_teid{choose_id = undefined}}}}}],
+       [_,
+	#{pdi :=
+	      #{f_teid :=
+		    #f_teid{choose_id = undefined}}}],
        PDRs),
 
     meck_validate(Config),
@@ -1972,33 +1928,19 @@ ipv6_bearer_request(Config) ->
     #{create_far := FAR0,
       create_pdr := PDR0} = SER#pfcp.ie,
     FAR = lists:filter(
-	    fun(#create_far{
-		   group =
-		       #{forwarding_parameters :=
-			     #forwarding_parameters{
-				group =
-				    #{destination_interface :=
-					  #destination_interface{interface = 'CP-function'}
-				     }
-			       }
-			 }}) -> true;
+	    fun(#{forwarding_parameters :=
+		      #{destination_interface :=
+			    #destination_interface{interface = 'CP-function'}}}) -> true;
 	       (_) -> false
 	    end, FAR0),
     PDR = lists:filter(
-	    fun(#create_pdr{
-		   group =
-		       #{pdi :=
-			     #pdi{
-				group =
-				    #{source_interface :=
-					  #source_interface{interface = 'Access'},
-				      sdf_filter :=
-					  #sdf_filter{
-					     flow_description =
-						 <<"permit out 58 from ff00::/8 to assigned">>}
-				     }
-			       }
-			}}) -> true;
+	    fun(#{pdi :=
+		      #{source_interface :=
+			    #source_interface{interface = 'Access'},
+			sdf_filter :=
+			    #sdf_filter{
+			       flow_description =
+				   <<"permit out 58 from ff00::/8 to assigned">>}}}) -> true;
 	       (_) -> false
 	    end, PDR0),
     ?match([_], PDR),
@@ -2234,12 +2176,9 @@ modify_bearer_request_tei_update(Config) ->
 		 end, ergw_test_sx_up:history('pgw-u01')),
     SMR = pfcp_packet:to_map(SMR0),
     #{update_far :=
-	  #update_far{
-	     group =
-		 #{far_id := _,
-		   update_forwarding_parameters :=
-		       #update_forwarding_parameters{group = UFP}}}} = SMR#pfcp.ie,
-    ?match(#sxsmreq_flags{sndem = 1}, maps:get(sxsmreq_flags, UFP, undefined)),
+	  #{far_id := _,
+	    update_forwarding_parameters := UFP}} = SMR#pfcp.ie,
+    ?match(#{'SNDEM' := _}, maps:get(sxsmreq_flags, UFP, undefined)),
 
     #gtpc{local_data_tei = NewDataTEI} = GtpC2,
     ?match(#outer_header_creation{teid = NewDataTEI},
@@ -2619,12 +2558,9 @@ interop_sgsn_to_sgw(Config) ->
 		 end, ergw_test_sx_up:history('pgw-u01')),
     SMR = pfcp_packet:to_map(SMR0),
     #{update_far :=
-	  #update_far{
-	     group =
-		 #{update_forwarding_parameters :=
-		       #update_forwarding_parameters{group = UFP}}}} = SMR#pfcp.ie,
-    ?match(#sxsmreq_flags{sndem = 0},
-	   maps:get(sxsmreq_flags, UFP, #sxsmreq_flags{sndem = 0})),
+	  #{update_forwarding_parameters :=
+		UFP}} = SMR#pfcp.ie,
+    ?match(false, maps:is_key('SNDEM', maps:get(sxsmreq_flags, UFP, #{}))),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4contexts(?TIMEOUT),
@@ -2672,12 +2608,9 @@ interop_sgw_to_sgsn(Config) ->
 		 end, ergw_test_sx_up:history('pgw-u01')),
     SMR = pfcp_packet:to_map(SMR0),
     #{update_far :=
-	  #update_far{
-	     group =
-		 #{update_forwarding_parameters :=
-		       #update_forwarding_parameters{group = UFP}}}} = SMR#pfcp.ie,
-    ?match(#sxsmreq_flags{sndem = 0},
-	   maps:get(sxsmreq_flags, UFP, #sxsmreq_flags{sndem = 0})),
+	  #{update_forwarding_parameters :=
+		UFP}} = SMR#pfcp.ie,
+    ?match(false, maps:is_key('SNDEM', maps:get(sxsmreq_flags, UFP, #{}))),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4contexts(?TIMEOUT),
@@ -2855,28 +2788,18 @@ sx_cp_to_up_forward(Config) ->
     SER = pfcp_packet:to_map(SER0),
     #{create_far := FAR,
       create_pdr := PDR} = SER#pfcp.ie,
-    ?match(#create_far{
-	      group =
-		  #{forwarding_parameters :=
-			#forwarding_parameters{
-			   group =
-			       #{network_instance :=
-				     #network_instance{instance = <<3, "irx">>},
-				 destination_interface :=
-				     #destination_interface{interface = 'Access'}}},
-		    apply_action := #apply_action{forw = 1}}}, FAR),
-    ?match(#create_pdr{
-	      group =
-		  #{pdi :=
-			#pdi{
-			   group =
-			       #{source_interface :=
-				     #source_interface{interface = 'CP-function'},
-				 network_instance :=
-				     #network_instance{instance = <<2, "cp">>}}},
-		    outer_header_removal :=
-			#outer_header_removal{}
-		    }}, PDR),
+    ?match(#{forwarding_parameters :=
+		 #{network_instance := <<3, "irx">>,
+		   destination_interface :=
+		       #destination_interface{interface = 'Access'}},
+	     apply_action := #{'FORW' := _}}, FAR),
+    ?match(#{pdi :=
+		 #{source_interface :=
+		       #source_interface{interface = 'CP-function'},
+		   network_instance := <<2, "cp">>},
+	     outer_header_removal :=
+		 #outer_header_removal{}
+	    }, PDR),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4contexts(?TIMEOUT),
@@ -3114,9 +3037,9 @@ pfcp_session_deleted_by_the_up_function(Config) ->
     {ok, PCtx} = ergw_context:test_cmd(gtp, CtxKey, pfcp_ctx),
 
     MatchSpec = ets:fun2ms(fun({Id, _}) -> Id end),
-    IEs = [#pfcpsrreq_flags{psdbu = 1}],
+    IEs = [[pfcpsrreq_flags, #{'PSDBU' => []}]],
     Report =
-	[#usage_report_trigger{tebur = 1, _= 0},
+	[[usage_report_trigger, #{'TEBUR' => []}],
 	 #volume_measurement{total = 5, uplink = 2, downlink = 3},
 	 #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}],
 
@@ -3184,7 +3107,7 @@ gy_validity_timer_up(Config) ->
 
     MatchSpec = ets:fun2ms(fun({Id, {'online', _}}) -> Id end),
     Report =
-	[#usage_report_trigger{quvti = 1, _= 0},
+	[[usage_report_trigger, #{'QUVTI' => []}],
 	 #volume_measurement{total = 5, uplink = 2, downlink = 3},
 	 #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}],
 
@@ -3203,15 +3126,15 @@ gy_validity_timer_up(Config) ->
 		end, ergw_test_sx_up:history('pgw-u01')),
     ?equal(3, length(maps:get(create_urr, SER#pfcp.ie))),
     {[URR], _} =
-	lists:partition(fun(X) -> maps:is_key(quota_validity_time, X#create_urr.group) end,
+	lists:partition(fun(X) -> maps:is_key(quota_validity_time, X) end,
 			maps:get(create_urr, SER#pfcp.ie)),
 
     ?match_map(
        #{urr_id => #urr_id{id = '_'},
 	 quota_validity_time => #quota_validity_time{time = 2},
 	 reporting_triggers =>
-	     #reporting_triggers{quota_validity_time = 1, _ = '_'}
-	}, URR#create_urr.group),
+	     #{'QUVTI' => '_'}
+	}, URR),
 
     CCRU = lists:filter(
 	     fun({_, {ergw_aaa_session, invoke, [_, S, {gy,'CCR-Update'}, _]}, _}) ->
@@ -3265,39 +3188,25 @@ simple_aaa(Config) ->
 
     ?match(
        [%% IP-CAN offline URR
-	#create_urr{
-	   group =
-	       #{urr_id := #urr_id{id = _},
-		 measurement_method :=
-		     #measurement_method{volum = 1, durat = 1},
-		 reporting_triggers := #reporting_triggers{}
-		}
-	  },
+	#{urr_id := #urr_id{id = _},
+	  measurement_method := #{'VOLUM' := _, 'DURAT' := _},
+	  reporting_triggers := _
+	 },
 	%% offline charging URR
-	#create_urr{
-	   group =
-	       #{urr_id := #urr_id{id = _},
-		 measurement_method :=
-		     #measurement_method{volum = 1},
-		 reporting_triggers := #reporting_triggers{}
-		}
-	  },
+	#{urr_id := #urr_id{id = _},
+	  measurement_method := #{'VOLUM' := _},
+	  reporting_triggers := _
+	 },
 	%% AAA (RADIUS/DIAMETER) URR
-	#create_urr{
-	   group =
-	       #{urr_id := #urr_id{id = _},
-		 measurement_method :=
-		     #measurement_method{volum = 1, durat = 1},
-		 measurement_period :=
-		     #measurement_period{period = Interim},
-		 reporting_triggers :=
-		     #reporting_triggers{periodic_reporting = 1}
-		}
-	  }], URR),
+	#{urr_id := #urr_id{id = _},
+	  measurement_method := #{'VOLUM' := _, 'DURAT' := _},
+	  measurement_period := #measurement_period{period = Interim},
+	  reporting_triggers := #{'PERIO' := _}
+	 }], URR),
 
     MatchSpec = ets:fun2ms(fun({Id, {monitor, 'IP-CAN', _}}) -> Id end),
     Report =
-	[#usage_report_trigger{perio = 1},
+	[[usage_report_trigger, #{'PERIO' => []}],
 	 #volume_measurement{total = 5, uplink = 2, downlink = 3},
 	 #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}],
     ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, Report),
@@ -3374,29 +3283,25 @@ simple_ofcs(Config) ->
     ?equal(2, length(maps:get(create_urr, SER#pfcp.ie))),
 
     {[URR], [Linked]} =
-	lists:partition(fun(X) -> not maps:is_key(linked_urr_id, X#create_urr.group) end,
+	lists:partition(fun(X) -> not maps:is_key(linked_urr_id, X) end,
 			maps:get(create_urr, SER#pfcp.ie)),
     ?match_map(
        %% offline charging URR
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1, durat = 1},
+	 measurement_method => #{'VOLUM' => '_', 'DURAT' => '_'},
 	 measurement_period =>
 	     #measurement_period{period = Interim},
-	 reporting_triggers =>
-	     #reporting_triggers{periodic_reporting = 1}
-	}, URR#create_urr.group),
+	 reporting_triggers => #{'PERIO' => '_'}
+	}, URR),
 
     ?match_map(
        %% offline charging URR
        #{urr_id => #urr_id{id = '_'},
 	 linked_urr_id => #linked_urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1},
-	 reporting_triggers =>
-	     #reporting_triggers{linked_usage_reporting = 1}
-	}, Linked#create_urr.group),
-    ?equal(false, maps:is_key(measurement_period, Linked#create_urr.group)),
+	 measurement_method => #{'VOLUM' => '_'},
+	 reporting_triggers => #{'LIUSA' => '_'}
+	}, Linked),
+    ?equal(false, maps:is_key(measurement_period, Linked)),
 
     StartTS = calendar:datetime_to_gregorian_seconds({{2020,2,20},{13,24,00}})
 	- ?SECONDS_FROM_0_TO_1970,
@@ -3414,11 +3319,11 @@ simple_ofcs(Config) ->
 		Trigger =
 		    case Type of
 			{offline, RG} when is_integer(RG) ->
-			    #usage_report_trigger{liusa = 1};
+			    [usage_report_trigger, #{'LIUSA' => []}];
 			{offline, 'IP-CAN'} ->
-			    #usage_report_trigger{perio = 1}
+			    [usage_report_trigger, #{'PERIO' => []}]
 		    end,
-		[#usage_report_srr{group = [#urr_id{id = Id}, Trigger|Report]}|Reports]
+		[[usage_report_srr, pfcp_packet:ies_to_map([#urr_id{id = Id}, Trigger|Report])]|Reports]
 	end,
     MatchSpec = ets:fun2ms(fun(Id) -> Id end),
     ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, ReportFun),
@@ -3524,27 +3429,23 @@ ofcs_no_interim(Config) ->
     ?equal(2, length(maps:get(create_urr, SER#pfcp.ie))),
 
     {[URR], [Linked]} =
-	lists:partition(fun(X) -> not maps:is_key(linked_urr_id, X#create_urr.group) end,
+	lists:partition(fun(X) -> not maps:is_key(linked_urr_id, X) end,
 			maps:get(create_urr, SER#pfcp.ie)),
     ?match_map(
        %% offline charging URR
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1, durat = 1},
-	 reporting_triggers =>
-	     #reporting_triggers{}
-	}, URR#create_urr.group),
+	 measurement_method => #{'VOLUM' => '_', 'DURAT' => '_'},
+	 reporting_triggers => '_'
+	}, URR),
 
     ?match_map(
        %% offline charging URR
        #{urr_id => #urr_id{id = '_'},
 	 linked_urr_id => #linked_urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1},
-	 reporting_triggers =>
-	     #reporting_triggers{linked_usage_reporting = 1}
-	}, Linked#create_urr.group),
-    ?equal(false, maps:is_key(measurement_period, Linked#create_urr.group)),
+	 measurement_method => #{'VOLUM' => '_'},
+	 reporting_triggers => #{'LIUSA' => '_'}
+	}, Linked),
+    ?equal(false, maps:is_key(measurement_period, Linked)),
 
     ct:sleep(100),
     delete_session(GtpC),
@@ -3680,29 +3581,23 @@ simple_ocs(Config) ->
     ?match_map(
        %% IP-CAN offline URR
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1, durat = 1},
-	 reporting_triggers => #reporting_triggers{}
-	}, URR1#create_urr.group),
+	 measurement_method => #{'VOLUM' => '_', 'DURAT' => '_'},
+	 reporting_triggers => '_'
+	}, URR1),
 
     ?match_map(
        %% offline charging URR
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1},
-	 reporting_triggers =>
-	     #reporting_triggers{linked_usage_reporting = 1}
-	}, URR2#create_urr.group),
+	 measurement_method => #{'VOLUM' => '_'},
+	 reporting_triggers => #{'LIUSA' => '_'}
+	}, URR2),
 
     %% online charging URR
     ?match_map(
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1, durat = 1},
+	 measurement_method => #{'VOLUM' => '_', 'DURAT' => '_'},
 	 reporting_triggers =>
-	     #reporting_triggers{
-		time_quota = 1,   time_threshold = 1,
-		volume_quota = 1, volume_threshold = 1},
+	     #{'TIMQU' => '_', 'TIMTH' => '_', 'VOLQU' => '_', 'VOLTH' => '_'},
 	 time_quota =>
 	     #time_quota{quota = 3600},
 	 time_threshold =>
@@ -3711,11 +3606,11 @@ simple_ocs(Config) ->
 	     #volume_quota{total = 102400},
 	 volume_threshold =>
 	     #volume_threshold{total = 92160}
-	}, URR3#create_urr.group),
+	}, URR3),
 
     MatchSpec = ets:fun2ms(fun({Id, {'online', _}}) -> Id end),
     Report =
-	[#usage_report_trigger{volqu = 1},
+	[[usage_report_trigger, #{'VOLQU' => []}],
 	 #volume_measurement{total = 5, uplink = 2, downlink = 3},
 	 #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}],
     ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, Report),
@@ -3874,14 +3769,14 @@ split_charging1(Config) ->
 		end, ergw_test_sx_up:history('pgw-u01')),
 
     PDRs = lists:filter(
-	     fun(#create_pdr{group = #{urr_id := UIds}}) ->
+	     fun(#{urr_id := UIds}) ->
 		     is_list(UIds) andalso length(UIds) > 1;
 		(_) -> false end,
 	     maps:get(create_pdr, SER#pfcp.ie)),
     ?equal(4, length(PDRs)),
 
     {URRs, Linked} =
-	lists:partition(fun(X) -> not maps:is_key(linked_urr_id, X#create_urr.group) end,
+	lists:partition(fun(X) -> not maps:is_key(linked_urr_id, X) end,
 			maps:get(create_urr, SER#pfcp.ie)),
     ?equal(2, length(URRs)),
     ?equal(2, length(Linked)),
@@ -3890,23 +3785,18 @@ split_charging1(Config) ->
     ?match_map(
        %% offline charging URR for Traffic Volume Container
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1, durat = 1},
+	 measurement_method => #{'VOLUM' => '_', 'DURAT' => '_'},
 	 measurement_period =>
 	     #measurement_period{period = Interim},
-	 reporting_triggers =>
-	     #reporting_triggers{periodic_reporting = 1}
-	}, URR1#create_urr.group),
+	 reporting_triggers => #{'PERIO' => '_'}
+	}, URR1),
 
     ?match_map(
        %% online only charging URR
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1, durat = 1},
+	 measurement_method => #{'VOLUM' => '_', 'DURAT' => '_'},
 	 reporting_triggers =>
-	     #reporting_triggers{
-		time_quota = 1,   time_threshold = 1,
-		volume_quota = 1, volume_threshold = 1},
+	     #{'TIMQU' => '_', 'TIMTH' => '_', 'VOLQU' => '_', 'VOLTH' => '_'},
 	 time_quota =>
 	     #time_quota{quota = 3600},
 	 time_threshold =>
@@ -3915,28 +3805,24 @@ split_charging1(Config) ->
 	     #volume_quota{total = 102400},
 	 volume_threshold =>
 	     #volume_threshold{total = 92160}
-	}, URR2#create_urr.group),
+	}, URR2),
 
     [L1, L2] = lists:sort(Linked),
     ?match_map(
        %% offline charging URR for Rating Group
        #{urr_id => #urr_id{id = '_'},
 	 linked_urr_id => #linked_urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1},
-	 reporting_triggers =>
-	     #reporting_triggers{linked_usage_reporting = 1}
-	}, L1#create_urr.group),
+	 measurement_method => #{'VOLUM' => '_'},
+	 reporting_triggers => #{'LIUSA' => '_'}
+	}, L1),
 
     ?match_map(
        %% offline charging URR for Rating Group
        #{urr_id => #urr_id{id = '_'},
 	 linked_urr_id => #linked_urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1},
-	 reporting_triggers =>
-	     #reporting_triggers{linked_usage_reporting = 1}
-	}, L2#create_urr.group),
+	 measurement_method => #{'VOLUM' => '_'},
+	 reporting_triggers => #{'LIUSA' => '_'}
+	}, L2),
 
     %% Session Report Sequence
     %% - Start
@@ -3972,12 +3858,12 @@ split_charging1(Config) ->
 		Trigger =
 		    case Type of
 			RG when is_integer(RG) ->
-			    #usage_report_trigger{liusa = 1};
+			    [usage_report_trigger, #{'LIUSA' => []}];
 			'IP-CAN' ->
-			    #usage_report_trigger{perio = 1}
+			    [usage_report_trigger, #{'PERIO' => []}]
 		    end,
-		[#usage_report_srr{group = [#urr_id{id = Id}, Trigger
-					   | Gen()]}|Reports];
+		[[usage_report_srr, pfcp_packet:ies_to_map([#urr_id{id = Id}, Trigger
+					   | Gen()])]|Reports];
 	   (_, _, Reports) ->
 		Reports
 	end,
@@ -3989,7 +3875,7 @@ split_charging1(Config) ->
 
     OnReportGen =
 	fun (BaseTS, Duration, Slot) ->
-		[#usage_report_trigger{volqu = 1},
+		[[usage_report_trigger, #{'VOLQU' => []}],
 		 #volume_measurement{
 		    total = Slot, uplink = 2 * Slot, downlink = 3 * Slot},
 		 #time_of_first_packet{
@@ -4003,8 +3889,8 @@ split_charging1(Config) ->
 	end,
     OnReportFun =
 	fun(Gen, Id, Reports) ->
-		[#usage_report_srr{group = [#urr_id{id = Id}
-					   | Gen()]}|Reports]
+		[[usage_report_srr, pfcp_packet:ies_to_map([#urr_id{id = Id}
+					   | Gen()])]|Reports]
 	end,
     OnMatchSpec = ets:fun2ms(fun({Id, {'online', _}}) -> Id end),
     OnReport =
@@ -4190,14 +4076,14 @@ split_charging2(Config) ->
 		end, ergw_test_sx_up:history('pgw-u01')),
 
     PDRs = lists:filter(
-	     fun(#create_pdr{group = #{urr_id := UIds}}) ->
+	     fun(#{urr_id := UIds}) ->
 		     is_list(UIds) andalso length(UIds) > 1;
 		(_) -> false end,
 	     maps:get(create_pdr, SER#pfcp.ie)),
     ?equal(6, length(PDRs)),
 
     {URRs, Linked} =
-	lists:partition(fun(X) -> not maps:is_key(linked_urr_id, X#create_urr.group) end,
+	lists:partition(fun(X) -> not maps:is_key(linked_urr_id, X) end,
 			maps:get(create_urr, SER#pfcp.ie)),
     ?equal(2, length(URRs)),
     ?equal(3, length(Linked)),
@@ -4207,21 +4093,16 @@ split_charging2(Config) ->
     ?match_map(
        %% offline charging URR Periodic
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1, durat = 1},
-	 reporting_triggers =>
-	     #reporting_triggers{periodic_reporting = 1}
-	}, URR1#create_urr.group),
+	 measurement_method => #{'VOLUM' => '_', 'DURAT' => '_'},
+	 reporting_triggers => #{'PERIO' => '_'}
+	}, URR1),
 
     ?match_map(
        %% online only charging URR
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1, durat = 1},
+	 measurement_method => #{'VOLUM' => '_', 'DURAT' => '_'},
 	 reporting_triggers =>
-	     #reporting_triggers{
-		time_quota = 1, time_threshold = 1,
-		volume_quota = 1, volume_threshold = 1},
+	     #{'TIMQU' => '_', 'TIMTH' => '_', 'VOLQU' => '_', 'VOLTH' => '_'},
 	 time_quota =>
 	     #time_quota{quota = 3600},
 	 time_threshold =>
@@ -4230,7 +4111,7 @@ split_charging2(Config) ->
 	     #volume_quota{total = 102400},
 	 volume_threshold =>
 	     #volume_threshold{total = 92160}
-	}, URR2#create_urr.group),
+	}, URR2),
 
     [L1, L2, L3] = lists:sort(Linked),
 
@@ -4238,32 +4119,26 @@ split_charging2(Config) ->
        %% offline charging URR for Rating Group
        #{urr_id => #urr_id{id = '_'},
 	 linked_urr_id => #linked_urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1},
-	 reporting_triggers =>
-	     #reporting_triggers{linked_usage_reporting = 1}
-	}, L1#create_urr.group),
+	 measurement_method => #{'VOLUM' => '_'},
+	 reporting_triggers => #{'LIUSA' => '_'}
+	}, L1),
 
     ?match_map(
        %% offline charging URR for Rating Group
        #{urr_id => #urr_id{id = '_'},
 	 linked_urr_id => #linked_urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1},
-	 reporting_triggers =>
-	     #reporting_triggers{linked_usage_reporting = 1}
-	}, L2#create_urr.group),
+	 measurement_method => #{'VOLUM' => '_'},
+	 reporting_triggers => #{'LIUSA' => '_'}
+	}, L2),
 
     ct:pal("L3: ~p", [L3]),
     ?match_map(
        %% offline charging URR for Rating Group
        #{urr_id => #urr_id{id = '_'},
 	 linked_urr_id => #linked_urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1},
-	 reporting_triggers =>
-	     #reporting_triggers{linked_usage_reporting = 1}
-	}, L3#create_urr.group),
+	 measurement_method => #{'VOLUM' => '_'},
+	 reporting_triggers => #{'LIUSA' => '_'}
+	}, L3),
 
  
 
@@ -4301,12 +4176,12 @@ split_charging2(Config) ->
 		Trigger =
 		    case Type of
 			RG when is_integer(RG) ->
-			    #usage_report_trigger{liusa = 1};
+			    [usage_report_trigger, #{'LIUSA' => []}];
 			'IP-CAN' ->
-			    #usage_report_trigger{perio = 1}
+			    [usage_report_trigger, #{'PERIO' => []}]
 		    end,
-		[#usage_report_srr{group = [#urr_id{id = Id}, Trigger
-					   | Gen()]}|Reports];
+		[[usage_report_srr, pfcp_packet:ies_to_map([#urr_id{id = Id}, Trigger
+					   | Gen()])]|Reports];
 	   (_, _, Reports) ->
 		Reports
 	end,
@@ -4318,7 +4193,7 @@ split_charging2(Config) ->
 
     OnReportGen =
 	fun (BaseTS, Duration, Slot) ->
-		[#usage_report_trigger{volqu = 1},
+		[[usage_report_trigger, #{'VOLQU' => []}],
 		 #volume_measurement{
 		    total = Slot, uplink = 2 * Slot, downlink = 3 * Slot},
 		 #time_of_first_packet{
@@ -4332,8 +4207,8 @@ split_charging2(Config) ->
 	end,
     OnReportFun =
 	fun(Gen, Id, Reports) ->
-		[#usage_report_srr{group = [#urr_id{id = Id}
-					   | Gen()]}|Reports]
+		[[usage_report_srr, pfcp_packet:ies_to_map([#urr_id{id = Id}
+					   | Gen()])]|Reports]
 	end,
     OnMatchSpec = ets:fun2ms(fun({Id, {'online', _}}) -> Id end),
     OnReport =
@@ -4665,7 +4540,7 @@ tariff_time_change(Config) ->
 		end, ergw_test_sx_up:history('pgw-u01')),
 
     {URRs, [Linked]} =
-	lists:partition(fun(X) -> not maps:is_key(linked_urr_id, X#create_urr.group) end,
+	lists:partition(fun(X) -> not maps:is_key(linked_urr_id, X) end,
 			maps:get(create_urr, SER#pfcp.ie)),
 
     [URR1, URR2] = lists:sort(URRs),
@@ -4674,21 +4549,16 @@ tariff_time_change(Config) ->
        %% offline charging URR for Rating Group
        #{urr_id => #urr_id{id = '_'},
 	 linked_urr_id => #linked_urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1},
-	 reporting_triggers =>
-	     #reporting_triggers{linked_usage_reporting = 1}
-	}, Linked#create_urr.group),
+	 measurement_method => #{'VOLUM' => '_'},
+	 reporting_triggers => #{'LIUSA' => '_'}
+	}, Linked),
 
     ?match_map(
        %% online charging URR
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1, durat = 1},
+	 measurement_method => #{'VOLUM' => '_', 'DURAT' => '_'},
 	 reporting_triggers =>
-	     #reporting_triggers{
-		time_quota = 1,   time_threshold = 1,
-		volume_quota = 1, volume_threshold = 1},
+	     #{'TIMQU' => '_', 'TIMTH' => '_', 'VOLQU' => '_', 'VOLTH' => '_'},
 	 time_quota =>
 	     #time_quota{quota = 3600},
 	 time_threshold =>
@@ -4697,77 +4567,75 @@ tariff_time_change(Config) ->
 	     #volume_quota{total = 102400},
 	 volume_threshold =>
 	     #volume_threshold{total = 92160}
-	}, URR2#create_urr.group),
+	}, URR2),
 
     ?match_map(
        %% offline charging URR for Traffic Volume Container
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1, durat = 1},
+	 measurement_method => #{'VOLUM' => '_', 'DURAT' => '_'},
 	 measurement_period =>
 	     #measurement_period{period = Interim},
-	 reporting_triggers =>
-	     #reporting_triggers{periodic_reporting = 1}
-	}, URR1#create_urr.group),
+	 reporting_triggers => #{'PERIO' => '_'}
+	}, URR1),
 
     MatchSpec = ets:fun2ms(fun({Id, {Type, _}})
 				 when Type =:= offline; Type =:= online -> {Type, Id} end),
     ReportFun =
 	fun({online, Id}, IEs) ->
 		IEbef =
-		    #usage_report_srr{
-		       group =
-			   [#urr_id{id = Id},
-			    #usage_report_trigger{monit = 1},
-			    #usage_information{bef = 1},
-			    #start_time{time = 3775809600},
-			    #end_time{time = 3775810200},
-			    #time_of_first_packet{time = 3775809600 + 30},
-			    #time_of_last_packet{time = 3775810200 - 30},
-			    #duration_measurement{duration = 600},
-			    #volume_measurement{total = 5, uplink = 2, downlink = 3},
-			    #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}]},
+		    [usage_report_srr,
+		     pfcp_packet:ies_to_map(
+		       [#urr_id{id = Id},
+			[usage_report_trigger, #{'MONIT' => []}],
+			[usage_information, #{'BEF' => []}],
+			#start_time{time = 3775809600},
+			#end_time{time = 3775810200},
+			#time_of_first_packet{time = 3775809600 + 30},
+			#time_of_last_packet{time = 3775810200 - 30},
+			#duration_measurement{duration = 600},
+			#volume_measurement{total = 5, uplink = 2, downlink = 3},
+			#tp_packet_measurement{total = 12, uplink = 5, downlink = 7}])],
 		IEaft =
-		    #usage_report_srr{
-		       group =
-			   [#urr_id{id = Id},
-			    #usage_report_trigger{perio = 1},
-			    #usage_information{aft = 1},
-			    #start_time{time = 3775810200},
-			    #end_time{time = 3775810800},
-			    #time_of_first_packet{time = 3775810200 + 30},
-			    #time_of_last_packet{time = 3775810800 - 30},
-			    #duration_measurement{duration = 600},
-			    #volume_measurement{total = 20, uplink = 9, downlink = 11},
-			    #tp_packet_measurement{total = 28, uplink = 13, downlink = 15}]},
+		    [usage_report_srr,
+		     pfcp_packet:ies_to_map(
+		       [#urr_id{id = Id},
+			[usage_report_trigger, #{'PERIO' => []}],
+			[usage_information, #{'AFT' => []}],
+			#start_time{time = 3775810200},
+			#end_time{time = 3775810800},
+			#time_of_first_packet{time = 3775810200 + 30},
+			#time_of_last_packet{time = 3775810800 - 30},
+			#duration_measurement{duration = 600},
+			#volume_measurement{total = 20, uplink = 9, downlink = 11},
+			#tp_packet_measurement{total = 28, uplink = 13, downlink = 15}])],
 		[IEbef, IEaft | IEs];
 	   ({offline, Id}, IEs) ->
 		IEbef =
-		    #usage_report_srr{
-		       group =
-			   [#urr_id{id = Id},
-			    #usage_report_trigger{monit = 1},
-			    #usage_information{bef = 1},
-			    #start_time{time = 3775809600},
-			    #end_time{time = 3775810200},
-			    #time_of_first_packet{time = 3775809600 + 30},
-			    #time_of_last_packet{time = 3775810200 - 30},
-			    #duration_measurement{duration = 600},
-			    #volume_measurement{total = 5, uplink = 2, downlink = 3},
-			    #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}]},
+		    [usage_report_srr,
+		     pfcp_packet:ies_to_map(
+		       [#urr_id{id = Id},
+			[usage_report_trigger, #{'MONIT' => []}],
+			[usage_information, #{'BEF' => []}],
+			#start_time{time = 3775809600},
+			#end_time{time = 3775810200},
+			#time_of_first_packet{time = 3775809600 + 30},
+			#time_of_last_packet{time = 3775810200 - 30},
+			#duration_measurement{duration = 600},
+			#volume_measurement{total = 5, uplink = 2, downlink = 3},
+			#tp_packet_measurement{total = 12, uplink = 5, downlink = 7}])],
 		IEaft =
-		    #usage_report_srr{
-		       group =
-			   [#urr_id{id = Id},
-			    #usage_report_trigger{volqu = 1},
-			    #usage_information{aft = 1},
-			    #start_time{time = 3775810200},
-			    #end_time{time = 3775810800},
-			    #time_of_first_packet{time = 3775810200 + 30},
-			    #time_of_last_packet{time = 3775810800 - 30},
-			    #duration_measurement{duration = 600},
-			    #volume_measurement{total = 20, uplink = 9, downlink = 11},
-			    #tp_packet_measurement{total = 28, uplink = 13, downlink = 15}]},
+		    [usage_report_srr,
+		     pfcp_packet:ies_to_map(
+		       [#urr_id{id = Id},
+			[usage_report_trigger, #{'VOLQU' => []}],
+			[usage_information, #{'AFT' => []}],
+			#start_time{time = 3775810200},
+			#end_time{time = 3775810800},
+			#time_of_first_packet{time = 3775810200 + 30},
+			#time_of_last_packet{time = 3775810800 - 30},
+			#duration_measurement{duration = 600},
+			#volume_measurement{total = 20, uplink = 9, downlink = 11},
+			#tp_packet_measurement{total = 28, uplink = 13, downlink = 15}])],
 		[IEbef, IEaft | IEs]
 	end,
     ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, ReportFun),
@@ -4942,8 +4810,8 @@ volume_threshold(Config) ->
 
     MatchSpec = ets:fun2ms(fun({Id, {'online', _}}) -> Id end),
 
-    ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, [#usage_report_trigger{volth = 1}]),
-    ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, [#usage_report_trigger{volqu = 1}]),
+    ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, [[usage_report_trigger, #{'VOLTH' => []}]]),
+    ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, [[usage_report_trigger, #{'VOLQU' => []}]]),
 
     ct:sleep({seconds, 1}),
 
@@ -5096,106 +4964,64 @@ redirect_info(Config) ->
     ?LOG(debug, "URR: ~p", [pfcp_packet:pretty_print([URR])]),
 
     ?match(
-       [#create_pdr{
-	   group =
-	       #{pdr_id := #pdr_id{id = _},
-		 precedence := #precedence{precedence = 100},
-		 pdi :=
-		     #pdi{
-			group =
-			    #{network_instance :=
-				  #network_instance{instance = <<3, "sgi">>},
-			      sdf_filter :=
-				  #sdf_filter{
-				     flow_description =
-					 <<"permit out ip from any to assigned">>},
-			      source_interface :=
-				  #source_interface{interface='SGi-LAN'},
-			      ue_ip_address := #ue_ip_address{type = dst}
-			     }
-		       },
-		 far_id := #far_id{id = _},
-		 urr_id := [#urr_id{id = _}|_]
-		}
-	  },
-	#create_pdr{
-	   group =
-	       #{
-		 pdr_id := #pdr_id{id = _},
-		 precedence := #precedence{precedence = 100},
-		 pdi :=
-		     #pdi{
-			group =
-			    #{network_instance :=
-				  #network_instance{instance = <<3, "irx">>},
-			      sdf_filter :=
-				  #sdf_filter{
-				     flow_description =
-					 <<"permit out ip from any to assigned">>},
-			      source_interface :=
-				  #source_interface{interface='Access'},
-			      ue_ip_address := #ue_ip_address{type = src}
-			     }
-		       },
-		 far_id := #far_id{id = _},
-		 urr_id := [#urr_id{id = _}|_]
-		}
-	  }], PDRs),
+       [#{pdr_id := #pdr_id{id = _},
+	  precedence := #precedence{precedence = 100},
+	  pdi :=
+	      #{network_instance := <<3, "sgi">>,
+		sdf_filter :=
+		    #sdf_filter{
+		       flow_description =
+			   <<"permit out ip from any to assigned">>},
+		source_interface :=
+		    #source_interface{interface='SGi-LAN'},
+		ue_ip_address := #ue_ip_address{type = dst}
+	       },
+	  far_id := #far_id{id = _},
+	  urr_id := [#urr_id{id = _}|_]
+	 },
+	#{pdr_id := #pdr_id{id = _},
+	  precedence := #precedence{precedence = 100},
+	  pdi :=
+	      #{network_instance := <<3, "irx">>,
+		sdf_filter :=
+		    #sdf_filter{
+		       flow_description =
+			   <<"permit out ip from any to assigned">>},
+		source_interface :=
+		    #source_interface{interface='Access'},
+		ue_ip_address := #ue_ip_address{type = src}
+	       },
+	  far_id := #far_id{id = _},
+	  urr_id := [#urr_id{id = _}|_]
+	 }], PDRs),
 
     ?match(
-       [#create_far{
-	   group =
-	       #{far_id := #far_id{id = _},
-		 apply_action :=
-		     #apply_action{forw = 1},
-		 forwarding_parameters :=
-		     #forwarding_parameters{
-			group =
-			    #{destination_interface :=
-				  #destination_interface{interface='Access'},
-			      network_instance :=
-				  #network_instance{instance = <<3, "irx">>}
-			     }
-		       }
-		}
-	  },
-	#create_far{
-	   group =
-	       #{far_id := #far_id{id = _},
-		 apply_action :=
-		     #apply_action{forw = 1},
-		 forwarding_parameters :=
-		     #forwarding_parameters{
-			group =
-			    #{destination_interface :=
-				  #destination_interface{interface='SGi-LAN'},
-			      redirect_information :=
-				  #redirect_information{type = 'URL',
-							address = <<"http://www.heise.de/">>},
-			      network_instance :=
-				  #network_instance{instance = <<3, "sgi">>}
-			     }
-		       }
-		}
-	  }], FARs),
+       [#{far_id := #far_id{id = _},
+	  apply_action := #{'FORW' := _},
+	  forwarding_parameters :=
+	      #{destination_interface :=
+		    #destination_interface{interface='Access'},
+		network_instance := <<3, "irx">>}
+	 },
+	#{far_id := #far_id{id = _},
+	  apply_action := #{'FORW' := _},
+	  forwarding_parameters :=
+	      #{destination_interface :=
+		    #destination_interface{interface='SGi-LAN'},
+		redirect_information :=
+		    #redirect_information{type = 'URL',
+					  address = <<"http://www.heise.de/">>},
+		network_instance := <<3, "sgi">>}
+	 }], FARs),
 
     ?match(
-       [#create_urr{
-	   group =
-	       #{urr_id := #urr_id{id = _},
-		 measurement_method :=
-		    #measurement_method{volum = 1, durat = 1},
-		 reporting_triggers :=
-		     #reporting_triggers{}
-		}
-	  },
-	#create_urr{
-	   group =
-	       #{urr_id := #urr_id{id = _},
-		 measurement_method :=
-		     #measurement_method{volum = 1}
-		}
-	  }
+       [#{urr_id := #urr_id{id = _},
+	  measurement_method := #{'VOLUM' := _, 'DURAT' := _},
+	  reporting_triggers := _
+	 },
+	#{urr_id := #urr_id{id = _},
+	  measurement_method := #{'VOLUM' := _}
+	 }
        ], URR),
 
     meck_validate(Config),
@@ -5439,99 +5265,55 @@ tdf_app_id(Config) ->
     ?LOG(debug, "URR: ~p", [pfcp_packet:pretty_print([URR])]),
 
     ?match(
-       [#create_pdr{
-	   group =
-	       #{pdr_id := #pdr_id{id = _},
-		 precedence := #precedence{precedence = 100},
-		 pdi :=
-		     #pdi{
-			group =
-			    #{network_instance :=
-				  #network_instance{instance = <<3, "sgi">>},
-			      application_id :=
-				  #application_id{id = <<"Gold">>},
-			      source_interface :=
-				  #source_interface{interface='SGi-LAN'},
-			      ue_ip_address := #ue_ip_address{type = dst}
-			     }
-		       },
-		 far_id := #far_id{id = _},
-		 urr_id := [#urr_id{id = _}|_]
-		}
-	  },
-	#create_pdr{
-	   group =
-	       #{
-		 pdr_id := #pdr_id{id = _},
-		 precedence := #precedence{precedence = 100},
-		 pdi :=
-		     #pdi{
-			group =
-			    #{network_instance :=
-				  #network_instance{instance = <<3, "irx">>},
-			      application_id :=
-				  #application_id{id = <<"Gold">>},
-			      source_interface :=
-				  #source_interface{interface='Access'},
-			      ue_ip_address := #ue_ip_address{type = src}
-			     }
-		       },
-		 far_id := #far_id{id = _},
-		 urr_id := [#urr_id{id = _}|_]
-		}
-	  }], PDRs),
+       [#{pdr_id := #pdr_id{id = _},
+	  precedence := #precedence{precedence = 100},
+	  pdi :=
+	      #{network_instance := <<3, "sgi">>,
+		application_id := <<"Gold">>,
+		source_interface :=
+		    #source_interface{interface='SGi-LAN'},
+		ue_ip_address := #ue_ip_address{type = dst}
+	       },
+	  far_id := #far_id{id = _},
+	  urr_id := [#urr_id{id = _}|_]
+	 },
+	#{pdr_id := #pdr_id{id = _},
+	  precedence := #precedence{precedence = 100},
+	  pdi :=
+	      #{network_instance := <<3, "irx">>,
+		application_id := <<"Gold">>,
+		source_interface :=
+		    #source_interface{interface='Access'},
+		ue_ip_address := #ue_ip_address{type = src}
+	       },
+	  far_id := #far_id{id = _},
+	  urr_id := [#urr_id{id = _}|_]
+	 }], PDRs),
 
     ?match(
-       [#create_far{
-	   group =
-	       #{far_id := #far_id{id = _},
-		 apply_action :=
-		     #apply_action{forw = 1},
-		 forwarding_parameters :=
-		     #forwarding_parameters{
-			group =
-			    #{destination_interface :=
-				  #destination_interface{interface='Access'},
-			      network_instance :=
-				  #network_instance{instance = <<3, "irx">>}
-			     }
-		       }
-		}
-	  },
-	#create_far{
-	   group =
-	       #{far_id := #far_id{id = _},
-		 apply_action :=
-		     #apply_action{forw = 1},
-		 forwarding_parameters :=
-		     #forwarding_parameters{
-			group =
-			    #{destination_interface :=
-				  #destination_interface{interface='SGi-LAN'},
-			      network_instance :=
-				  #network_instance{instance = <<3, "sgi">>}
-			     }
-		       }
-		}
-	  }], FARs),
+       [#{far_id := #far_id{id = _},
+	  apply_action := #{'FORW' := _},
+	  forwarding_parameters :=
+	      #{destination_interface :=
+		    #destination_interface{interface='Access'},
+		network_instance := <<3, "irx">>}
+	 },
+	#{far_id := #far_id{id = _},
+	  apply_action := #{'FORW' := _},
+	  forwarding_parameters :=
+	      #{destination_interface :=
+		    #destination_interface{interface='SGi-LAN'},
+		network_instance := <<3, "sgi">>}
+	 }], FARs),
 
     ?match(
-       [#create_urr{
-	   group =
-	       #{urr_id := #urr_id{id = _},
-		 measurement_method :=
-		     #measurement_method{volum = 1, durat = 1},
-		 reporting_triggers :=
-		     #reporting_triggers{}
-		}
-	  },
-	#create_urr{
-	   group =
-	       #{urr_id := #urr_id{id = _},
-		 measurement_method :=
-		     #measurement_method{volum = 1}
-		}
-	  }
+       [#{urr_id := #urr_id{id = _},
+	  measurement_method := #{'VOLUM' := _, 'DURAT' := _},
+	  reporting_triggers := _
+	 },
+	#{urr_id := #urr_id{id = _},
+	  measurement_method := #{'VOLUM' := _}
+	 }
        ], URR),
 
     meck_validate(Config),

@@ -879,109 +879,68 @@ simple_session_request(Config) ->
     ?LOG(debug, "URR: ~s", [pfcp_packet:pretty_print([URR])]),
 
     ?match(
-       [#create_pdr{
-	   group =
-	       #{pdr_id := #pdr_id{id = _},
-		 precedence := #precedence{precedence = 100},
-		 pdi :=
-		     #pdi{
-			group =
-			    #{network_instance :=
-				  #network_instance{instance = <<3, "sgi">>},
-			      sdf_filter :=
-				  #sdf_filter{
-				     flow_description =
-					 <<"permit out ip from any to assigned">>},
-			      source_interface :=
-				  #source_interface{interface='SGi-LAN'},
-			      ue_ip_address := #ue_ip_address{type = dst}
-			     }
-		       },
-		 far_id := #far_id{id = _},
-		 urr_id := [#urr_id{id = _}|_]
-		}
-	  },
-	#create_pdr{
-	   group =
-	       #{
-		 pdr_id := #pdr_id{id = _},
-		 precedence := #precedence{precedence = 100},
-		 pdi :=
-		     #pdi{
-			group =
-			    #{f_teid := #f_teid{teid = choose},
-			      network_instance :=
-				  #network_instance{instance = <<3, "irx">>},
-			      sdf_filter :=
-				  #sdf_filter{
-				     flow_description =
-					 <<"permit out ip from any to assigned">>},
-			      source_interface :=
-				  #source_interface{interface='Access'},
-			      ue_ip_address := #ue_ip_address{type = src}
-			     }
-		       },
-		 far_id := #far_id{id = _},
-		 urr_id := [#urr_id{id = _}|_]
-		}
-	  }], PDRs),
+       [#{pdr_id := #pdr_id{id = _},
+	  precedence := #precedence{precedence = 100},
+	  pdi :=
+	      #{network_instance := <<3, "sgi">>,
+		sdf_filter :=
+		    #sdf_filter{
+		       flow_description =
+			   <<"permit out ip from any to assigned">>},
+		source_interface :=
+		    #source_interface{interface='SGi-LAN'},
+		ue_ip_address := #ue_ip_address{type = dst}
+	       },
+	  far_id := #far_id{id = _},
+	  urr_id := [#urr_id{id = _}|_]
+	 },
+	#{pdr_id := #pdr_id{id = _},
+	  precedence := #precedence{precedence = 100},
+	  pdi :=
+	      #{f_teid := #f_teid{teid = choose},
+		network_instance := <<3, "irx">>,
+		sdf_filter :=
+		    #sdf_filter{
+		       flow_description =
+			   <<"permit out ip from any to assigned">>},
+		source_interface :=
+		    #source_interface{interface='Access'},
+		ue_ip_address := #ue_ip_address{type = src}
+	       },
+	  far_id := #far_id{id = _},
+	  urr_id := [#urr_id{id = _}|_]
+	 }], PDRs),
 
     ?match(
-       [#create_far{
-	   group =
-	       #{far_id := #far_id{id = _},
-		 apply_action :=
-		     #apply_action{forw = 1},
-		 forwarding_parameters :=
-		     #forwarding_parameters{
-			group =
-			    #{destination_interface :=
-				  #destination_interface{interface='Access'},
-			      network_instance :=
-				  #network_instance{instance = <<3, "irx">>}
-			     }
-		       }
-		}
-	  },
-	#create_far{
-	   group =
-	       #{far_id := #far_id{id = _},
-		 apply_action :=
-		     #apply_action{forw = 1},
-		 forwarding_parameters :=
-		     #forwarding_parameters{
-			group =
-			    #{destination_interface :=
-				  #destination_interface{interface='SGi-LAN'},
-			      network_instance :=
-				  #network_instance{instance = <<3, "sgi">>}
-			     }
-		       }
-		}
-	  }], FARs),
+       [#{far_id := #far_id{id = _},
+	  apply_action := #{'FORW' := _},
+	  forwarding_parameters :=
+	      #{destination_interface :=
+		    #destination_interface{interface='Access'},
+		network_instance := <<3, "irx">>}
+	 },
+	#{far_id := #far_id{id = _},
+	  apply_action := #{'FORW' := _},
+	  forwarding_parameters :=
+	      #{destination_interface :=
+		    #destination_interface{interface='SGi-LAN'},
+		network_instance := <<3, "sgi">>}
+	 }], FARs),
 
     ?match(
-       [#create_urr{
-	   group =
-	       #{urr_id := #urr_id{id = _},
-		 measurement_method :=
-		     #measurement_method{volum = 1, durat = 1},
-		reporting_triggers :=
-		    #reporting_triggers{}
-	       }
-	  },
-	#create_urr{
-	   group =
-	       #{urr_id := #urr_id{id = _},
-		 measurement_method :=
-		     #measurement_method{volum = 1}
-		 %% measurement_period :=
-		 %%     #measurement_period{period = 600},
-		 %% reporting_triggers :=
-		 %%     #reporting_triggers{periodic_reporting=1}
-		}
-	  }
+       [#{urr_id := #urr_id{id = _},
+	  measurement_method := #{'VOLUM' := _, 'DURAT' := _},
+	  reporting_triggers := _
+	 },
+	#{urr_id := #urr_id{id = _},
+	  measurement_method := #{'VOLUM' := _}
+	  %% measurement_period :=
+	  %%     #measurement_period{period = 600},
+	  %% reporting_triggers :=
+	  %%     #{'PERIO' := _}
+	 }
        ], URR),
+    ?match(true, maps:get(reporting_triggers, hd(URR)) =:= #{}),
 
     ok.
 
@@ -1019,12 +978,8 @@ simple_session_request_cp_teid(Config) ->
     ?LOG(debug, "PDRs: ~s", [pfcp_packet:pretty_print(PDRs)]),
 
     ?match(
-       [#create_pdr{},
-	#create_pdr{group =
-			#{pdi :=
-			      #pdi{group =
-				       #{f_teid :=
-					     #f_teid{choose_id = undefined}}}}}],
+       [_,
+	#{pdi := #{f_teid := #f_teid{choose_id = undefined}}}],
        PDRs),
     ok.
 

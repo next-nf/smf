@@ -931,12 +931,9 @@ modify_bearer_request_tei_update(Config) ->
 
     SMR = pfcp_packet:to_map(SMR0),
     #{update_far :=
-	  #update_far{
-	     group =
-		 #{far_id := _,
-		   update_forwarding_parameters :=
-		       #update_forwarding_parameters{group = UFP}}}} = SMR#pfcp.ie,
-    ?match(#sxsmreq_flags{sndem = 1}, maps:get(sxsmreq_flags, UFP)),
+	  #{far_id := _,
+	    update_forwarding_parameters := UFP}} = SMR#pfcp.ie,
+    ?match(#{'SNDEM' := _}, maps:get(sxsmreq_flags, UFP)),
 
     #gtpc{local_data_tei = NewDataTEI} = GtpC3,
     ?match(#outer_header_creation{teid = NewDataTEI},
@@ -1239,7 +1236,7 @@ enb_connection_suspend(Config) ->
 		       (_) -> false
 		    end, ergw_test_sx_up:history('pgw-u01')),
     SMR = pfcp_packet:to_map(SMR0),
-    ?match(#{remove_far := #remove_far{}}, SMR#pfcp.ie),
+    ?match(#{remove_far := _}, SMR#pfcp.ie),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     meck_validate(Config),
@@ -1320,39 +1317,25 @@ simple_aaa(Config) ->
     URR = lists:sort(maps:get(create_urr, SER#pfcp.ie)),
     ?match(
        [%% IP-CAN offline URR
-	#create_urr{
-	   group =
-	       #{urr_id := #urr_id{id = _},
-		 measurement_method :=
-		     #measurement_method{volum = 1, durat = 1},
-		 reporting_triggers := #reporting_triggers{}
-		}
-	  },
+	#{urr_id := #urr_id{id = _},
+	  measurement_method := #{'VOLUM' := _, 'DURAT' := _},
+	  reporting_triggers := _
+	 },
 	%% offline charging URR
-	#create_urr{
-	   group =
-	       #{urr_id := #urr_id{id = _},
-		 measurement_method :=
-		     #measurement_method{volum = 1},
-		 reporting_triggers := #reporting_triggers{}
-		}
-	  },
+	#{urr_id := #urr_id{id = _},
+	  measurement_method := #{'VOLUM' := _},
+	  reporting_triggers := _
+	 },
 	%% AAA (RADIUS/DIAMETER) URR
-	#create_urr{
-	   group =
-	       #{urr_id := #urr_id{id = _},
-		 measurement_method :=
-		     #measurement_method{volum = 1, durat = 1},
-		 measurement_period :=
-		     #measurement_period{period = Interim},
-		 reporting_triggers :=
-		     #reporting_triggers{periodic_reporting = 1}
-		}
-	  }], URR),
+	#{urr_id := #urr_id{id = _},
+	  measurement_method := #{'VOLUM' := _, 'DURAT' := _},
+	  measurement_period := #measurement_period{period = Interim},
+	  reporting_triggers := #{'PERIO' := _}
+	 }], URR),
 
     MatchSpec = ets:fun2ms(fun({Id, {monitor, 'IP-CAN', _}}) -> Id end),
     Report =
-	[#usage_report_trigger{perio = 1},
+	[[usage_report_trigger, #{'PERIO' => []}],
 	 #volume_measurement{total = 5, uplink = 2, downlink = 3},
 	 #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}],
     ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, Report),
@@ -1425,29 +1408,25 @@ simple_ofcs(Config) ->
 		end, ergw_test_sx_up:history('pgw-u01')),
 
     {[URR], [Linked]} =
-	lists:partition(fun(X) -> not maps:is_key(linked_urr_id, X#create_urr.group) end,
+	lists:partition(fun(X) -> not maps:is_key(linked_urr_id, X) end,
 			maps:get(create_urr, SER#pfcp.ie)),
     ?match_map(
        %% offline charging URR
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1, durat = 1},
+	 measurement_method => #{'VOLUM' => '_', 'DURAT' => '_'},
 	 measurement_period =>
 	     #measurement_period{period = Interim},
-	 reporting_triggers =>
-	     #reporting_triggers{periodic_reporting = 1}
-	}, URR#create_urr.group),
+	 reporting_triggers => #{'PERIO' => '_'}
+	}, URR),
 
     ?match_map(
        %% offline charging URR
        #{urr_id => #urr_id{id = '_'},
 	 linked_urr_id => #linked_urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1},
-	 reporting_triggers =>
-	     #reporting_triggers{linked_usage_reporting = 1}
-	}, Linked#create_urr.group),
-    ?equal(false, maps:is_key(measurement_period, Linked#create_urr.group)),
+	 measurement_method => #{'VOLUM' => '_'},
+	 reporting_triggers => #{'LIUSA' => '_'}
+	}, Linked),
+    ?equal(false, maps:is_key(measurement_period, Linked)),
 
     StartTS = calendar:datetime_to_gregorian_seconds({{2020,2,20},{13,24,00}})
 	- ?SECONDS_FROM_0_TO_1970,
@@ -1465,11 +1444,11 @@ simple_ofcs(Config) ->
 		Trigger =
 		    case Type of
 			{offline, RG} when is_integer(RG) ->
-			    #usage_report_trigger{liusa = 1};
+			    [usage_report_trigger, #{'LIUSA' => []}];
 			{offline, 'IP-CAN'} ->
-			    #usage_report_trigger{perio = 1}
+			    [usage_report_trigger, #{'PERIO' => []}]
 		    end,
-		[#usage_report_srr{group = [#urr_id{id = Id}, Trigger|Report]}|Reports]
+		[[usage_report_srr, pfcp_packet:ies_to_map([#urr_id{id = Id}, Trigger|Report])]|Reports]
 	end,
     MatchSpec = ets:fun2ms(fun(Id) -> Id end),
     ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, ReportFun),
@@ -1563,29 +1542,23 @@ simple_ocs(Config) ->
     ?match_map(
        %% IP-CAN offline URR
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1, durat = 1},
-	 reporting_triggers => #reporting_triggers{}
-	}, URR1#create_urr.group),
+	 measurement_method => #{'VOLUM' => '_', 'DURAT' => '_'},
+	 reporting_triggers => '_'
+	}, URR1),
 
     ?match_map(
        %% offline charging URR
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1},
-	 reporting_triggers =>
-	     #reporting_triggers{linked_usage_reporting = 1}
-	}, URR2#create_urr.group),
+	 measurement_method => #{'VOLUM' => '_'},
+	 reporting_triggers => #{'LIUSA' => '_'}
+	}, URR2),
 
     %% online charging URR
     ?match_map(
        #{urr_id => #urr_id{id = '_'},
-	 measurement_method =>
-	     #measurement_method{volum = 1, durat = 1},
+	 measurement_method => #{'VOLUM' => '_', 'DURAT' => '_'},
 	 reporting_triggers =>
-	     #reporting_triggers{
-		time_quota = 1,   time_threshold = 1,
-		volume_quota = 1, volume_threshold = 1},
+	     #{'TIMQU' => '_', 'TIMTH' => '_', 'VOLQU' => '_', 'VOLTH' => '_'},
 	 time_quota =>
 	     #time_quota{quota = 3600},
 	 time_threshold =>
@@ -1594,11 +1567,11 @@ simple_ocs(Config) ->
 	     #volume_quota{total = 102400},
 	 volume_threshold =>
 	     #volume_threshold{total = 92160}
-	}, URR3#create_urr.group),
+	}, URR3),
 
     MatchSpec = ets:fun2ms(fun({Id, {'online', _}}) -> Id end),
     Report =
-	[#usage_report_trigger{volqu = 1},
+	[[usage_report_trigger, #{'VOLQU' => []}],
 	 #volume_measurement{total = 5, uplink = 2, downlink = 3},
 	 #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}],
     ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, Report),
@@ -1793,8 +1766,8 @@ volume_threshold(Config) ->
 
     MatchSpec = ets:fun2ms(fun({Id, {'online', _}}) -> Id end),
 
-    ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, [#usage_report_trigger{volth = 1}]),
-    ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, [#usage_report_trigger{volqu = 1}]),
+    ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, [[usage_report_trigger, #{'VOLTH' => []}]]),
+    ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, [[usage_report_trigger, #{'VOLQU' => []}]]),
 
     ct:sleep({seconds, 1}),
 

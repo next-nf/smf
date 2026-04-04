@@ -17,7 +17,7 @@
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-	 terminate/2, format_status/2, code_change/3]).
+	 terminate/2, format_status/1, code_change/3]).
 
 -include("include/ergw.hrl").
 -include("ergw_test_lib.hrl").
@@ -45,7 +45,6 @@
 		  up_seid
 		 }).
 
--export_records([up_function_features]).
 
 %%%===================================================================
 %%% API
@@ -132,9 +131,8 @@ init([IP, Role]) ->
 	       accounting = on,
 	       enabled = true,
 	       record = true,
-	       features = #up_function_features{ftup = 1, treu = 1, empu = 1,
-						ueip = 1, mnop = 1, ip6pl = 1,
-						_ = 0},
+	       features = #{'FTUP' => [], 'TREU' => [], 'EMPU' => [],
+		       'UEIP' => [], 'MNOP' => [], 'IP6PL' => []},
 	       node_id = binary:split(atom_to_binary(Role), <<$.>>),
 	       ue_ip_pools = [<<"pool-A">>],
 	       nat_port_blocks = #{},
@@ -165,8 +163,9 @@ handle_call({enabled, Bool}, _From, State) ->
     {reply, ok, State#state{enabled = Bool}};
 
 handle_call({feature, Feature, V}, _From, #state{features = UpFF0} = State) ->
-    UpFF = '#set-'([{Feature, V}], UpFF0),
-    OldV = '#get-'(Feature, UpFF0),
+    Key = list_to_atom(string:uppercase(atom_to_list(Feature))),
+    OldV = case maps:is_key(Key, UpFF0) of true -> 1; false -> 0 end,
+    UpFF = case V of 1 -> UpFF0#{Key => []}; _ -> maps:remove(Key, UpFF0) end,
     {reply, {ok, OldV}, State#state{features = UpFF}};
 
 handle_call({ue_ip_pools, Pools}, _From, State) ->
@@ -226,9 +225,9 @@ handle_call({usage_report, #pfcp_ctx{seid = #seid{cp = SEID}, urr_by_id = Rules}
 	if is_function(Report, 2) ->
 		lists:foldl(Report, [], Ids);
 	   true ->
-		[#usage_report_srr{group = [#urr_id{id = Id}|Report]} || Id <- Ids]
+		[[usage_report_srr, pfcp_packet:ies_to_map([#urr_id{id = Id} | Report])] || Id <- Ids]
 	end,
-    IEs = IEs0 ++ [#report_type{usar = 1}|URRs],
+    IEs = IEs0 ++ [[report_type, #{'USAR' => []}]|URRs],
     SRreq = #pfcp{version = v1, type = session_report_request, ie = IEs},
     State = do_send(SEID, SRreq, State0),
     {reply, ok, State};
@@ -239,7 +238,7 @@ handle_call({up_inactivity_timer_expiry,
 		       up_inactivity_timer = _UP_Inactivity_Timer}},
 	    _From, State0) ->
     %% Ignore the up inactivity timer, fire an 'upir' session report request
-    IE = [#report_type{upir = 1}],
+    IE = [[report_type, #{'UPIR' => []}]],
     SRreq = #pfcp{version = v1, type = session_report_request, ie = IE},
     State = do_send(SEID, SRreq, State0),
     {reply, ok, State};
@@ -281,10 +280,15 @@ terminate(_Reason, #state{sx = SxSocket}) ->
     catch gen_udp:close(SxSocket),
     ok.
 
-format_status(terminate, [_PDict, #state{history = H} = State]) ->
-    [{data, [{"State", State#state{history = length(H)}}]}];
-format_status(_Opts, [_PDict, State]) ->
-    [{data, [{"State", State}]}].
+format_status(Status) ->
+    case maps:get(reason, Status, normal) of
+	terminate ->
+	    State = maps:get(state, Status, #state{}),
+	    H = State#state.history,
+	    Status#{state => State#state{history = length(H)}};
+	_ ->
+	    Status
+    end.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -342,10 +346,10 @@ ue_ip_address_pool_ids(Pool) ->
 
 ue_ip_address_pool_information(VRF, Pools, NATblocks) ->
     Blocks = maps:get(VRF, NATblocks, []),
-    IEs = [ue_ip_address_pool_ids(Pools),
-	   #network_instance{instance = vrf:normalize_name(VRF)}] ++
-	[#bbf_nat_port_block{block = Block} || Block <- Blocks],
-    #ue_ip_address_pool_information{group = IEs}.
+    IEs = ue_ip_address_pool_ids(Pools) ++
+	[[network_instance, vrf:normalize_name(VRF)]] ++
+	[[bbf_nat_port_block, Block] || Block <- Blocks],
+    [ue_ip_address_pool_information, pfcp_packet:ies_to_map(IEs)].
 
 sx_reply(Type, IEs, State) ->
     sx_reply(Type, undefined, IEs, State).
@@ -380,8 +384,8 @@ handle_message(#pfcp{type = association_setup_request,
 		      dp_recovery_ts = RecoveryTS} = State0) ->
     UpIPRes =
 	case UpFF of
-	    #up_function_features{ftup = 1} ->
-		[#bbf_up_function_features{},
+	    #{'FTUP' := _} ->
+		[[bbf_up_function_features, #{}],
 		 ue_ip_address_pool_information(sgi, IPpools, NATblocks),
 		 ue_ip_address_pool_information(example, IPpools, NATblocks)];
 	    _ ->
@@ -394,10 +398,10 @@ handle_message(#pfcp{type = association_setup_request,
 
     RespIEs =
 	[#node_id{id = NodeId},
-	 #pfcp_cause{cause = 'Request accepted'},
+	 'Request accepted',
 	 #recovery_time_stamp{
 	    time = ergw_gsn_lib:seconds_to_sntp_time(RecoveryTS)},
-	 UpFF
+	 [up_function_features, UpFF]
 	 | UpIPRes ],
     State = State0#state{cp_recovery_ts = CpRecoveryTS},
     sx_reply(association_setup_response, RespIEs, State);
@@ -414,7 +418,7 @@ when Type =:= pfd_management_request;
      Type =:= session_report_request ->
     RespIEs =
 	[#node_id{id = [<<"test">>, <<"server">>]},
-	 #pfcp_cause{cause = 'No established Sx Association'}],
+	 'No established Sx Association'],
      sx_reply(pfcp_response(Type), RespIEs, State);
 
 handle_message(#pfcp{type = session_establishment_request, seid = 0,
@@ -425,7 +429,7 @@ handle_message(#pfcp{type = session_establishment_request, seid = 0,
     ControlPlaneIP = choose_control_ip(ControlPlaneIP4, ControlPlaneIP6, State0),
     UserPlaneSEID = ergw_sx_socket:seid(),
     RespIEs0 =
-	[#pfcp_cause{cause = 'Request accepted'},
+	['Request accepted',
 	 f_seid(UserPlaneSEID, IP)],
     {RespIEs, State1} = process_request(ReqIEs, RespIEs0, State0),
 
@@ -439,7 +443,7 @@ handle_message(#pfcp{type = session_modification_request, seid = UserPlaneSEID, 
 	       #state{sessions = Sessions} = State0)
   when is_map_key(UserPlaneSEID, Sessions) ->
     #session{cp_seid = ControlPlaneSEID} = maps:get(UserPlaneSEID, Sessions),
-    RespIEs0 = [#pfcp_cause{cause = 'Request accepted'}],
+    RespIEs0 = ['Request accepted'],
     {RespIEs, State} = process_request(ReqIEs, RespIEs0, State0),
     sx_reply(session_modification_response, ControlPlaneSEID, RespIEs, State);
 
@@ -447,7 +451,7 @@ handle_message(#pfcp{type = session_deletion_request, seid = UserPlaneSEID},
 	       #state{sessions = Sessions} = State0)
   when is_map_key(UserPlaneSEID, Sessions) ->
     #session{cp_seid = ControlPlaneSEID} = maps:get(UserPlaneSEID, Sessions),
-    RespIEs0 = [#pfcp_cause{cause = 'Request accepted'}],
+    RespIEs0 = ['Request accepted'],
     RespIEs = report_urrs(State0, RespIEs0),
     State = State0#state{urrs = #{}, sessions = maps:remove(UserPlaneSEID, Sessions)},
     sx_reply(session_deletion_response, ControlPlaneSEID, RespIEs, State);
@@ -460,7 +464,7 @@ handle_message(#pfcp{type = ReqType, seid = UserPlaneSEID},
 	ReqType == session_modification_request orelse
 	ReqType == session_deletion_request) ->
     #session{cp_seid = ControlPlaneSEID} = maps:get(UserPlaneSEID, Sessions),
-    RespIEs = [#pfcp_cause{cause = 'System failure'}],
+    RespIEs = ['System failure'],
     sx_reply(make_sx_response(ReqType), ControlPlaneSEID, RespIEs, State);
 
 handle_message(#pfcp{type = ReqType}, State)
@@ -469,7 +473,7 @@ handle_message(#pfcp{type = ReqType}, State)
       ReqType == session_establishment_request orelse
       ReqType == session_modification_request orelse
       ReqType == session_deletion_request ->
-    RespIEs = [#pfcp_cause{cause = 'Session context not found'}],
+    RespIEs = ['Session context not found'],
     sx_reply(make_sx_response(ReqType), 0, RespIEs, State);
 
 handle_message(#pfcp{type = ReqType}, State)
@@ -506,12 +510,6 @@ record(Msg, #state{record = true, history = Hist} = State) ->
 record(_Msg, State) ->
     State.
 
-process_ies(Fun, Acc, IE) when is_tuple(IE) ->
-    Fun(IE, Acc);
-process_ies(_Fun, Acc, []) ->
-    Acc;
-process_ies(Fun, Acc, [H|T]) ->
-    process_ies(Fun, Fun(H, Acc), T).
 
 choose_up_ip(choose, _, #state{up_ip = IP})
   when size(IP) ==  4 ->
@@ -521,11 +519,11 @@ choose_up_ip(_, choose, #state{up_ip = IP})
     {undefined, ergw_inet:ip2bin(?LOCALHOST_IPv6)}.
 
 process_f_teid(_, #f_teid{teid = choose},
-	       _, {RespIEs0, #state{features = #up_function_features{ftup = FTUP}}} = State)
-  when FTUP =/= 1 ->
+	       _, {RespIEs0, #state{features = Features}} = State)
+  when not is_map_key('FTUP', Features) ->
     %% choose when FTUP is not set is not allowed
-    Cause = #pfcp_cause{cause = 'Invalid F-TEID allocation option'},
-    RespIEs = lists:keystore(pfcp_cause, 1, RespIEs0, Cause),
+    Cause = 'Invalid F-TEID allocation option',
+    RespIEs = [[pfcp_cause, Cause] | [X || X <- RespIEs0, hd(X) =/= pfcp_cause]],
     {RespIEs, State};
 
 process_f_teid(Id, #f_teid{teid = choose, choose_id = ChId},
@@ -533,7 +531,7 @@ process_f_teid(Id, #f_teid{teid = choose, choose_id = ChId},
   when is_map_key(ChId, TEIDs) ->
     {TEID, IP4, IP6} = maps:get(ChId, TEIDs),
     FqTEID = #f_teid{teid = TEID, ipv4 = IP4, ipv6 = IP6},
-    Create = #created_pdr{group = [Id, FqTEID]},
+    Create = [created_pdr, #{pdr_id => Id, f_teid => FqTEID}],
     {[Create | RespIEs], State};
 
 process_f_teid(Id, #f_teid{teid = choose, choose_id = ChId, ipv4 = IPv4, ipv6 = IPv6},
@@ -541,115 +539,112 @@ process_f_teid(Id, #f_teid{teid = choose, choose_id = ChId, ipv4 = IPv4, ipv6 = 
     {IP4, IP6} = choose_up_ip(IPv4, IPv6, State),
     TEID = rand:uniform(16#fffffffe),
     FqTEID = #f_teid{teid = TEID, ipv4 = IP4, ipv6 = IP6},
-    Create = #created_pdr{group = [Id, FqTEID]},
+    Create = [created_pdr, #{pdr_id => Id, f_teid => FqTEID}],
     {[Create | RespIEs], State#state{teids = maps:put(ChId, {TEID, IP4, IP6}, TEIDs)}};
 
 process_f_teid(_, _, _, Acc) ->
     Acc.
 
 %% process_request_ie/3
-process_request_ie(#create_pdr{group = #{pdr_id := Id, pdi := #pdi{group = PDI}}}, RESTI, Acc) ->
+process_request_ie({create_pdr, #{pdr_id := Id, pdi := PDI}}, RESTI, Acc) ->
     process_f_teid(Id, maps:get(f_teid, PDI, undefined), RESTI, Acc);
 
-process_request_ie(#create_far{
-		      group =
-			  #{forwarding_parameters :=
-				#forwarding_parameters{
-				   group =
-				       #{bbf_apply_action := #bbf_apply_action{nat = 1},
-					 bbf_nat_port_block := Block}}}},
+process_request_ie({create_far,
+		      #{forwarding_parameters :=
+			  #{bbf_apply_action := #{'NAT' := _},
+			    bbf_nat_port_block := Block}}},
 		   _, {RespIEs, State}) ->
     Start = 1024 + rand:uniform(50000),
-    Bind = #tp_created_nat_binding{
-	      group = [Block, #bbf_nat_outside_address{ipv4 = <<192,168,1,1>>},
-		       #bbf_nat_external_port_range{ranges = [{Start, Start + 1000}]}]},
+    Bind = [tp_created_nat_binding,
+	     #{bbf_nat_port_block => Block,
+	       bbf_nat_outside_address => <<192,168,1,1>>,
+	       bbf_nat_external_port_range => #bbf_nat_external_port_range{ranges = [{Start, Start + 1000}]}}],
     {[Bind | RespIEs], State};
 
-process_request_ie(#query_urr{group = #{urr_id := #urr_id{id = Id}}},
+process_request_ie({query_urr, #{urr_id := #urr_id{id = Id}}},
 		   _, {RespIEs, #state{accounting = on} = State}) ->
     Report =
-	#usage_report_smr{
-	   group =
-	       [#urr_id{id = Id},
-		#usage_report_trigger{immer = 1},
-		#volume_measurement{
-		   total = 6,
-		   uplink = 4,
-		   downlink = 2
-		  },
-		#tp_packet_measurement{
-		   total = 4,
-		   uplink = 3,
-		   downlink = 1
-		  }
-	       ]
-	  },
+	[usage_report_smr,
+	 pfcp_packet:ies_to_map(
+	   [#urr_id{id = Id},
+	    [usage_report_trigger, #{'IMMER' => []}],
+	    #volume_measurement{
+	       total = 6,
+	       uplink = 4,
+	       downlink = 2
+	      },
+	    #tp_packet_measurement{
+	       total = 4,
+	       uplink = 3,
+	       downlink = 1
+	      }
+	   ])],
     {[Report | RespIEs], State};
 
-process_request_ie(#remove_urr{group = #{urr_id := #urr_id{id = Id}}},
+process_request_ie({remove_urr, #{urr_id := #urr_id{id = Id}}},
 		   _, {RespIEs, #state{accounting = on} = State}) ->
     Report =
-	#usage_report_smr{
-	   group =
-	       [#urr_id{id = Id},
-		#usage_report_trigger{termr = 1},
-		#volume_measurement{
-		   total = 5,
-		   uplink = 2,
-		   downlink = 3
-		  },
-		#tp_packet_measurement{
-		   total = 12,
-		   uplink = 5,
-		   downlink = 7
-		  }
-	       ]
-	  },
+	[usage_report_smr,
+	 pfcp_packet:ies_to_map(
+	   [#urr_id{id = Id},
+	    [usage_report_trigger, #{'TERMR' => []}],
+	    #volume_measurement{
+	       total = 5,
+	       uplink = 2,
+	       downlink = 3
+	      },
+	    #tp_packet_measurement{
+	       total = 12,
+	       uplink = 5,
+	       downlink = 7
+	      }
+	   ])],
     {[Report | RespIEs], State};
 
-process_request_ie(#remove_urr{group = #{urr_id := #urr_id{id = Id}}},
+process_request_ie({remove_urr, #{urr_id := #urr_id{id = Id}}},
 		   _, {RespIEs, #state{urrs = URRs} = State}) ->
     {RespIEs, State#state{urrs = maps:remove(Id, URRs)}};
 
-process_request_ie(#create_urr{group = #{urr_id := #urr_id{id = Id}}},
+process_request_ie({create_urr, #{urr_id := #urr_id{id = Id}}},
 		   _, {RespIEs, #state{urrs = URRs} = State}) ->
     {RespIEs, State#state{urrs = maps:put(Id, on, URRs)}};
 
 process_request_ie(_IE, _, Acc) ->
     Acc.
 
-%% process_request_ies/3
-process_request_ies(IEs, RESTI, Acc) ->
-    process_ies(process_request_ie(_, RESTI, _), Acc, IEs).
 
 %% process_request/3
 process_request(ReqIEs, RespIEs, State0) ->
     %% ct:pal("Process Req: ~p", [ReqIEs]),
     State = State0#state{teids = #{}},
-    #pfcpsereq_flags{resti = RESTI} =
-	maps:get(pfcpsereq_flags, ReqIEs, #pfcpsereq_flags{resti = 0}),
-    maps:fold(fun(_K,V,Acc) -> process_request_ies(V, RESTI, Acc) end,
+    RESTI = maps:get(pfcpsereq_flags, ReqIEs, #{}),
+    maps:fold(fun(K, Vs, Acc) when is_list(Vs) ->
+		      lists:foldl(fun(V, A) -> process_request_ie({K, V}, RESTI, A) end, Acc, Vs);
+		 (K, V, Acc) ->
+		      process_request_ie({K, V}, RESTI, Acc)
+	      end,
 	      {RespIEs, State}, ReqIEs).
 
 report_urrs(#state{accounting = on, urrs = URRs}, RespIEs) ->
     maps:fold(
       fun(Id, _, IEs) ->
-	      [#usage_report_sdr{
-		  group =
-		      [#urr_id{id = Id},
-		       #usage_report_trigger{termr = 1},
-		       #volume_measurement{
-			  total = 5,
-			  uplink = 2,
-			  downlink = 3
-			 },
-		       #tp_packet_measurement{
-			  total = 12,
-			  uplink = 5,
-			  downlink = 7
-			 }
-		      ]
-		 } | IEs]
+	      Report =
+		  [usage_report_sdr,
+		   pfcp_packet:ies_to_map(
+		     [#urr_id{id = Id},
+		      [usage_report_trigger, #{'TERMR' => []}],
+		      #volume_measurement{
+			 total = 5,
+			 uplink = 2,
+			 downlink = 3
+			},
+		      #tp_packet_measurement{
+			 total = 12,
+			 uplink = 5,
+			 downlink = 7
+			}
+		     ])],
+	      [Report | IEs]
       end, RespIEs, URRs);
 report_urrs(_, RespIEs) ->
     RespIEs.
