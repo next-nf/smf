@@ -96,7 +96,7 @@ session_liveness_check(#pfcp_ctx{} = PCtx) ->
 build_query_usage_report(Type, PCtx) ->
     maps:fold(fun(K, {URRType, V}, A)
 		    when Type =:= URRType, is_integer(V) ->
-		      [[query_urr, #{urr_id => #urr_id{id = K}}] | A];
+		      [#{urr_id => #urr_id{id = K}} | A];
 		 (_, _, A) -> A
 	      end, [], ergw_pfcp:get_urr_ids(PCtx)).
 
@@ -108,7 +108,7 @@ query_usage_report(PCtx) ->
 query_usage_report(Type, PCtx)
   when is_record(PCtx, pfcp_ctx) andalso
        (Type == offline orelse Type == online) ->
-    IEs = build_query_usage_report(Type, PCtx),
+    IEs = [[query_urr, GroupMap] || GroupMap <- build_query_usage_report(Type, PCtx)],
     session_modification_request(PCtx, IEs);
 
 query_usage_report(ChargingKeys, PCtx)
