@@ -72,7 +72,7 @@ delete_session(Reason, PCtx)
     Req = #pfcp{version = v1, type = session_deletion_request, ie = []},
     case ergw_sx_node:call(PCtx, Req) of
 	#pfcp{type = session_deletion_response,
-	      ie = #{pfcp_cause := #pfcp_cause{cause = 'Request accepted'}} = IEs} ->
+	      ie = #{pfcp_cause := 'Request accepted'} = IEs} ->
 	    maps:get(usage_report_sdr, IEs, undefined);
 
 	_Other ->
@@ -87,7 +87,7 @@ session_liveness_check(#pfcp_ctx{} = PCtx) ->
     Req = #pfcp{version = v1, type = session_modification_request, ie = []},
     case ergw_sx_node:call(PCtx, Req) of
 	#pfcp{type = session_modification_response,
-	      ie = #{pfcp_cause := #pfcp_cause{cause = 'Request accepted'}}} ->
+	      ie = #{pfcp_cause := 'Request accepted'}} ->
 	    ok;
 	_ ->
 	    {error, ?CTX_ERR(?FATAL, system_failure)}
@@ -96,7 +96,7 @@ session_liveness_check(#pfcp_ctx{} = PCtx) ->
 build_query_usage_report(Type, PCtx) ->
     maps:fold(fun(K, {URRType, V}, A)
 		    when Type =:= URRType, is_integer(V) ->
-		      [#query_urr{group = [#urr_id{id = K}]} | A];
+		      [[query_urr, #{urr_id => #urr_id{id = K}}] | A];
 		 (_, _, A) -> A
 	      end, [], ergw_pfcp:get_urr_ids(PCtx)).
 
@@ -113,7 +113,7 @@ query_usage_report(Type, PCtx)
 
 query_usage_report(ChargingKeys, PCtx)
   when is_record(PCtx, pfcp_ctx) ->
-    IEs = [#query_urr{group = [#urr_id{id = Id}]} ||
+    IEs = [[query_urr, #{urr_id => #urr_id{id = Id}}] ||
 	   Id <- ergw_pfcp:get_urr_ids(ChargingKeys, PCtx), is_integer(Id)],
     session_modification_request(PCtx, IEs).
 
@@ -137,7 +137,7 @@ update_bearer(#f_teid{teid = TEID, ipv6 = IP}, #bearer{local = #fq_teid{ip = v6}
 update_bearer(_, Bearer) ->
     Bearer.
 
-update_bearer_f(#created_pdr{group = #{pdr_id := #pdr_id{id = PdrId}, f_teid := FqTEID}},
+update_bearer_f(#{pdr_id := #pdr_id{id = PdrId}, f_teid := FqTEID},
 		{BearerMap, PCtx0}) ->
     Key = ergw_pfcp:get_bearer_key_by_pdr(PdrId, PCtx0),
     Bearer = maps:update_with(Key, update_bearer(FqTEID, _), BearerMap),
@@ -147,7 +147,7 @@ update_bearer_f(_, Acc) ->
     Acc.
 
 %% update_bearer/3
-update_bearer(#{created_pdr := #created_pdr{} = PDR}, Bearer, PCtx) ->
+update_bearer(#{created_pdr := PDR}, Bearer, PCtx) when is_map(PDR) ->
     update_bearer_f(PDR, {Bearer, PCtx});
 update_bearer(#{created_pdr := PDRs}, Bearer, PCtx) when is_list(PDRs) ->
     lists:foldl(fun update_bearer_f/2, {Bearer, PCtx}, PDRs);
@@ -155,21 +155,19 @@ update_bearer(_, Bearer, PCtx) ->
     {Bearer, PCtx}.
 
 %% session_info/3
-session_info(_, #tp_created_nat_binding{
-		   group =
-		       #{bbf_nat_port_block := #bbf_nat_port_block{block = Block},
-			 bbf_nat_outside_address := #bbf_nat_outside_address{ipv4 = IP},
-			 bbf_nat_external_port_range :=
-			     #bbf_nat_external_port_range{ranges = [{Start, End}|_]}}},
+session_info(tp_created_nat_binding,
+	     #{bbf_nat_port_block := Block,
+	       bbf_nat_outside_address := IP,
+	       bbf_nat_external_port_range :=
+		   #bbf_nat_external_port_range{ranges = [{Start, End}|_]}},
 	     Info) ->
     Info#{'NAT-Pool-Id' => Block,
 	  'NAT-IP-Address' => IP,
 	  'NAT-Port-Start' => Start,
 	  'NAT-Port-End' => End};
-session_info(_, #tp_created_nat_binding{
-		   group =
-		       #{bbf_nat_port_block := #bbf_nat_port_block{block = Block},
-			 bbf_nat_outside_address := #bbf_nat_outside_address{ipv4 = IP}}},
+session_info(tp_created_nat_binding,
+	     #{bbf_nat_port_block := Block,
+	       bbf_nat_outside_address := IP},
 	     Info) ->
     Info#{'NAT-Pool-Id' => Block,
 	  'NAT-IP-Address' => IP};
@@ -200,7 +198,7 @@ session_establishment_request(Handler, PCC, PCtx0,
     Req = #pfcp{version = v1, type = session_establishment_request, ie = IEs},
     case ergw_sx_node:call(PCtx2, Req) of
 	#pfcp{version = v1, type = session_establishment_response,
-	      ie = #{pfcp_cause := #pfcp_cause{cause = 'Request accepted'},
+	      ie = #{pfcp_cause := 'Request accepted',
 		     f_seid := #f_seid{}} = RespIEs} ->
 	    SessionInfo = session_info(RespIEs),
 	    {Bearer, PCtx} = update_bearer(RespIEs, Bearer0, PCtx2),
@@ -216,7 +214,7 @@ session_modification_request(PCtx, ReqIEs)
     Req = #pfcp{version = v1, type = session_modification_request, ie = ReqIEs},
     case ergw_sx_node:call(PCtx, Req) of
 	#pfcp{type = session_modification_response,
-	      ie = #{pfcp_cause := #pfcp_cause{cause = 'Request accepted'}} = RespIEs} ->
+	      ie = #{pfcp_cause := 'Request accepted'} = RespIEs} ->
 	    SessionInfo = session_info(RespIEs),
 	    UsageReport = maps:get(usage_report_smr, RespIEs, undefined),
 	    {ok, {PCtx, UsageReport, SessionInfo}};
@@ -319,24 +317,21 @@ build_sx_ctx_rule(#sx_upd{
     {FarId, PCtx2} = ergw_pfcp:get_id(far, dp_to_cp_far, PCtx1),
     {LeftBearerReq, PCtx} = make_request_bearer(PdrId, LeftBearer, PCtx2),
 
-    PDI = #pdi{
-	     group =
-		 [#sdf_filter{
-		     flow_description =
-			 <<"permit out 58 from ff00::/8 to assigned">>}
-		 | ergw_pfcp:traffic_endpoint(LeftBearerReq, [])]
-	    },
+    PDI = pfcp_packet:ies_to_map(
+	    [#sdf_filter{
+		 flow_description =
+		     <<"permit out 58 from ff00::/8 to assigned">>}
+	    | ergw_pfcp:traffic_endpoint(LeftBearerReq, [])]),
     PDR = [#pdr_id{id = PdrId},
 	   #precedence{precedence = 100},
-	   PDI,
+	   [pdi, PDI],
 	   #far_id{id = FarId}
 	   %% TBD: #urr_id{id = 1}
 	  ],
     FAR = [#far_id{id = FarId},
-	   #apply_action{forw = 1},
-	   #forwarding_parameters{
-	      group = ergw_pfcp:traffic_forward(CpBearer, [])
-	     }
+	   [apply_action, #{'FORW' => []}],
+	   [forwarding_parameters,
+	    pfcp_packet:ies_to_map(ergw_pfcp:traffic_forward(CpBearer, []))]
 	  ],
     Update#sx_upd{
       pctx = ergw_pfcp_rules:add(
@@ -361,7 +356,7 @@ build_sx_linked_offline_rule(true, URR0, PCtx0) ->
     {LinkedUrrId, PCtx} =
 	ergw_pfcp:get_urr_id(RuleName, ['IP-CAN'], RuleName, PCtx0),
     URR = maps:update_with(reporting_triggers,
-			   fun(T) -> T#reporting_triggers{linked_usage_reporting = 1} end,
+			   fun(T) -> T#{'LIUSA' => []} end,
 			   URR0#{linked_urr_id => #linked_urr_id{id = LinkedUrrId}}),
     {URR, PCtx};
 build_sx_linked_offline_rule(_, URR, PCtx) ->
@@ -382,17 +377,17 @@ build_sx_offline_charging_rule(Name,
     MM = case maps:get('Metering-Method', Definition,
 		       [?'DIAMETER_3GPP_CHARGING_METERING-METHOD_DURATION_VOLUME']) of
 	     [?'DIAMETER_3GPP_CHARGING_METERING-METHOD_DURATION'] ->
-		 #measurement_method{durat = 1};
+		 #{'DURAT' => []};
 	     [?'DIAMETER_3GPP_CHARGING_METERING-METHOD_VOLUME'] ->
-		 #measurement_method{volum = 1};
+		 #{'VOLUM' => []};
 	     [?'DIAMETER_3GPP_CHARGING_METERING-METHOD_DURATION_VOLUME'] ->
-		 #measurement_method{volum = 1, durat = 1}
+		 #{'VOLUM' => [], 'DURAT' => []}
 	 end,
 
     {UrrId, PCtx1} = ergw_pfcp:get_urr_id(ChargingKey, [RatingGroup], ChargingKey, PCtx0),
     URR0 = #{urr_id => #urr_id{id = UrrId},
 	     measurement_method => MM,
-	     reporting_triggers => #reporting_triggers{}},
+	     reporting_triggers => #{}},
     {URR1, PCtx} = build_sx_linked_rule(URR0, PCtx1),
 
     OCP = maps:get('Default', OCPcfg, #{}),
@@ -461,7 +456,7 @@ build_sx_filter(FlowInfo)
     [#sdf_filter{flow_description = FD} || #{'Flow-Description' := [FD]} <- FlowInfo];
 build_sx_filter(AppId)
   when is_binary(AppId) ->
-    [#application_id{id = AppId}];
+    [[application_id, AppId]];
 build_sx_filter(_) ->
     [].
 
@@ -475,7 +470,7 @@ pdr(PdrId, Precedence, Side, Src, Dst, FilterInfo, FarId, URRs) ->
     Group =
 	[#pdr_id{id = PdrId},
 	 #precedence{precedence = Precedence},
-	 #pdi{group = pdi(Side, Src, Dst, SxFilter)},
+	 [pdi, pfcp_packet:ies_to_map(pdi(Side, Src, Dst, SxFilter))],
 	 #far_id{id = FarId}] ++
 	[#urr_id{id = X} || X <- URRs],
     ergw_pfcp:outer_header_removal(Src, Group).
@@ -515,19 +510,17 @@ far(FarId, [#{'Redirect-Support' :=        [1],   %% ENABLED
     _Src, Dst) ->
     RedirInfo = #redirect_information{type = 'URL', address = to_binary(URL)},
     [#far_id{id = FarId},
-     #apply_action{forw = 1},
-     #forwarding_parameters{
-	group = ergw_pfcp:traffic_forward(Dst, [RedirInfo])
-       }];
+     [apply_action, #{'FORW' => []}],
+     [forwarding_parameters,
+      pfcp_packet:ies_to_map(ergw_pfcp:traffic_forward(Dst, [RedirInfo]))]];
 far(FarId, _RedirInfo, _Src, #bearer{remote = undefined}) ->
     [#far_id{id = FarId},
-     #apply_action{drop = 1}];
+     [apply_action, #{'DROP' => []}]];
 far(FarId, _RedirInfo, _Src, Dst) ->
     [#far_id{id = FarId},
-     #apply_action{forw = 1},
-     #forwarding_parameters{
-	group = ergw_pfcp:traffic_forward(Dst, [])
-       }].
+     [apply_action, #{'FORW' => []}],
+     [forwarding_parameters,
+      pfcp_packet:ies_to_map(ergw_pfcp:traffic_forward(Dst, []))]].
 
 %% build_sx_rule/6
 build_sx_rule(Direction, Name, Definition, FilterInfo, URRs,
@@ -599,15 +592,15 @@ get_rule_urrs(D, #sx_upd{pctx = PCtx}) ->
 build_sx_usage_rule_4(time, #{'CC-Time' := [Time]}, _,
 		    #{measurement_method := MM,
 		      reporting_triggers := RT} = URR) ->
-    URR#{measurement_method => MM#measurement_method{durat = 1},
-	 reporting_triggers => RT#reporting_triggers{time_quota = 1},
+    URR#{measurement_method => MM#{'DURAT' => []},
+	 reporting_triggers => RT#{'TIMQU' => []},
 	 time_quota => #time_quota{quota = Time}};
 
 build_sx_usage_rule_4(time_quota_threshold,
 		    #{'CC-Time' := [Time]}, #{'Time-Quota-Threshold' := [TimeThreshold]},
 		    #{reporting_triggers := RT} = URR)
   when Time > TimeThreshold ->
-    URR#{reporting_triggers => RT#reporting_triggers{time_threshold = 1},
+    URR#{reporting_triggers => RT#{'TIMTH' => []},
 	 time_threshold => #time_threshold{threshold = Time - TimeThreshold}};
 
 build_sx_usage_rule_4(total_octets, #{'CC-Total-Octets' := [Volume]}, _,
@@ -615,22 +608,22 @@ build_sx_usage_rule_4(total_octets, #{'CC-Total-Octets' := [Volume]}, _,
 		      reporting_triggers := RT} = URR) ->
     maps:update_with(volume_quota, fun(V) -> V#volume_quota{total = Volume} end,
 		     #volume_quota{total = Volume},
-		     URR#{measurement_method => MM#measurement_method{volum = 1},
-			  reporting_triggers => RT#reporting_triggers{volume_quota = 1}});
+		     URR#{measurement_method => MM#{'VOLUM' => []},
+			  reporting_triggers => RT#{'VOLQU' => []}});
 build_sx_usage_rule_4(input_octets, #{'CC-Input-Octets' := [Volume]}, _,
 		    #{measurement_method := MM,
 		      reporting_triggers := RT} = URR) ->
     maps:update_with(volume_quota, fun(V) -> V#volume_quota{uplink = Volume} end,
 		     #volume_quota{uplink = Volume},
-		     URR#{measurement_method => MM#measurement_method{volum = 1},
-			  reporting_triggers => RT#reporting_triggers{volume_quota = 1}});
+		     URR#{measurement_method => MM#{'VOLUM' => []},
+			  reporting_triggers => RT#{'VOLQU' => []}});
 build_sx_usage_rule_4(output_octets, #{'CC-Output-Octets' := [Volume]}, _,
 		    #{measurement_method := MM,
 		      reporting_triggers := RT} = URR) ->
     maps:update_with(volume_quota, fun(V) -> V#volume_quota{downlink = Volume} end,
 		     #volume_quota{downlink = Volume},
-		     URR#{measurement_method => MM#measurement_method{volum = 1},
-			  reporting_triggers => RT#reporting_triggers{volume_quota = 1}});
+		     URR#{measurement_method => MM#{'VOLUM' => []},
+			  reporting_triggers => RT#{'VOLQU' => []}});
 
 build_sx_usage_rule_4(total_quota_threshold,
 		    #{'CC-Total-Octets' := [Volume]},
@@ -640,7 +633,7 @@ build_sx_usage_rule_4(total_quota_threshold,
     VolumeThreshold = Volume - Threshold,
     maps:update_with(volume_threshold, fun(V) -> V#volume_threshold{total = VolumeThreshold} end,
 		     #volume_threshold{total = VolumeThreshold},
-		     URR#{reporting_triggers => RT#reporting_triggers{volume_threshold = 1}});
+		     URR#{reporting_triggers => RT#{'VOLTH' => []}});
 build_sx_usage_rule_4(input_quota_threshold,
 		    #{'CC-Input-Octets' := [Volume]},
 		    #{'Volume-Quota-Threshold' := [Threshold]},
@@ -649,7 +642,7 @@ build_sx_usage_rule_4(input_quota_threshold,
     VolumeThreshold = Volume - Threshold,
     maps:update_with(volume_threshold, fun(V) -> V#volume_threshold{uplink = VolumeThreshold} end,
 		     #volume_threshold{uplink = VolumeThreshold},
-		     URR#{reporting_triggers => RT#reporting_triggers{volume_threshold = 1}});
+		     URR#{reporting_triggers => RT#{'VOLTH' => []}});
 build_sx_usage_rule_4(output_quota_threshold,
 		    #{'CC-Output-Octets' := [Volume]},
 		    #{'Volume-Quota-Threshold' := [Threshold]},
@@ -658,7 +651,7 @@ build_sx_usage_rule_4(output_quota_threshold,
     VolumeThreshold = Volume - Threshold,
     maps:update_with(volume_threshold, fun(V) -> V#volume_threshold{downlink = VolumeThreshold} end,
 		     #volume_threshold{downlink = VolumeThreshold},
-		     URR#{reporting_triggers => RT#reporting_triggers{volume_threshold = 1}});
+		     URR#{reporting_triggers => RT#{'VOLTH' => []}});
 
 build_sx_usage_rule_4(monitoring_time, #{'Tariff-Time-Change' := [TTC]}, _, URR) ->
     Time = ergw_gsn_lib:datetime_to_sntp_time(TTC),
@@ -691,9 +684,9 @@ pfcp_user_id(_, IEs) ->
 
 handle_validity_time(_ChargingKey,
 		     #{'Update-Time-Stamp' := BaseTime, 'Validity-Time' := {BaseTime, Time}},
-		     URR0, #pfcp_ctx{features = #up_function_features{vtime = 1}} = PCtx) ->
+		     URR0, #pfcp_ctx{features = #{'VTIME' := _}} = PCtx) ->
     URR = maps:update_with(reporting_triggers,
-			   fun(T) -> T#reporting_triggers{quota_validity_time = 1} end,
+			   fun(T) -> T#{'QUVTI' => []} end,
 			   URR0#{quota_validity_time => #quota_validity_time{time = Time}}),
     {URR, PCtx};
 handle_validity_time(ChargingKey, #{'Validity-Time' := {BaseTime, Time}}, URR, PCtx) ->
@@ -711,8 +704,8 @@ build_sx_usage_rule(_K, #{'Rating-Group' := [RatingGroup],
     {UrrId, PCtx1} = ergw_pfcp:get_urr_id(ChargingKey, [RatingGroup], ChargingKey, PCtx0),
 
     URR0 = #{urr_id => #urr_id{id = UrrId},
-	     measurement_method => #measurement_method{},
-	     reporting_triggers => #reporting_triggers{},
+	     measurement_method => #{},
+	     reporting_triggers => #{},
 	     'Update-Time-Stamp' => UpdateTS},
 
     {URR1, PCtx2} = handle_validity_time(ChargingKey, GCU, URR0, PCtx1),
@@ -760,8 +753,8 @@ build_ipcan_rule(true, #sx_upd{pctx = PCtx0} = Update) ->
     {UrrId, PCtx} = ergw_pfcp:get_urr_id(RuleName, ['IP-CAN'], RuleName, PCtx0),
 
     URR = [#urr_id{id = UrrId},
-	   #measurement_method{volum = 1, durat = 1},
-	   #reporting_triggers{}],
+	   #{'VOLUM' => [], 'DURAT' => []},
+	   #{}],
 
     ?LOG(debug, "URR: ~p", [URR]),
     Update#sx_upd{pctx = ergw_pfcp_rules:add(urr, RuleName, URR, PCtx)};
@@ -780,8 +773,8 @@ build_sx_monitor_rule('IP-CAN', Service, {periodic, Time, _Opts} = _Definition,
     {UrrId, PCtx} = ergw_pfcp:get_urr_id(RuleName, ['IP-CAN'], RuleName, PCtx0),
 
     URR = [#urr_id{id = UrrId},
-	   #measurement_method{volum = 1, durat = 1},
-	   #reporting_triggers{periodic_reporting = 1},
+	   #{'VOLUM' => [], 'DURAT' => []},
+	   #{'PERIO' => []},
 	   #measurement_period{period = Time}],
 
     ?LOG(debug, "URR: ~p", [URR]),
@@ -801,8 +794,8 @@ build_sx_monitor_rule('Offline', Service, {periodic, Time, _Opts} = Definition,
     {UrrId, PCtx1} = ergw_pfcp:get_urr_id(RuleName, ['IP-CAN'], RuleName, PCtx0),
 
     URR = [#urr_id{id = UrrId},
-	   #measurement_method{volum = 1, durat = 1},
-	   #reporting_triggers{periodic_reporting = 1},
+	   #{'VOLUM' => [], 'DURAT' => []},
+	   #{'PERIO' => []},
 	   #measurement_period{period = Time}],
     ?LOG(debug, "URR: ~p", [URR]),
     URRUpd =
@@ -810,7 +803,7 @@ build_sx_monitor_rule('Offline', Service, {periodic, Time, _Opts} = Definition,
 		X = X0#{measurement_period => #measurement_period{period = Time}},
 		maps:update_with(
 		  reporting_triggers,
-		  fun (T) -> T#reporting_triggers{periodic_reporting = 1} end, X)
+		  fun (T) -> T#{'PERIO' => []} end, X)
 	end,
     PCtx = ergw_pfcp_rules:update_with(urr, RuleName, URRUpd, URR, PCtx1),
 
@@ -849,18 +842,14 @@ unregister_ctx_ids(Handler, Bearer, PCtx) ->
 %% Usage Report to Charging Event translation
 %% ===========================================================================
 
-fold_usage_report_1(Fun, #usage_report_smr{group = UR}, Acc) ->
-    Fun(UR, Acc);
-fold_usage_report_1(Fun, #usage_report_sdr{group = UR}, Acc) ->
-    Fun(UR, Acc);
-fold_usage_report_1(Fun, #usage_report_srr{group = UR}, Acc) ->
+fold_usage_report_1(Fun, UR, Acc) when is_map(UR) ->
     Fun(UR, Acc).
 
 foldl_usage_report(_Fun, Acc, []) ->
     Acc;
 foldl_usage_report(Fun, Acc, [H|T]) ->
     foldl_usage_report(Fun, fold_usage_report_1(Fun, H, Acc), T);
-foldl_usage_report(Fun, Acc, URR) when is_tuple(URR) ->
+foldl_usage_report(Fun, Acc, URR) when is_map(URR) ->
     fold_usage_report_1(Fun, URR, Acc);
 foldl_usage_report(_Fun, Acc, undefined) ->
     Acc.

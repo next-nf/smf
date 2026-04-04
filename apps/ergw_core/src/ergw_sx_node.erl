@@ -48,7 +48,7 @@
 	       mode = transient  :: 'transient' | 'persistent',
 	       node_select       :: atom(),
 	       retries = 0       :: non_neg_integer(),
-	       features          :: #up_function_features{},
+	       features          :: map(),
 	       recovery_ts       :: undefined | non_neg_integer(),
 	       pfcp_ctx          :: #pfcp_ctx{},
 	       bearer            :: #{atom() := #bearer{}},
@@ -128,15 +128,15 @@ handle_request_fun(ReqKey, #pfcp{type = session_report_request} = Report) ->
     {Ctx, IEs} =
 	case ergw_context:sx_report(Report) of
 	    {ok, Ctx0} ->
-		{Ctx0, #{pfcp_cause => #pfcp_cause{cause = 'Request accepted'}}};
+		{Ctx0, #{pfcp_cause => 'Request accepted'}};
 	    {ok, Ctx0, Cause}
 	      when is_atom(Cause) ->
-		{Ctx0, #{pfcp_cause => #pfcp_cause{cause = Cause}}};
+		{Ctx0, #{pfcp_cause => Cause}};
 	    {ok, Ctx0, IEs0}
 	      when is_map(IEs0) ->
 		{Ctx0, IEs0};
 	    {error, not_found} ->
-		{0, #{pfcp_cause => #pfcp_cause{cause = 'Session context not found'}}}
+		{0, #{pfcp_cause => 'Session context not found'}}
 	end,
 
     Response = make_response(session_report_response, Ctx, Report, IEs),
@@ -147,7 +147,7 @@ set_defaults(Opts0) ->
     Opts = ergw_sx_node:validate_defaults(Opts0),
     ergw_core_config:put(up_node_defaults, Opts).
 
-set_required_upff(Opts) when is_record(Opts, up_function_features) ->
+set_required_upff(Opts) when is_map(Opts) ->
     ergw_core_config:put(up_required_feature, Opts);
 set_required_upff(Opts) ->
     error(badarg, [Opts]).
@@ -353,7 +353,7 @@ init([Parent, Node, NodeSelect, IP4, IP6, NotifyUp]) ->
     gtp_context_reg:register(RegKeys, ?MODULE, self()),
 
     {ok, ReqUpFF} =
-	ergw_core_config:get([up_required_feature], #up_function_features{_ = '_'}),
+	ergw_core_config:get([up_required_feature], #{}),
     {ok, Default} = ergw_core_config:get([up_node_defaults], #{}),
     Cfg1 = case ergw_core_config:get([nodes, Node], Default) of
 	      {ok, Cfg0} -> Cfg0;
@@ -448,7 +448,7 @@ handle_event(cast, {response, association_setup_request, Error},
 handle_event(cast, {response, _, #pfcp{version = v1, type = association_setup_response, ie = IEs}},
 	     connecting, Data) ->
     case IEs of
-	#{pfcp_cause := #pfcp_cause{cause = 'Request accepted'}} ->
+	#{pfcp_cause := 'Request accepted'} ->
 	    handle_nodeup(IEs, Data);
 	Other ->
 	    ?LOG(debug, "Other: ~p", [Other]),
@@ -517,8 +517,7 @@ handle_event(cast, {response, _, #pfcp{version = v1, type = heartbeat_response, 
 
 handle_event(cast, {response, from_cp_rule,
 		    #pfcp{version = v1, type = session_establishment_response,
-			  ie = #{pfcp_cause :=
-				     #pfcp_cause{cause = 'Request accepted'}} = IEs}} = R,
+			  ie = #{pfcp_cause := 'Request accepted'} = IEs}} = R,
 	     {connected, init}, #data{pfcp_ctx = PCtx0, bearer = Bearer0} = Data0) ->
     ?LOG(debug, "Response: ~p", [R]),
     PCtx1 = ergw_pfcp_context:update_dp_seid(IEs, PCtx0),
@@ -556,8 +555,7 @@ handle_event(cast, {notify_up, NotifyUp}, _State, _Data) ->
 
 handle_event(cast, {response, {call, _} = Evt,
 		    #pfcp{
-		       ie = #{pfcp_cause :=
-				  #pfcp_cause{cause = 'No established Sx Association'}}} =
+		       ie = #{pfcp_cause := 'No established Sx Association'}} =
 			Reply}, _, Data) ->
     Actions = pfcp_reply_actions(Evt, Reply),
     {next_state, dead, handle_nodedown(Data), Actions};
@@ -720,6 +718,12 @@ response_cb(CbData) ->
 next_heartbeat(#data{cfg = #{heartbeat := #{interval := Interval}}}) ->
     {state_timeout, Interval, heartbeat}.
 
+put_ie([Type, IE], IEs) when is_map(IEs) ->
+    maps:put(Type, IE, IEs);
+put_ie([Type, IE], IEs) when is_list(IEs) ->
+    [[Type, IE] | IEs];
+put_ie([Type, IE], _IEs) ->
+    [[Type, IE]];
 put_ie(IE, IEs) when is_map(IEs) ->
     maps:put(element(1, IE), IE, IEs);
 put_ie(IE, IEs) when is_list(IEs) ->
@@ -736,7 +740,7 @@ put_build_id(R = #pfcp{ie = IEs}) ->
     VStr = io_lib:format("erGW ~s on Erlang/OTP ~s [erts ~s]",
 			 [Version, erlang:system_info(otp_release),
 			  erlang:system_info(version)]),
-    Id = #tp_build_identifier{id = iolist_to_binary(VStr)},
+    Id = [tp_build_identifier, iolist_to_binary(VStr)],
     R#pfcp{ie = put_ie(Id, IEs)}.
 
 put_recovery_time_stamp(R = #pfcp{ie = IEs}) ->
@@ -793,7 +797,7 @@ handle_nodeup(#{recovery_time_stamp := #recovery_time_stamp{time = RecoveryTS}} 
     ?LOG(debug, "Node ~s (~s) is up", [Node, inet:ntoa(IP)]),
     ?LOG(debug, "Node IEs: ~s", [pfcp_packet:pretty_print(IEs)]),
 
-    UPFeatures = maps:get(up_function_features, IEs, #up_function_features{_ = 0}),
+    UPFeatures = maps:get(up_function_features, IEs, #{}),
     case validate_up_features(UPFeatures, ReqUpFF) of
 	true ->
 	    UPIPResInfo = maps:get(user_plane_ip_resource_information, IEs, []),
@@ -814,32 +818,27 @@ handle_nodeup(#{recovery_time_stamp := #recovery_time_stamp{time = RecoveryTS}} 
     end.
 
 make_ue_ip_pool_info(PI, Identities, Info) ->
-    #network_instance{instance = VRF} =
-	maps:get(network_instance, PI, #network_instance{instance = '_'}),
-    #ip_version{v4 = V4, v6 = V6} = maps:get(ip_version, PI, #ip_version{_ = 1}),
-    IPs = [v4 || V4 == 1] ++ [v6 || V6 == 1],
+    VRF = maps:get(network_instance, PI, '_'),
+    IPVer = maps:get(ip_version, PI, #{'V4' => [], 'V6' => []}),
+    IPs = [v4 || maps:is_key('V4', IPVer)] ++ [v6 || maps:is_key('V6', IPVer)],
     Ids = ordsets:from_list([Id || #ue_ip_address_pool_identity{identity = Id} <- Identities]),
 
     Pool0 = #{ip_pools => Ids, vrf => VRF, nat_port_blocks => [], ip_versions => IPs},
     Pool =
 	case PI of
-	    #{bbf_nat_port_block := #bbf_nat_port_block{block = NATportBlock}} ->
+	    #{bbf_nat_port_block := NATportBlock} when is_binary(NATportBlock) ->
 		Pool0#{nat_port_blocks => [NATportBlock]};
 	    #{bbf_nat_port_block := NATportBlocks} when is_list(NATportBlocks) ->
-		Pool0#{nat_port_blocks =>
-			   [NATportBlock ||
-			       #bbf_nat_port_block{block = NATportBlock} <- NATportBlocks]};
+		Pool0#{nat_port_blocks => NATportBlocks};
 	    _ ->
 		Pool0
 	end,
     [Pool|Info].
 
-make_ue_ip_pool_info(#ue_ip_address_pool_information{
-			group = #{ue_ip_address_pool_identity := Identity} = PI}, Info)
+make_ue_ip_pool_info(#{ue_ip_address_pool_identity := Identity} = PI, Info)
   when is_list(Identity) ->
     make_ue_ip_pool_info(PI, Identity, Info);
-make_ue_ip_pool_info(#ue_ip_address_pool_information{
-			group = #{ue_ip_address_pool_identity := Identity} = PI}, Info)
+make_ue_ip_pool_info(#{ue_ip_address_pool_identity := Identity} = PI, Info)
   when is_record(Identity, ue_ip_address_pool_identity) ->
     make_ue_ip_pool_info(PI, [Identity], Info);
 make_ue_ip_pool_info(_, Info) ->
@@ -854,23 +853,17 @@ get_ue_ip_pool_information(_, UEIPPoolInfo) ->
     UEIPPoolInfo.
 
 validate_up_features(UpFF, ReqUpFF) ->
-    validate_up_ff(
-      ergw_config:'#info-'(up_function_features),
-      tl(tuple_to_list(UpFF)),
-      tl(tuple_to_list(ReqUpFF))).
-
-validate_up_ff(_, List, List) ->
-    true;
-validate_up_ff([_|T], [V|UpFF], [V|ReqUpFF]) ->
-    validate_up_ff(T, UpFF, ReqUpFF);
-validate_up_ff([_|T], [_|UpFF], ['_'|ReqUpFF]) ->
-    validate_up_ff(T, UpFF, ReqUpFF);
-validate_up_ff([H|_], [Got|_], [Wanted|_]) ->
-    {H, Got, Wanted}.
+    maps:fold(fun(K, _, true) ->
+		      case maps:is_key(K, UpFF) of
+			  true  -> true;
+			  false -> {K, 0, 1}
+		      end;
+		 (_, _, Err) -> Err
+	      end, true, ReqUpFF).
 
 init_node_cfg(#data{cfg = Cfg} = Data) ->
     Data#data{
-      features = #up_function_features{_ = 0},
+      features = #{},
       ue_ip_pools = maps:get(ue_ip_pools, Cfg, []),
       vrfs = maps:map(
 	       fun(Id, #{features := Features}) ->
@@ -935,20 +928,19 @@ generate_per_feature_pfcp_rule('Access', #vrf{name = Name} = VRF, Bearer, PCtx0)
     {BearerReq, PCtx} = ergw_pfcp_context:make_request_bearer(PdrId, Bearer, PCtx2),
 
     %% GTP-U encapsulated packet from CP
-    PDI = #pdi{group = ergw_pfcp:traffic_endpoint(BearerReq, [])},
+    PDI = pfcp_packet:ies_to_map(ergw_pfcp:traffic_endpoint(BearerReq, [])),
     PDR = [#pdr_id{id = PdrId},
 	   #precedence{precedence = 100},
-	   PDI,
+	   [pdi, PDI],
 	   ergw_pfcp:outer_header_removal(Bearer),
 	   #far_id{id = FarId}],
-    %% forward to Access intefaces
+    %% forward to Access interfaces
     FAR = [#far_id{id = FarId},
-	   #apply_action{forw = 1},
-	   #forwarding_parameters{
-	      group =
-		  [#destination_interface{interface = 'Access'},
-		   ergw_pfcp:network_instance(VRF)]
-	     }
+	   [apply_action, #{'FORW' => []}],
+	   [forwarding_parameters,
+	    pfcp_packet:ies_to_map(
+	      [#destination_interface{interface = 'Access'},
+	       ergw_pfcp:network_instance(VRF)])]
 	  ],
 
     ergw_pfcp_rules:add(

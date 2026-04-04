@@ -165,22 +165,22 @@ credit_report_duration(#duration_measurement{duration = Duration}, Report) ->
 credit_report_duration(_, Report) ->
     Report.
 
-trigger_to_reason(#usage_report_trigger{volqu = 1}, Report) ->
+trigger_to_reason(#{'VOLQU' := _}, Report) ->
     Report#{'Reporting-Reason' =>
 		[?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_QUOTA_EXHAUSTED']};
-trigger_to_reason(#usage_report_trigger{timqu = 1}, Report) ->
+trigger_to_reason(#{'TIMQU' := _}, Report) ->
     Report#{'Reporting-Reason' =>
 		[?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_QUOTA_EXHAUSTED']};
-trigger_to_reason(#usage_report_trigger{volth = 1}, Report) ->
+trigger_to_reason(#{'VOLTH' := _}, Report) ->
     Report#{'Reporting-Reason' =>
 		[?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_THRESHOLD']};
-trigger_to_reason(#usage_report_trigger{timth = 1}, Report) ->
+trigger_to_reason(#{'TIMTH' := _}, Report) ->
     Report#{'Reporting-Reason' =>
 		[?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_THRESHOLD']};
-trigger_to_reason(#usage_report_trigger{termr = 1}, Report) ->
+trigger_to_reason(#{'TERMR' := _}, Report) ->
     Report#{'Reporting-Reason' =>
 		[?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_FINAL']};
-trigger_to_reason(#usage_report_trigger{quvti = 1}, Report) ->
+trigger_to_reason(#{'QUVTI' := _}, Report) ->
     Report#{'Reporting-Reason' =>
 		[?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_VALIDITY_TIME']};
 trigger_to_reason(_, Report) ->
@@ -192,10 +192,10 @@ charge_event_to_reason(#{'Charge-Event' := validity_time}, Report) ->
 charge_event_to_reason(_, Report) ->
     Report.
 
-tariff_change_usage(#{usage_information := #usage_information{bef = 1}}, Report) ->
+tariff_change_usage(#{usage_information := #{'BEF' := _}}, Report) ->
     Report#{'Tariff-Change-Usage' =>
 		[?'DIAMETER_3GPP_CHARGING_TARIFF-CHANGE-USAGE_UNIT_BEFORE_TARIFF_CHANGE']};
-tariff_change_usage(#{usage_information := #usage_information{aft = 1}}, Report) ->
+tariff_change_usage(#{usage_information := #{'AFT' := _}}, Report) ->
     Report#{'Tariff-Change-Usage' =>
 		[?'DIAMETER_3GPP_CHARGING_TARIFF-CHANGE-USAGE_UNIT_AFTER_TARIFF_CHANGE']};
 tariff_change_usage(_, Report) ->
@@ -323,63 +323,56 @@ init_cev_from_session(Now, SessionOpts) ->
 
     {SDC, TDV}.
 
-cev_to_rf_cc_kv(immer, SDC) ->
+cev_to_rf_cc_kv('IMMER', SDC) ->
     %% Immediate Reporting means something has triggered a Report Request,
     %% the triggering function has to make sure to fill in the
     %% Change-Condition
     SDC;
-cev_to_rf_cc_kv(droth, SDC) ->
+cev_to_rf_cc_kv('DROTH', SDC) ->
     %% Drop-Threshold, similar enough to Volume Limit
     optional_if_unset('Change-Condition', ?'DIAMETER_3GPP_CHARGING-CHANGE-CONDITION_VOLUME_LIMIT', SDC);
-cev_to_rf_cc_kv(stopt, SDC) ->
+cev_to_rf_cc_kv('STOPT', SDC) ->
     %% best match for Stop-Of-Trigger seems to be Service Idled Out
     optional_if_unset('Change-Condition', ?'DIAMETER_3GPP_CHARGING-CHANGE-CONDITION_SERVICE_IDLED_OUT', SDC);
-cev_to_rf_cc_kv(start, SDC) ->
+cev_to_rf_cc_kv('START', SDC) ->
     %% Start-Of-Traffic should not trigger a chargable event....
     %%    maybe a container opening
     SDC;
-cev_to_rf_cc_kv(quhti, SDC) ->
+cev_to_rf_cc_kv('QUHTI', SDC) ->
     %% Quota Holding Time
     optional_if_unset('Change-Condition', ?'DIAMETER_3GPP_CHARGING-CHANGE-CONDITION_TIME_LIMIT', SDC);
-cev_to_rf_cc_kv(timth, SDC) ->
+cev_to_rf_cc_kv('TIMTH', SDC) ->
     %% Time Threshold ->
     optional_if_unset('Change-Condition', ?'DIAMETER_3GPP_CHARGING-CHANGE-CONDITION_TIME_LIMIT', SDC);
-cev_to_rf_cc_kv(volth, SDC) ->
+cev_to_rf_cc_kv('VOLTH', SDC) ->
     %% Volume Threshold ->
     optional_if_unset('Change-Condition', ?'DIAMETER_3GPP_CHARGING-CHANGE-CONDITION_VOLUME_LIMIT', SDC);
-cev_to_rf_cc_kv(perio, SDC) ->
+cev_to_rf_cc_kv('PERIO', SDC) ->
     %% Periodic Reporting
     optional_if_unset('Change-Condition', ?'DIAMETER_3GPP_CHARGING-CHANGE-CONDITION_TIME_LIMIT', SDC);
-cev_to_rf_cc_kv(macar, SDC) ->
+cev_to_rf_cc_kv('MACAR', SDC) ->
     %% MAC Addresses Reporting
     SDC;
-cev_to_rf_cc_kv(envcl, SDC) ->
+cev_to_rf_cc_kv('ENVCL', SDC) ->
     %% Envelope Closure
     SDC;
-cev_to_rf_cc_kv(monit, SDC) ->
+cev_to_rf_cc_kv('MONIT', SDC) ->
     %% Monitoring Time
     optional_if_unset('Change-Condition', ?'DIAMETER_3GPP_CHARGING-CHANGE-CONDITION_TARIFF_TIME_CHANGE', SDC);
-cev_to_rf_cc_kv(termr, SDC) ->
+cev_to_rf_cc_kv('TERMR', SDC) ->
     %% Termination Report -> Normal Release
     optional_if_unset('Change-Condition', ?'DIAMETER_3GPP_CHARGING-CHANGE-CONDITION_NORMAL_RELEASE', SDC);
-cev_to_rf_cc_kv(liusa, SDC) ->
+cev_to_rf_cc_kv('LIUSA', SDC) ->
     %% Linked Usage Reporting -> TBD, not used for now
     SDC;
-cev_to_rf_cc_kv(timqu, SDC) ->
+cev_to_rf_cc_kv('TIMQU', SDC) ->
     %% Time Quota -> Time Limit
     optional_if_unset('Change-Condition', ?'DIAMETER_3GPP_CHARGING-CHANGE-CONDITION_TIME_LIMIT', SDC);
-cev_to_rf_cc_kv(volqu, SDC) ->
+cev_to_rf_cc_kv('VOLQU', SDC) ->
     %% Volume Quota ->
     optional_if_unset('Change-Condition', ?'DIAMETER_3GPP_CHARGING-CHANGE-CONDITION_VOLUME_LIMIT', SDC);
 cev_to_rf_cc_kv(_, SDC) ->
     SDC.
-
-cev_to_rf_change_condition([], _, SDC) ->
-    SDC;
-cev_to_rf_change_condition([K|Fields], [1|Values], SDC) ->
-    cev_to_rf_change_condition(Fields, Values, cev_to_rf_cc_kv(K, SDC));
-cev_to_rf_change_condition([_|Fields], [_|Values], SDC) ->
-    cev_to_rf_change_condition(Fields, Values, SDC).
 
 cev_to_rf('Charge-Event', {_, 'qos-change'}, _, C) ->
     C#{'Change-Condition' => ?'DIAMETER_3GPP_CHARGING-CHANGE-CONDITION_QOS_CHANGE'};
@@ -410,9 +403,8 @@ cev_to_rf(_, #time_of_last_packet{time = TS}, service_data, C) ->
     C#{'Time-Last-Usage' => [sntp_time_to_datetime(TS)]};
 cev_to_rf(_, #end_time{time = TS}, _, C) ->
     C#{'Change-Time' => [sntp_time_to_datetime(TS)]};
-cev_to_rf(usage_report_trigger, #usage_report_trigger{} = Trigger, _, C) ->
-    cev_to_rf_change_condition(record_info(fields, usage_report_trigger),
-			       tl(tuple_to_list(Trigger)), C);
+cev_to_rf(usage_report_trigger, Trigger, _, C) when is_map(Trigger) ->
+    maps:fold(fun(K, _, Acc) -> cev_to_rf_cc_kv(K, Acc) end, C, Trigger);
 cev_to_rf(_, #volume_measurement{uplink = UL, downlink = DL}, _, C) ->
     C#{'Accounting-Input-Octets'  => opt_int(UL),
 	 'Accounting-Output-Octets' => opt_int(DL)};
@@ -449,7 +441,7 @@ update_offline_charging_event([], ChargeEv) ->
     ChargeEv;
 update_offline_charging_event([#{'Rating-Group' := RG,
 				 usage_report_trigger :=
-				     #usage_report_trigger{perio = 1}}|T], _)
+				     #{'PERIO' := _}}|T], _)
   when not is_integer(RG) ->
     update_offline_charging_event(T, {cdr_closure, time});
 update_offline_charging_event([_|T], ChargeEv) ->
@@ -940,17 +932,14 @@ assign_local_data_teid_5(Key, PCtx, {VRFs, _} = _NodeCaps,
   when is_map_key(Name, VRFs) ->
     assign_local_data_teid_5(Key, PCtx, maps:get(Name, VRFs), TunnelIP, Bearer);
 
-assign_local_data_teid_5(Key, #pfcp_ctx{
-				 features = #up_function_features{ftup = 1}},
+assign_local_data_teid_5(Key, #pfcp_ctx{features = #{'FTUP' := _}},
 		       #vrf{name = VRF}, TunnelIP, Bearer) ->
     IPver = ip_ver(TunnelIP),
     FqTEID = #fq_teid{ip = IPver, teid = {upf, Key}},
     {ok, Bearer#bearer{vrf = VRF, local = FqTEID}};
 
-assign_local_data_teid_5(_Key, #pfcp_ctx{
-				features = #up_function_features{ftup = FTUP}} = PCtx,
-		       #vrf{name = VRF, ipv4 = IP4, ipv6 = IP6}, TunnelIP, Bearer)
-  when FTUP /= 1 ->
+assign_local_data_teid_5(_Key, #pfcp_ctx{} = PCtx,
+		       #vrf{name = VRF, ipv4 = IP4, ipv6 = IP6}, TunnelIP, Bearer) ->
     do([error_m ||
 	   IP <- choose_ip(TunnelIP, IP4, IP6),
 	   DataTEI <- ergw_tei_mngr:alloc_tei(PCtx),

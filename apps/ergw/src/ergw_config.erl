@@ -32,7 +32,6 @@
 -include_lib("pfcplib/include/pfcp_packet.hrl").
 -include("include/ergw.hrl").
 
--export_records([up_function_features]).
 
 -define(is_opts(X), (is_list(X) orelse is_map(X))).
 -define(non_empty_opts(X), ((is_list(X) andalso length(X) /= 0) orelse
@@ -197,7 +196,7 @@ ergw_charging_init(_, _) ->
 
 load_schemas() ->
     jesse:load_schemas(
-      filename:join([code:lib_dir(ergw, priv), "schemas"]),
+      filename:join([code:lib_dir(ergw), "priv", "schemas"]),
       fun (Bin) ->
 	      {ok, [Terms]} = fast_yaml:decode(Bin, [{maps, true}, sane_scalars]),
 	      Terms
@@ -802,7 +801,7 @@ get_key(Field, Map) ->
 %%%===================================================================
 
 validate_config_with_schema(Config) ->
-    Schema = filename:join([code:lib_dir(ergw, priv), "schemas", "ergw_config.yaml"]),
+    Schema = filename:join([code:lib_dir(ergw), "priv", "schemas", "ergw_config.yaml"]),
     case jesse:validate(Schema, Config) of
 	{ok, _} -> ok;
 	Other -> Other
@@ -1084,9 +1083,11 @@ to_aaa_avp_filter_item(Map) when is_map(Map) ->
     maps:to_list(to_aaa_avp(Map)).
 
 to_upff(V) when is_list(V) ->
-    Set = lists:foldl(
-	    fun(X, SetF) -> [{to_atom(X), 1}|SetF] end, [], V),
-    '#set-'(Set, #up_function_features{_ = '_'}).
+    lists:foldl(
+      fun(X, M) ->
+	      Key = list_to_atom(string:uppercase(atom_to_list(to_atom(X)))),
+	      M#{Key => []}
+      end, #{}, V).
 
 %% complex types
 
@@ -1264,8 +1265,8 @@ from_aaa_avp(_K, Value) ->
 from_aaa_avp(Map) when is_map(Map) ->
     maps:fold(fun from_aaa_avp/3, #{}, Map).
 
-from_upff(V) ->
-    [X || X <- '#info-'(up_function_features), '#get-'(X, V) =:= 1].
+from_upff(V) when is_map(V) ->
+    [string:lowercase(atom_to_list(K)) || K <- maps:keys(V)].
 
 %% complex types
 

@@ -387,12 +387,10 @@ handle_event(enter, OldState, State, #{interface := Interface} = Data) ->
 %% Error Indication Report
 handle_event({call, From},
 	     {sx, #pfcp{type = session_report_request,
-			ie = #{report_type := #report_type{erir = 1},
+			ie = #{report_type := #{'ERIR' := _},
 			       error_indication_report :=
-				   #error_indication_report{
-				      group =
-					  #{f_teid :=
-						#f_teid{ipv4 = IP4, ipv6 = IP6} = FTEID0}}}}},
+				   #{f_teid :=
+					 #f_teid{ipv4 = IP4, ipv6 = IP6} = FTEID0}}}},
 	     State, #{pfcp := PCtx} = Data0) ->
     FTEID = FTEID0#f_teid{ipv4 = ergw_inet:bin2ip(IP4), ipv6 = ergw_inet:bin2ip(IP6)},
     case fteid_tunnel_side(FTEID, Data0) of
@@ -409,12 +407,12 @@ handle_event({call, From},
 %% PFCP Session Deleted By the UP function
 handle_event({call, From},
 	     {sx, #pfcp{type = session_report_request,
-			ie = #{pfcpsrreq_flags := #pfcpsrreq_flags{psdbu = 1},
+			ie = #{pfcpsrreq_flags := #{'PSDBU' := _},
 			       report_type := ReportType} = IEs}},
 	     State, #{pfcp := PCtx} = Data0) ->
     TermCause =
 	case ReportType of
-	    #report_type{upir = 1} ->
+	    #{'UPIR' := _} ->
 		up_inactivity_timeout;
 	    _ ->
 		deleted_by_upf
@@ -426,7 +424,7 @@ handle_event({call, From},
 %% User Plane Inactivity Timer expired
 handle_event({call, From},
 	     {sx, #pfcp{type = session_report_request,
-			ie = #{report_type := #report_type{upir = 1}}}},
+			ie = #{report_type := #{'UPIR' := _}}}},
 	     State, #{pfcp := PCtx} = Data) ->
     gen_statem:reply(From, {ok, PCtx}),
     delete_context(undefined, up_inactivity_timeout, State, Data);
@@ -434,7 +432,7 @@ handle_event({call, From},
 %% Usage Report
 handle_event({call, From},
 	     {sx, #pfcp{type = session_report_request,
-			ie = #{report_type := #report_type{usar = 1},
+			ie = #{report_type := #{'USAR' := _},
 			       usage_report_srr := UsageReport}}},
 	      _State, #{pfcp := PCtx, 'Session' := Session, pcc := PCC}) ->
     Now = erlang:monotonic_time(),
@@ -872,12 +870,6 @@ usage_report_to_accounting(
 	#volume_measurement{uplink = RcvdBytes, downlink = SendBytes}}) ->
     [{'InOctets',   RcvdBytes},
      {'OutOctets',  SendBytes}];
-usage_report_to_accounting(#usage_report_smr{group = UR}) ->
-    usage_report_to_accounting(UR);
-usage_report_to_accounting(#usage_report_sdr{group = UR}) ->
-    usage_report_to_accounting(UR);
-usage_report_to_accounting(#usage_report_srr{group = UR}) ->
-    usage_report_to_accounting(UR);
 usage_report_to_accounting([H|_]) ->
     usage_report_to_accounting(H);
 usage_report_to_accounting(undefined) ->

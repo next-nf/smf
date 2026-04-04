@@ -116,7 +116,7 @@ setopts(node_selection = What, Opts0) ->
 setopts(sx_defaults = What, Opts0) ->
     Opts = ergw_sx_node:validate_defaults(Opts0),
     gen_statem:call(?SERVER, {setopts, What, Opts});
-setopts(required_upff = What, Opts) when is_record(Opts, up_function_features) ->
+setopts(required_upff = What, Opts) when is_map(Opts) ->
     gen_statem:call(?SERVER, {setopts, What, Opts});
 setopts(path_management = What, Opts0) ->
     Opts = gtp_path:validate_options(Opts0),

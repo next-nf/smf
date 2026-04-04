@@ -265,7 +265,7 @@ pfcp(rx, Name, RemoteIP, Msg, duplicate) ->
     pfcp_msg_counter(pfcp_messages_duplicates_total, Name, RemoteIP, Msg).
 
 %% pfcp_reply/5
-pfcp_reply(Name, IP, Direction, MsgType, #{pfcp_cause := #pfcp_cause{cause = Cause}}) ->
+pfcp_reply(Name, IP, Direction, MsgType, #{pfcp_cause := Cause}) ->
     prometheus_counter:inc(pfcp_messages_replies_total, [Name, Direction, inet:ntoa(IP), MsgType, Cause]);
 pfcp_reply(_Name, _IP, _Direction, _MsgType, _IEs) ->
     ok.
