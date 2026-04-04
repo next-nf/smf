@@ -398,7 +398,7 @@ handle_message(#pfcp{type = association_setup_request,
 
     RespIEs =
 	[#node_id{id = NodeId},
-	 'Request accepted',
+	 [pfcp_cause, 'Request accepted'],
 	 #recovery_time_stamp{
 	    time = ergw_gsn_lib:seconds_to_sntp_time(RecoveryTS)},
 	 [up_function_features, UpFF]
@@ -418,7 +418,7 @@ when Type =:= pfd_management_request;
      Type =:= session_report_request ->
     RespIEs =
 	[#node_id{id = [<<"test">>, <<"server">>]},
-	 'No established Sx Association'],
+	 [pfcp_cause, 'No established Sx Association']],
      sx_reply(pfcp_response(Type), RespIEs, State);
 
 handle_message(#pfcp{type = session_establishment_request, seid = 0,
@@ -429,7 +429,7 @@ handle_message(#pfcp{type = session_establishment_request, seid = 0,
     ControlPlaneIP = choose_control_ip(ControlPlaneIP4, ControlPlaneIP6, State0),
     UserPlaneSEID = ergw_sx_socket:seid(),
     RespIEs0 =
-	['Request accepted',
+	[[pfcp_cause, 'Request accepted'],
 	 f_seid(UserPlaneSEID, IP)],
     {RespIEs, State1} = process_request(ReqIEs, RespIEs0, State0),
 
@@ -443,7 +443,7 @@ handle_message(#pfcp{type = session_modification_request, seid = UserPlaneSEID, 
 	       #state{sessions = Sessions} = State0)
   when is_map_key(UserPlaneSEID, Sessions) ->
     #session{cp_seid = ControlPlaneSEID} = maps:get(UserPlaneSEID, Sessions),
-    RespIEs0 = ['Request accepted'],
+    RespIEs0 = [[pfcp_cause, 'Request accepted']],
     {RespIEs, State} = process_request(ReqIEs, RespIEs0, State0),
     sx_reply(session_modification_response, ControlPlaneSEID, RespIEs, State);
 
@@ -451,7 +451,7 @@ handle_message(#pfcp{type = session_deletion_request, seid = UserPlaneSEID},
 	       #state{sessions = Sessions} = State0)
   when is_map_key(UserPlaneSEID, Sessions) ->
     #session{cp_seid = ControlPlaneSEID} = maps:get(UserPlaneSEID, Sessions),
-    RespIEs0 = ['Request accepted'],
+    RespIEs0 = [[pfcp_cause, 'Request accepted']],
     RespIEs = report_urrs(State0, RespIEs0),
     State = State0#state{urrs = #{}, sessions = maps:remove(UserPlaneSEID, Sessions)},
     sx_reply(session_deletion_response, ControlPlaneSEID, RespIEs, State);
@@ -464,7 +464,7 @@ handle_message(#pfcp{type = ReqType, seid = UserPlaneSEID},
 	ReqType == session_modification_request orelse
 	ReqType == session_deletion_request) ->
     #session{cp_seid = ControlPlaneSEID} = maps:get(UserPlaneSEID, Sessions),
-    RespIEs = ['System failure'],
+    RespIEs = [[pfcp_cause, 'System failure']],
     sx_reply(make_sx_response(ReqType), ControlPlaneSEID, RespIEs, State);
 
 handle_message(#pfcp{type = ReqType}, State)
@@ -473,7 +473,7 @@ handle_message(#pfcp{type = ReqType}, State)
       ReqType == session_establishment_request orelse
       ReqType == session_modification_request orelse
       ReqType == session_deletion_request ->
-    RespIEs = ['Session context not found'],
+    RespIEs = [[pfcp_cause, 'Session context not found']],
     sx_reply(make_sx_response(ReqType), 0, RespIEs, State);
 
 handle_message(#pfcp{type = ReqType}, State)

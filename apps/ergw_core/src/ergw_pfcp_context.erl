@@ -752,9 +752,9 @@ build_ipcan_rule(true, #sx_upd{pctx = PCtx0} = Update) ->
     %%      by Charging-Id (maps to ARP/QCI combi)
     {UrrId, PCtx} = ergw_pfcp:get_urr_id(RuleName, ['IP-CAN'], RuleName, PCtx0),
 
-    URR = [#urr_id{id = UrrId},
-	   #{'VOLUM' => [], 'DURAT' => []},
-	   #{}],
+    URR = #{urr_id => #urr_id{id = UrrId},
+	    measurement_method => #{'VOLUM' => [], 'DURAT' => []},
+	    reporting_triggers => #{}},
 
     ?LOG(debug, "URR: ~p", [URR]),
     Update#sx_upd{pctx = ergw_pfcp_rules:add(urr, RuleName, URR, PCtx)};
@@ -772,10 +772,10 @@ build_sx_monitor_rule('IP-CAN', Service, {periodic, Time, _Opts} = _Definition,
     RuleName = {monitor, 'IP-CAN', Service},
     {UrrId, PCtx} = ergw_pfcp:get_urr_id(RuleName, ['IP-CAN'], RuleName, PCtx0),
 
-    URR = [#urr_id{id = UrrId},
-	   #{'VOLUM' => [], 'DURAT' => []},
-	   #{'PERIO' => []},
-	   #measurement_period{period = Time}],
+    URR = #{urr_id => #urr_id{id = UrrId},
+	    measurement_method => #{'VOLUM' => [], 'DURAT' => []},
+	    reporting_triggers => #{'PERIO' => []},
+	    measurement_period => #measurement_period{period = Time}},
 
     ?LOG(debug, "URR: ~p", [URR]),
     Monitors1 = update_m_key('IP-CAN', UrrId, Monitors0),
@@ -793,10 +793,10 @@ build_sx_monitor_rule('Offline', Service, {periodic, Time, _Opts} = Definition,
     %%      by Charging-Id (maps to ARP/QCI combi)
     {UrrId, PCtx1} = ergw_pfcp:get_urr_id(RuleName, ['IP-CAN'], RuleName, PCtx0),
 
-    URR = [#urr_id{id = UrrId},
-	   #{'VOLUM' => [], 'DURAT' => []},
-	   #{'PERIO' => []},
-	   #measurement_period{period = Time}],
+    URR = #{urr_id => #urr_id{id = UrrId},
+	    measurement_method => #{'VOLUM' => [], 'DURAT' => []},
+	    reporting_triggers => #{'PERIO' => []},
+	    measurement_period => #measurement_period{period = Time}},
     ?LOG(debug, "URR: ~p", [URR]),
     URRUpd =
 	fun (X0) ->
