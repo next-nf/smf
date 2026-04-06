@@ -32,13 +32,13 @@
 	 }).
 
 -record(fq_teid, {
-	  ip       :: inet:ip_address(),
-	  teid = 0 :: non_neg_integer()
+	  ip       :: inet:ip_address() | 'v4' | 'v6' | undefined,
+	  teid = 0 :: non_neg_integer() | {upf, term()}
 	 }).
 
 -record(ue_ip, {
-	  v4               :: inet:ip4_address(),
-	  v6               :: inet:ip6_address(),
+	  v4               :: inet:ip4_address() | undefined,
+	  v6               :: inet:ip6_address() | undefined,
 	  nat              :: term()
 	 }).
 
@@ -54,19 +54,19 @@
 	 }).
 
 -record(tunnel, {
-	  interface		:: 'Access' | 'Core',
+	  interface		:: 'Access' | 'Core' | undefined,
 	  vrf			:: term(),
-	  socket		:: #socket{},
+	  socket		:: #socket{} | undefined,
 	  path			:: 'undefined' | pid(),
-	  version               :: 'v1' | 'v2',
+	  version               :: 'v1' | 'v2' | undefined,
 	  local			:: 'undefined' | #fq_teid{},
 	  remote		:: 'undefined' | #fq_teid{},
-	  remote_restart_counter :: 0 .. 255
+	  remote_restart_counter :: 0 .. 255 | undefined
 	 }).
 
 -record(bearer, {
 	  interface             :: 'Access' | 'Core' | 'SGi-LAN' |
-				   'CP-Function' | 'LI Function',
+				   'CP-Function' | 'LI Function' | undefined,
 	  vrf			:: term(),
 	  local			:: 'undefined' | #fq_teid{} | #ue_ip{},
 	  remote		:: 'undefined' | #fq_teid{}
@@ -102,23 +102,23 @@
 	 }).
 
 -record(context, {
-	  apn                    :: [binary()],
+	  apn                    :: [binary()] | undefined,
 	  imsi                   :: 'undefined' | binary(),
 	  imei                   :: 'undefined' | binary(),
 	  msisdn                 :: 'undefined' | binary(),
 
 	  context_id             :: term(),
-	  charging_identifier    :: non_neg_integer(),
+	  charging_identifier    :: non_neg_integer() | undefined,
 	  default_bearer_id      :: 'undefined' | non_neg_integer(),
 
-	  idle_timeout           :: non_neg_integer() | infinity,
-	  inactivity_timeout     :: non_neg_integer() | infinity,
+	  idle_timeout           :: non_neg_integer() | infinity | undefined,
+	  inactivity_timeout     :: non_neg_integer() | infinity | undefined,
 
-	  version                :: 'v1' | 'v2',
+	  version                :: 'v1' | 'v2' | undefined,
 	  pdn_type               :: 'undefined' | 'IPv4' | 'IPv6' | 'IPv4v6' | 'Non-IP',
 
-	  ms_ip                  :: #ue_ip{},
-	  dns_v6                 :: [inet:ip6_address()],
+	  ms_ip                  :: #ue_ip{} | undefined,
+	  dns_v6                 :: [inet:ip6_address()] | undefined,
 	  restrictions = []      :: [{'v1', boolean()} |
 				     {'v2', boolean()}]
 	 }).
@@ -156,11 +156,11 @@
 
 %% nBsf registration record
 -record(bsf, {
-	  dnn                       :: [binary()],
-	  snssai = {1, 16#ffffff}   :: {0..255, 0..16#ffffff},
-	  ip_domain                 :: atom(),
+	  dnn                       :: [binary()] | undefined,
+	  snssai = {1, 16#ffffff}   :: {0..255, 0..16#ffffff} | undefined,
+	  ip_domain                 :: binary() | undefined,
 	  ip                        :: {inet:ip4_address(),1..32}|
-				       {inet:ip6_address(),1..128}
+				       {inet:ip6_address(),1..128} | undefined
 	}).
 
 -record(seid_key, {seid}).
