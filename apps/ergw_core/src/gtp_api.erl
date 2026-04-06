@@ -7,12 +7,12 @@
 
 -optional_callbacks([handle_response/5]).
 
--callback validate_options(Opts :: [{Key :: atom(), Value :: term()}]) ->
-    Return :: #{Key :: atom() => Value :: term()}.
+-callback validate_options(Opts :: map()) ->
+    Return :: map().
 
 -callback init(Opts :: term(),
 	       Data :: map()) ->
-    Return :: {ok, Data :: map()} |
+    Return :: {ok, State :: term(), Data :: map()} |
 	      {stop, Reason :: term()}.
 
 -callback request_spec(Version :: 'v1' | 'v2', MsgType :: atom(), Cause :: atom()) ->
@@ -41,20 +41,14 @@
 			 Resent :: boolean(),
 			 State :: term(), % Current state
 			 Data :: map()) ->
-    Return :: {reply, Reply :: term(), Data :: map()} |
-	      {stop, Reply :: term(), Data :: map()} |
-	      {error, Reply :: term()} |
-	      {noreply, Data :: map()}.
+    gen_statem:event_handler_result(term()).
 
 -callback handle_response(RequestInfo :: term(),
 			  Response :: #gtp{},
 			  Request  :: #gtp{},
 			  State :: term(), % Current state
 			  Data :: map()) ->
-    Result :: {noreply, NewData :: map()} |
-	      {noreply, NewData :: map(), Timeout :: integer() | 'infinity'} |
-	      {noreply, NewData :: map(), 'hibernate'} |
-	      {stop, Reason :: term(), NewData :: map()}.
+    gen_statem:event_handler_result(term()).
 
 -callback close_context(Side :: atom(), Reason :: atom(),
 			Notify :: 'active' | 'silent',
