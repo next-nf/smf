@@ -451,8 +451,8 @@ build_sx_rule(Name, Definition, DL, UL, Update0) ->
 
 build_sx_filter(FlowInfo)
   when is_list(FlowInfo) ->
-    pfcp_packet:ies_to_map([#sdf_filter{flow_description = FD}
-			    || #{'Flow-Description' := [FD]} <- FlowInfo]);
+    #{sdf_filter =>
+          [#sdf_filter{flow_description = FD}  || #{'Flow-Description' := [FD]} <- FlowInfo]};
 build_sx_filter(AppId)
   when is_binary(AppId) ->
     #{application_id => AppId};
