@@ -884,10 +884,14 @@ fteid_tunnel_side(FqTEID, #{bearer := Bearer}) ->
 
 fteid_tunnel_side_f(_, none) ->
     none;
-fteid_tunnel_side_f(#f_teid{ipv4 = IPv4, ipv6 = IPv6, teid = TEID},
-		  {Key, #bearer{remote = #fq_teid{ip = IP, teid = TEID}}, _})
-  when IP =:= IPv4; IP =:= IPv6 ->
-    Key;
+fteid_tunnel_side_f(#f_teid{ipv4 = IPv4, ipv6 = IPv6, teid = TEID} = FqTEID,
+		  {Key, #bearer{remote = #fq_teid{ip = IP, teid = TEID}}, Iter}) ->
+    BinIP = ergw_inet:ip2bin(IP),
+    if BinIP =:= IPv4; BinIP =:= IPv6 ->
+	    Key;
+       true ->
+	    fteid_tunnel_side_f(FqTEID, maps:next(Iter))
+    end;
 fteid_tunnel_side_f(FqTEID, {_, _, Iter}) ->
     fteid_tunnel_side_f(FqTEID, maps:next(Iter)).
 
