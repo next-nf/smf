@@ -16,7 +16,7 @@
 -record(cache, {
 	  expire :: integer(),
 	  key    :: term(),
-	  timer  :: reference(),
+	  timer  :: reference() | undefined,
 	  tree   :: gb_trees:tree(Key :: term(), {Expire :: integer(), Data :: term()}),
 	  queue  :: queue:queue({Expire :: integer(), Key :: term()})
 	 }).
