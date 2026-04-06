@@ -155,12 +155,13 @@
 	 }).
 
 %% nBsf registration record
+%% Fields allow '_' for use as ETS match spec wildcards
 -record(bsf, {
-	  dnn                       :: [binary()] | undefined,
-	  snssai = {1, 16#ffffff}   :: {0..255, 0..16#ffffff} | undefined,
-	  ip_domain                 :: binary() | undefined,
+	  dnn                       :: [binary()] | undefined | '_',
+	  snssai = {1, 16#ffffff}   :: {0..255, 0..16#ffffff | '_'} | undefined | '_',
+	  ip_domain                 :: binary() | undefined | '_',
 	  ip                        :: {inet:ip4_address(),1..32}|
-				       {inet:ip6_address(),1..128} | undefined
+				       {inet:ip6_address(),1..128} | undefined | '_'
 	}).
 
 -record(seid_key, {seid}).
