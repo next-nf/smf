@@ -45,9 +45,9 @@
 	  address :: inet:ip_address(),
 	  t1      :: non_neg_integer(),
 	  n1      :: non_neg_integer(),
-	  data    :: binary(),
-	  msg     :: term,
-	  from    :: {reference(), pid()},
+	  data    :: binary() | undefined,
+	  msg     :: term(),
+	  from    :: {reference(), pid()} | undefined,
 	  cb_info :: {M :: atom(), F :: atom(), A :: [term()]},
 	  send_ts :: non_neg_integer()
 	 }).

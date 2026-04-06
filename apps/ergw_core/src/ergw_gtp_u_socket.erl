@@ -34,7 +34,7 @@
 -record(send_req, {
 	  address :: inet:ip_address(),
 	  port    :: inet:port_number(),
-	  data    :: binary(),
+	  data    :: binary() | undefined,
 	  msg     :: #gtp{}
 	 }).
 

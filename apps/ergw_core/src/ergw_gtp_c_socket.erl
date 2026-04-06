@@ -65,7 +65,7 @@
 	  port    :: inet:port_number(),
 	  t3      :: non_neg_integer(),
 	  n3      :: non_neg_integer(),
-	  data    :: binary(),
+	  data    :: binary() | undefined,
 	  msg     :: #gtp{},
 	  cb_info :: {M :: atom(), F :: atom(), A :: [term()]},
 	  send_ts :: non_neg_integer()
