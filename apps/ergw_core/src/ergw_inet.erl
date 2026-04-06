@@ -59,7 +59,7 @@ ipv6_interface_id(Prefix, PrefixLen, InterfaceId)
 %% ipv6_interface_id({{_,_,_,_,A,B,C,D}, _}) ->
 %%     {0,0,0,0,A,B,C,D}.
 
-ipv6_prefix({_, Len} = Prefix) when Len =:= 0, Len =:= 128 ->
+ipv6_prefix({_, Len} = Prefix) when Len =:= 0; Len =:= 128 ->
     Prefix;
 ipv6_prefix({Prefix, Len}) ->
     <<IP:Len/bits, _/bitstring>> = ergw_inet:ip2bin(Prefix),
