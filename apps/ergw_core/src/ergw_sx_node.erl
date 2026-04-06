@@ -404,7 +404,7 @@ handle_event(state_timeout, connect, dead, Data) ->
 handle_event(enter, _, connecting, #data{dp = #node{ip = IP}} = Data) ->
     ergw_sx_node_reg:register(IP, self()),
 
-    Req0 = #pfcp{version = v1, type = association_setup_request, ie = #{}},
+    Req0 = #pfcp{version = v1, type = association_setup_request, seq_no = 0, ie = #{}},
     Req = augment_mandatory_ie(Req0, Data),
     ergw_sx_socket:call(IP, ?AssocReqTimeout, ?AssocReqRetries, Req,
 			response_cb(association_setup_request)),
@@ -617,7 +617,7 @@ pfcp_reply_actions({call, From}, Reply) ->
     [{reply, From, Reply}].
 
 make_request(IP, Port, Msg, #data{cp_socket = Socket, cp_info = Info}) ->
-    ergw_gtp_socket:make_request(0, sx, IP, Port, Msg, Socket, Info).
+    ergw_gtp_socket:make_request(0, sx, ergw_inet:bin2ip(IP), Port, Msg, Socket, Info).
 
 %% IPv4, non fragmented, UDP packet
 handle_ip_pdu(<<Version:4, IHL:4, _TOS:8, TotLen:16, _Id:16, _:2, 0:1, 0:13,
@@ -726,7 +726,7 @@ put_ie(IE, _IEs) ->
     [IE].
 
 put_node_id(R = #pfcp{ie = IEs}, #data{cp = #node{node = Node}}) ->
-    NodeId = #node_id{id = string:split(Node, ".", all)},
+    NodeId = #node_id{id = string:split(atom_to_binary(Node, utf8), ".", all)},
     R#pfcp{ie = put_ie(NodeId, IEs)}.
 
 put_build_id(R = #pfcp{ie = IEs}) ->
@@ -773,7 +773,7 @@ make_response(Type, SEID, #pfcp{version = v1, seq_no = SeqNo}, IEs) ->
 send_heartbeat(#data{dp = #node{ip = IP}, cfg = #{heartbeat := #{timeout := Timeout, retry := Retry}}}) ->
     IEs = [#recovery_time_stamp{
 	      time = ergw_gsn_lib:seconds_to_sntp_time(gtp_config:get_start_time())}],
-    Req = #pfcp{version = v1, type = heartbeat_request, ie = IEs},
+    Req = #pfcp{version = v1, type = heartbeat_request, seq_no = 0, ie = IEs},
     ergw_sx_socket:call(IP, Timeout, Retry, Req, response_cb(heartbeat)).
 
 heartbeat_response(ReqKey, #pfcp{type = heartbeat_request} = Request) ->
@@ -956,7 +956,7 @@ install_cp_rules(#data{pfcp_ctx = PCtx0,
     Rules = ergw_pfcp:update_pfcp_rules(PCtx1, PCtx, #{}),
     IEs = update_m_rec(ergw_pfcp:f_seid(PCtx, CntlNode), Rules),
 
-    Req0 = #pfcp{version = v1, type = session_establishment_request, seid = 0, ie = IEs},
+    Req0 = #pfcp{version = v1, type = session_establishment_request, seq_no = 0, seid = 0, ie = IEs},
     Req = augment_mandatory_ie(Req0, Data),
     ergw_sx_socket:call(DpNodeIP, Timeout, Retry, Req, response_cb(from_cp_rule)),
 

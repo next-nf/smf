@@ -69,7 +69,7 @@ modify_session(PCC, URRActions, Opts, #{left := Left, right := Right} = _Bearer,
 %% delete_session/2
 delete_session(Reason, PCtx)
   when Reason /= upf_failure ->
-    Req = #pfcp{version = v1, type = session_deletion_request, ie = []},
+    Req = #pfcp{version = v1, type = session_deletion_request, seq_no = 0, ie = []},
     case ergw_sx_node:call(PCtx, Req) of
 	#pfcp{type = session_deletion_response,
 	      ie = #{pfcp_cause := 'Request accepted'} = IEs} ->
@@ -84,7 +84,7 @@ delete_session(_Reason, _PCtx) ->
     undefined.
 
 session_liveness_check(#pfcp_ctx{} = PCtx) ->
-    Req = #pfcp{version = v1, type = session_modification_request, ie = []},
+    Req = #pfcp{version = v1, type = session_modification_request, seq_no = 0, ie = []},
     case ergw_sx_node:call(PCtx, Req) of
 	#pfcp{type = session_modification_response,
 	      ie = #{pfcp_cause := 'Request accepted'}} ->
@@ -195,7 +195,7 @@ session_establishment_request(Handler, PCC, PCtx0,
     IEs = pfcp_user_id(Ctx, IEs1),
     ?LOG(debug, "IEs: ~p~n", [IEs]),
 
-    Req = #pfcp{version = v1, type = session_establishment_request, ie = IEs},
+    Req = #pfcp{version = v1, type = session_establishment_request, seq_no = 0, ie = IEs},
     case ergw_sx_node:call(PCtx2, Req) of
 	#pfcp{version = v1, type = session_establishment_response,
 	      ie = #{pfcp_cause := 'Request accepted',
@@ -211,7 +211,7 @@ session_establishment_request(Handler, PCC, PCtx0,
 %% session_modification_request/2
 session_modification_request(PCtx, ReqIEs)
   when ?is_non_empty_opts(ReqIEs) ->
-    Req = #pfcp{version = v1, type = session_modification_request, ie = ReqIEs},
+    Req = #pfcp{version = v1, type = session_modification_request, seq_no = 0, ie = ReqIEs},
     case ergw_sx_node:call(PCtx, Req) of
 	#pfcp{type = session_modification_response,
 	      ie = #{pfcp_cause := 'Request accepted'} = RespIEs} ->
