@@ -95,6 +95,9 @@ destination_interface(#bearer{interface = VRF}) ->
 network_instance(Name)
   when is_binary(Name) ->
     #{network_instance => Name};
+network_instance(Name)
+  when is_atom(Name) ->
+    #{network_instance => atom_to_binary(Name, utf8)};
 network_instance(#tunnel{vrf = VRF}) ->
     network_instance(VRF);
 network_instance(#bearer{vrf = VRF}) ->
@@ -105,6 +108,9 @@ network_instance(#vrf{name = Name}) ->
 network_instance_name(Name)
   when is_binary(Name) ->
     Name;
+network_instance_name(Name)
+  when is_atom(Name) ->
+    atom_to_binary(Name, utf8);
 network_instance_name(#tunnel{vrf = VRF}) ->
     network_instance_name(VRF);
 network_instance_name(#bearer{vrf = VRF}) ->
