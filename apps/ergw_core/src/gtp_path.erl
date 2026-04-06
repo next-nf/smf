@@ -44,11 +44,11 @@
 -include("include/ergw.hrl").
 
 %% echo_timer is the status of the echo send to the remote peer
--record(state, {peer       :: unknown | up | down | suspect,
+-record(state, {peer       :: unknown | up | down | suspect | undefined,
 		contexts   :: map(),
 		leases     :: map(),
 		recovery   :: 'undefined' | non_neg_integer(),
-		echo       :: 'stopped' | 'echo_to_send' | 'awaiting_response'}).
+		echo       :: 'stopped' | 'echo_to_send' | 'awaiting_response' | 'idle'}).
 
 %%%===================================================================
 %%% API
