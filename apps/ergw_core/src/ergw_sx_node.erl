@@ -902,7 +902,7 @@ update_m_rec(Record, Map) when is_tuple(Record) ->
 
 make_cp_bearer(TEI,  #gtp_socket_info{vrf = VRF, ip = IP}) ->
     FqTEID = #fq_teid{ip = IP, teid = TEI},
-    #bearer{interface = 'CP-function', vrf = VRF, remote = FqTEID}.
+    #bearer{interface = 'CP-Function', vrf = VRF, remote = FqTEID}.
 
 assign_local_data_teid(Key, PCtx, #node{ip = NodeIP}, VRFs, Bearer) ->
     [VRF|_] =

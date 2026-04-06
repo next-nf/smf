@@ -48,7 +48,7 @@
 		contexts   :: map(),
 		leases     :: map(),
 		recovery   :: 'undefined' | non_neg_integer(),
-		echo       :: 'stopped' | 'echo_to_send' | 'awaiting_response' | 'idle'}).
+		echo       :: 'stopped' | 'echo_to_send' | 'awaiting_response' | 'idle' | reference()}).
 
 %%%===================================================================
 %%% API

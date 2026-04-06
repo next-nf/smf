@@ -50,7 +50,7 @@
 -record(socket, {
 	  name             :: term(),
 	  type             :: 'gtp-c' | 'gtp-u',
-	  pid              :: pid()
+	  pid              :: pid() | undefined
 	 }).
 
 -record(tunnel, {
@@ -69,7 +69,7 @@
 				   'CP-Function' | 'LI Function' | undefined,
 	  vrf			:: term(),
 	  local			:: 'undefined' | #fq_teid{} | #ue_ip{},
-	  remote		:: 'undefined' | #fq_teid{}
+	  remote		:: 'undefined' | 'default' | #fq_teid{}
 	 }).
 
 -record(pfcp_ctx, {
