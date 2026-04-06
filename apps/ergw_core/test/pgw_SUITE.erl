@@ -3318,11 +3318,13 @@ simple_ofcs(Config) ->
 		Trigger =
 		    case Type of
 			{offline, RG} when is_integer(RG) ->
-			    #{usage_report_trigger => #{'LIUSA' => []}};
+			    Report#{urr_id => #urr_id{id = Id},
+                                    usage_report_trigger => #{'LIUSA' => []}};
 			{offline, 'IP-CAN'} ->
-			    #{usage_report_trigger => #{'PERIO' => []}}
+			    Report#{urr_id => #urr_id{id = Id},
+                                    usage_report_trigger => #{'PERIO' => []}}
 		    end,
-		[maps:merge(maps:merge(#{urr_id => #urr_id{id = Id}}, Trigger), Report)|Reports]
+		[Trigger|Reports]
 	end,
     MatchSpec = ets:fun2ms(fun(Id) -> Id end),
     ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, ReportFun),
@@ -3856,14 +3858,17 @@ split_charging1(Config) ->
 
     OffReportFun =
 	fun(Gen, {Id, {offline, Type}}, Reports) ->
+		Report = Gen(),
 		Trigger =
 		    case Type of
 			RG when is_integer(RG) ->
-			    #{usage_report_trigger => #{'LIUSA' => []}};
+			    Report#{urr_id => #urr_id{id = Id},
+				    usage_report_trigger => #{'LIUSA' => []}};
 			'IP-CAN' ->
-			    #{usage_report_trigger => #{'PERIO' => []}}
+			    Report#{urr_id => #urr_id{id = Id},
+				    usage_report_trigger => #{'PERIO' => []}}
 		    end,
-		[maps:merge(maps:merge(#{urr_id => #urr_id{id = Id}}, Trigger), Gen())|Reports];
+		[Trigger|Reports];
 	   (_, _, Reports) ->
 		Reports
 	end,
@@ -3893,7 +3898,8 @@ split_charging1(Config) ->
 	end,
     OnReportFun =
 	fun(Gen, Id, Reports) ->
-		[maps:merge(#{urr_id => #urr_id{id = Id}}, Gen())|Reports]
+		Report = Gen(),
+		[Report#{urr_id => #urr_id{id = Id}}|Reports]
 	end,
     OnMatchSpec = ets:fun2ms(fun({Id, {'online', _}}) -> Id end),
     OnReport =
@@ -4178,14 +4184,17 @@ split_charging2(Config) ->
 
     OffReportFun =
 	fun(Gen, {Id, {offline, Type}}, Reports) ->
+                Report = Gen(),
 		Trigger =
 		    case Type of
 			RG when is_integer(RG) ->
-			    #{usage_report_trigger => #{'LIUSA' => []}};
+			    Report#{urr_id => #urr_id{id = Id},
+				    usage_report_trigger => #{'LIUSA' => []}};
 			'IP-CAN' ->
-			    #{usage_report_trigger => #{'PERIO' => []}}
+			    Report#{urr_id => #urr_id{id = Id},
+				    usage_report_trigger => #{'PERIO' => []}}
 		    end,
-		[maps:merge(maps:merge(#{urr_id => #urr_id{id = Id}}, Trigger), Gen())|Reports];
+		[Trigger|Reports];
 	   (_, _, Reports) ->
 		Reports
 	end,
@@ -4215,7 +4224,8 @@ split_charging2(Config) ->
 	end,
     OnReportFun =
 	fun(Gen, Id, Reports) ->
-		[maps:merge(#{urr_id => #urr_id{id = Id}}, Gen())|Reports]
+		Report = Gen(),
+		[Report#{urr_id => #urr_id{id = Id}}|Reports]
 	end,
     OnMatchSpec = ets:fun2ms(fun({Id, {'online', _}}) -> Id end),
     OnReport =

@@ -1447,11 +1447,13 @@ simple_ofcs(Config) ->
 		Trigger =
 		    case Type of
 			{offline, RG} when is_integer(RG) ->
-			    #{usage_report_trigger => #{'LIUSA' => []}};
+			    Report#{urr_id => #urr_id{id = Id},
+				    usage_report_trigger => #{'LIUSA' => []}};
 			{offline, 'IP-CAN'} ->
-			    #{usage_report_trigger => #{'PERIO' => []}}
+			    Report#{urr_id => #urr_id{id = Id},
+				    usage_report_trigger => #{'PERIO' => []}}
 		    end,
-		[maps:merge(maps:merge(#{urr_id => #urr_id{id = Id}}, Trigger), Report)|Reports]
+		[Trigger|Reports]
 	end,
     MatchSpec = ets:fun2ms(fun(Id) -> Id end),
     ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, ReportFun),
