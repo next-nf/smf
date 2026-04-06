@@ -20,26 +20,26 @@
 
 -callback handle_event(
 	    'enter',
-	    OldState :: gen_statem:state(),
+	    OldState :: term(),
 	    State, % Current state
 	    Data :: map()) ->
     gen_statem:state_enter_result(State);
 	   (gen_statem:event_type(),
 	    EventContent :: term(),
-	    State :: gen_statem:state(), % Current state
+	    State :: term(), % Current state
 	    Data :: map()) ->
-    gen_statem:event_handler_result(gen_statem:state()).
+    gen_statem:event_handler_result(term()).
 
 -callback handle_pdu(ReqKey :: #request{},
 		     Msg :: #gtp{},
-		     State :: gen_statem:state(), % Current state
+		     State :: term(), % Current state
 		     Data :: map()) ->
-    gen_statem:event_handler_result(gen_statem:state()).
+    gen_statem:event_handler_result(term()).
 
 -callback handle_request(ReqKey :: #request{},
 			 Msg :: #gtp{},
 			 Resent :: boolean(),
-			 State :: gen_statem:state(), % Current state
+			 State :: term(), % Current state
 			 Data :: map()) ->
     Return :: {reply, Reply :: term(), Data :: map()} |
 	      {stop, Reply :: term(), Data :: map()} |
@@ -49,7 +49,7 @@
 -callback handle_response(RequestInfo :: term(),
 			  Response :: #gtp{},
 			  Request  :: #gtp{},
-			  State :: gen_statem:state(), % Current state
+			  State :: term(), % Current state
 			  Data :: map()) ->
     Result :: {noreply, NewData :: map()} |
 	      {noreply, NewData :: map(), Timeout :: integer() | 'infinity'} |
@@ -66,6 +66,6 @@
 -callback terminate(
 	    Reason :: 'normal' | 'shutdown' | {'shutdown', term()}
 		    | term(),
-	    State :: gen_statem:state(),
-	    Data :: gen_statem:data()) ->
+	    State :: term(),
+	    Data :: term()) ->
     any().
