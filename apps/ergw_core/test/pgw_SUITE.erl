@@ -3037,11 +3037,11 @@ pfcp_session_deleted_by_the_up_function(Config) ->
     {ok, PCtx} = ergw_context:test_cmd(gtp, CtxKey, pfcp_ctx),
 
     MatchSpec = ets:fun2ms(fun({Id, _}) -> Id end),
-    IEs = [[pfcpsrreq_flags, #{'PSDBU' => []}]],
+    IEs = #{pfcpsrreq_flags => #{'PSDBU' => []}},
     Report =
-	[[usage_report_trigger, #{'TEBUR' => []}],
-	 #volume_measurement{total = 5, uplink = 2, downlink = 3},
-	 #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}],
+	#{usage_report_trigger => #{'TEBUR' => []},
+	  volume_measurement => #volume_measurement{total = 5, uplink = 2, downlink = 3},
+	  tp_packet_measurement => #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}},
 
     lists:foreach(
       fun(_X) ->
@@ -3107,9 +3107,9 @@ gy_validity_timer_up(Config) ->
 
     MatchSpec = ets:fun2ms(fun({Id, {'online', _}}) -> Id end),
     Report =
-	[[usage_report_trigger, #{'QUVTI' => []}],
-	 #volume_measurement{total = 5, uplink = 2, downlink = 3},
-	 #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}],
+	#{usage_report_trigger => #{'QUVTI' => []},
+	  volume_measurement => #volume_measurement{total = 5, uplink = 2, downlink = 3},
+	  tp_packet_measurement => #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}},
 
     lists:foreach(
       fun(_X) ->
@@ -3206,9 +3206,9 @@ simple_aaa(Config) ->
 
     MatchSpec = ets:fun2ms(fun({Id, {monitor, 'IP-CAN', _}}) -> Id end),
     Report =
-	[[usage_report_trigger, #{'PERIO' => []}],
-	 #volume_measurement{total = 5, uplink = 2, downlink = 3},
-	 #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}],
+	#{usage_report_trigger => #{'PERIO' => []},
+	  volume_measurement => #volume_measurement{total = 5, uplink = 2, downlink = 3},
+	  tp_packet_measurement => #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}},
     ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, Report),
 
     ct:sleep(100),
@@ -3307,23 +3307,22 @@ simple_ofcs(Config) ->
 	- ?SECONDS_FROM_0_TO_1970,
 
     Report =
-	[
-	 #volume_measurement{total = 5, uplink = 2, downlink = 3},
-	 #time_of_first_packet{time = ergw_gsn_lib:seconds_to_sntp_time(StartTS + 24)},
-	 #time_of_last_packet{time = ergw_gsn_lib:seconds_to_sntp_time(StartTS + 180)},
-	 #start_time{time = ergw_gsn_lib:seconds_to_sntp_time(StartTS)},
-	 #end_time{time = ergw_gsn_lib:seconds_to_sntp_time(StartTS + 600)},
-	 #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}],
+	#{volume_measurement => #volume_measurement{total = 5, uplink = 2, downlink = 3},
+	  time_of_first_packet => #time_of_first_packet{time = ergw_gsn_lib:seconds_to_sntp_time(StartTS + 24)},
+	  time_of_last_packet => #time_of_last_packet{time = ergw_gsn_lib:seconds_to_sntp_time(StartTS + 180)},
+	  start_time => #start_time{time = ergw_gsn_lib:seconds_to_sntp_time(StartTS)},
+	  end_time => #end_time{time = ergw_gsn_lib:seconds_to_sntp_time(StartTS + 600)},
+	  tp_packet_measurement => #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}},
     ReportFun =
 	fun({Id, Type}, Reports) ->
 		Trigger =
 		    case Type of
 			{offline, RG} when is_integer(RG) ->
-			    [usage_report_trigger, #{'LIUSA' => []}];
+			    #{usage_report_trigger => #{'LIUSA' => []}};
 			{offline, 'IP-CAN'} ->
-			    [usage_report_trigger, #{'PERIO' => []}]
+			    #{usage_report_trigger => #{'PERIO' => []}}
 		    end,
-		[[usage_report_srr, pfcp_packet:ies_to_map([#urr_id{id = Id}, Trigger|Report])]|Reports]
+		[maps:merge(maps:merge(#{urr_id => #urr_id{id = Id}}, Trigger), Report)|Reports]
 	end,
     MatchSpec = ets:fun2ms(fun(Id) -> Id end),
     ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, ReportFun),
@@ -3610,9 +3609,9 @@ simple_ocs(Config) ->
 
     MatchSpec = ets:fun2ms(fun({Id, {'online', _}}) -> Id end),
     Report =
-	[[usage_report_trigger, #{'VOLQU' => []}],
-	 #volume_measurement{total = 5, uplink = 2, downlink = 3},
-	 #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}],
+	#{usage_report_trigger => #{'VOLQU' => []},
+	  volume_measurement => #volume_measurement{total = 5, uplink = 2, downlink = 3},
+	  tp_packet_measurement => #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}},
     ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, Report),
 
     ct:sleep(100),
@@ -3843,14 +3842,16 @@ split_charging1(Config) ->
 
     OffReportGen =
 	fun(BaseTS, Duration, Slot) ->
-		[#volume_measurement{total = Slot, uplink = 2 * Slot, downlink = 3 * Slot},
-		 #time_of_first_packet{
-		    time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Slot)},
-		 #time_of_last_packet{
-		    time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration - Slot)},
-		 #start_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS)},
-		 #end_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration)},
-		 #tp_packet_measurement{total = Slot, uplink = 2 * Slot, downlink = 3 * Slot}]
+		#{volume_measurement => #volume_measurement{total = Slot, uplink = 2 * Slot, downlink = 3 * Slot},
+		  time_of_first_packet =>
+		      #time_of_first_packet{
+			 time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Slot)},
+		  time_of_last_packet =>
+		      #time_of_last_packet{
+			 time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration - Slot)},
+		  start_time => #start_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS)},
+		  end_time => #end_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration)},
+		  tp_packet_measurement => #tp_packet_measurement{total = Slot, uplink = 2 * Slot, downlink = 3 * Slot}}
 	end,
 
     OffReportFun =
@@ -3858,12 +3859,11 @@ split_charging1(Config) ->
 		Trigger =
 		    case Type of
 			RG when is_integer(RG) ->
-			    [usage_report_trigger, #{'LIUSA' => []}];
+			    #{usage_report_trigger => #{'LIUSA' => []}};
 			'IP-CAN' ->
-			    [usage_report_trigger, #{'PERIO' => []}]
+			    #{usage_report_trigger => #{'PERIO' => []}}
 		    end,
-		[[usage_report_srr, pfcp_packet:ies_to_map([#urr_id{id = Id}, Trigger
-					   | Gen()])]|Reports];
+		[maps:merge(maps:merge(#{urr_id => #urr_id{id = Id}}, Trigger), Gen())|Reports];
 	   (_, _, Reports) ->
 		Reports
 	end,
@@ -3875,22 +3875,25 @@ split_charging1(Config) ->
 
     OnReportGen =
 	fun (BaseTS, Duration, Slot) ->
-		[[usage_report_trigger, #{'VOLQU' => []}],
-		 #volume_measurement{
-		    total = Slot, uplink = 2 * Slot, downlink = 3 * Slot},
-		 #time_of_first_packet{
-		    time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Slot)},
-		 #time_of_last_packet{
-		    time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration - Slot)},
-		 #start_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS)},
-		 #end_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration)},
-		 #tp_packet_measurement{
-		    total = Slot, uplink = 2 * Slot, downlink = 3 * Slot}]
+		#{usage_report_trigger => #{'VOLQU' => []},
+		  volume_measurement =>
+		      #volume_measurement{
+			 total = Slot, uplink = 2 * Slot, downlink = 3 * Slot},
+		  time_of_first_packet =>
+		      #time_of_first_packet{
+			 time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Slot)},
+		  time_of_last_packet =>
+		      #time_of_last_packet{
+			 time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration - Slot)},
+		  start_time => #start_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS)},
+		  end_time => #end_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration)},
+		  tp_packet_measurement =>
+		      #tp_packet_measurement{
+			 total = Slot, uplink = 2 * Slot, downlink = 3 * Slot}}
 	end,
     OnReportFun =
 	fun(Gen, Id, Reports) ->
-		[[usage_report_srr, pfcp_packet:ies_to_map([#urr_id{id = Id}
-					   | Gen()])]|Reports]
+		[maps:merge(#{urr_id => #urr_id{id = Id}}, Gen())|Reports]
 	end,
     OnMatchSpec = ets:fun2ms(fun({Id, {'online', _}}) -> Id end),
     OnReport =
@@ -4161,14 +4164,16 @@ split_charging2(Config) ->
 
     OffReportGen =
 	fun(BaseTS, Duration, Slot) ->
-		[#volume_measurement{total = Slot, uplink = 2 * Slot, downlink = 3 * Slot},
-		 #time_of_first_packet{
-		    time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Slot)},
-		 #time_of_last_packet{
-		    time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration - Slot)},
-		 #start_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS)},
-		 #end_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration)},
-		 #tp_packet_measurement{total = Slot, uplink = 2 * Slot, downlink = 3 * Slot}]
+		#{volume_measurement => #volume_measurement{total = Slot, uplink = 2 * Slot, downlink = 3 * Slot},
+		  time_of_first_packet =>
+		      #time_of_first_packet{
+			 time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Slot)},
+		  time_of_last_packet =>
+		      #time_of_last_packet{
+			 time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration - Slot)},
+		  start_time => #start_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS)},
+		  end_time => #end_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration)},
+		  tp_packet_measurement => #tp_packet_measurement{total = Slot, uplink = 2 * Slot, downlink = 3 * Slot}}
 	end,
 
     OffReportFun =
@@ -4176,12 +4181,11 @@ split_charging2(Config) ->
 		Trigger =
 		    case Type of
 			RG when is_integer(RG) ->
-			    [usage_report_trigger, #{'LIUSA' => []}];
+			    #{usage_report_trigger => #{'LIUSA' => []}};
 			'IP-CAN' ->
-			    [usage_report_trigger, #{'PERIO' => []}]
+			    #{usage_report_trigger => #{'PERIO' => []}}
 		    end,
-		[[usage_report_srr, pfcp_packet:ies_to_map([#urr_id{id = Id}, Trigger
-					   | Gen()])]|Reports];
+		[maps:merge(maps:merge(#{urr_id => #urr_id{id = Id}}, Trigger), Gen())|Reports];
 	   (_, _, Reports) ->
 		Reports
 	end,
@@ -4193,22 +4197,25 @@ split_charging2(Config) ->
 
     OnReportGen =
 	fun (BaseTS, Duration, Slot) ->
-		[[usage_report_trigger, #{'VOLQU' => []}],
-		 #volume_measurement{
-		    total = Slot, uplink = 2 * Slot, downlink = 3 * Slot},
-		 #time_of_first_packet{
-		    time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Slot)},
-		 #time_of_last_packet{
-		    time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration - Slot)},
-		 #start_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS)},
-		 #end_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration)},
-		 #tp_packet_measurement{
-		    total = Slot, uplink = 2 * Slot, downlink = 3 * Slot}]
+		#{usage_report_trigger => #{'VOLQU' => []},
+		  volume_measurement =>
+		      #volume_measurement{
+			 total = Slot, uplink = 2 * Slot, downlink = 3 * Slot},
+		  time_of_first_packet =>
+		      #time_of_first_packet{
+			 time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Slot)},
+		  time_of_last_packet =>
+		      #time_of_last_packet{
+			 time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration - Slot)},
+		  start_time => #start_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS)},
+		  end_time => #end_time{time = ergw_gsn_lib:seconds_to_sntp_time(BaseTS + Duration)},
+		  tp_packet_measurement =>
+		      #tp_packet_measurement{
+			 total = Slot, uplink = 2 * Slot, downlink = 3 * Slot}}
 	end,
     OnReportFun =
 	fun(Gen, Id, Reports) ->
-		[[usage_report_srr, pfcp_packet:ies_to_map([#urr_id{id = Id}
-					   | Gen()])]|Reports]
+		[maps:merge(#{urr_id => #urr_id{id = Id}}, Gen())|Reports]
 	end,
     OnMatchSpec = ets:fun2ms(fun({Id, {'online', _}}) -> Id end),
     OnReport =
@@ -4583,59 +4590,51 @@ tariff_time_change(Config) ->
     ReportFun =
 	fun({online, Id}, IEs) ->
 		IEbef =
-		    [usage_report_srr,
-		     pfcp_packet:ies_to_map(
-		       [#urr_id{id = Id},
-			[usage_report_trigger, #{'MONIT' => []}],
-			[usage_information, #{'BEF' => []}],
-			#start_time{time = 3775809600},
-			#end_time{time = 3775810200},
-			#time_of_first_packet{time = 3775809600 + 30},
-			#time_of_last_packet{time = 3775810200 - 30},
-			#duration_measurement{duration = 600},
-			#volume_measurement{total = 5, uplink = 2, downlink = 3},
-			#tp_packet_measurement{total = 12, uplink = 5, downlink = 7}])],
+		    #{urr_id => #urr_id{id = Id},
+		      usage_report_trigger => #{'MONIT' => []},
+		      usage_information => #{'BEF' => []},
+		      start_time => #start_time{time = 3775809600},
+		      end_time => #end_time{time = 3775810200},
+		      time_of_first_packet => #time_of_first_packet{time = 3775809600 + 30},
+		      time_of_last_packet => #time_of_last_packet{time = 3775810200 - 30},
+		      duration_measurement => #duration_measurement{duration = 600},
+		      volume_measurement => #volume_measurement{total = 5, uplink = 2, downlink = 3},
+		      tp_packet_measurement => #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}},
 		IEaft =
-		    [usage_report_srr,
-		     pfcp_packet:ies_to_map(
-		       [#urr_id{id = Id},
-			[usage_report_trigger, #{'PERIO' => []}],
-			[usage_information, #{'AFT' => []}],
-			#start_time{time = 3775810200},
-			#end_time{time = 3775810800},
-			#time_of_first_packet{time = 3775810200 + 30},
-			#time_of_last_packet{time = 3775810800 - 30},
-			#duration_measurement{duration = 600},
-			#volume_measurement{total = 20, uplink = 9, downlink = 11},
-			#tp_packet_measurement{total = 28, uplink = 13, downlink = 15}])],
+		    #{urr_id => #urr_id{id = Id},
+		      usage_report_trigger => #{'PERIO' => []},
+		      usage_information => #{'AFT' => []},
+		      start_time => #start_time{time = 3775810200},
+		      end_time => #end_time{time = 3775810800},
+		      time_of_first_packet => #time_of_first_packet{time = 3775810200 + 30},
+		      time_of_last_packet => #time_of_last_packet{time = 3775810800 - 30},
+		      duration_measurement => #duration_measurement{duration = 600},
+		      volume_measurement => #volume_measurement{total = 20, uplink = 9, downlink = 11},
+		      tp_packet_measurement => #tp_packet_measurement{total = 28, uplink = 13, downlink = 15}},
 		[IEbef, IEaft | IEs];
 	   ({offline, Id}, IEs) ->
 		IEbef =
-		    [usage_report_srr,
-		     pfcp_packet:ies_to_map(
-		       [#urr_id{id = Id},
-			[usage_report_trigger, #{'MONIT' => []}],
-			[usage_information, #{'BEF' => []}],
-			#start_time{time = 3775809600},
-			#end_time{time = 3775810200},
-			#time_of_first_packet{time = 3775809600 + 30},
-			#time_of_last_packet{time = 3775810200 - 30},
-			#duration_measurement{duration = 600},
-			#volume_measurement{total = 5, uplink = 2, downlink = 3},
-			#tp_packet_measurement{total = 12, uplink = 5, downlink = 7}])],
+		    #{urr_id => #urr_id{id = Id},
+		      usage_report_trigger => #{'MONIT' => []},
+		      usage_information => #{'BEF' => []},
+		      start_time => #start_time{time = 3775809600},
+		      end_time => #end_time{time = 3775810200},
+		      time_of_first_packet => #time_of_first_packet{time = 3775809600 + 30},
+		      time_of_last_packet => #time_of_last_packet{time = 3775810200 - 30},
+		      duration_measurement => #duration_measurement{duration = 600},
+		      volume_measurement => #volume_measurement{total = 5, uplink = 2, downlink = 3},
+		      tp_packet_measurement => #tp_packet_measurement{total = 12, uplink = 5, downlink = 7}},
 		IEaft =
-		    [usage_report_srr,
-		     pfcp_packet:ies_to_map(
-		       [#urr_id{id = Id},
-			[usage_report_trigger, #{'VOLQU' => []}],
-			[usage_information, #{'AFT' => []}],
-			#start_time{time = 3775810200},
-			#end_time{time = 3775810800},
-			#time_of_first_packet{time = 3775810200 + 30},
-			#time_of_last_packet{time = 3775810800 - 30},
-			#duration_measurement{duration = 600},
-			#volume_measurement{total = 20, uplink = 9, downlink = 11},
-			#tp_packet_measurement{total = 28, uplink = 13, downlink = 15}])],
+		    #{urr_id => #urr_id{id = Id},
+		      usage_report_trigger => #{'VOLQU' => []},
+		      usage_information => #{'AFT' => []},
+		      start_time => #start_time{time = 3775810200},
+		      end_time => #end_time{time = 3775810800},
+		      time_of_first_packet => #time_of_first_packet{time = 3775810200 + 30},
+		      time_of_last_packet => #time_of_last_packet{time = 3775810800 - 30},
+		      duration_measurement => #duration_measurement{duration = 600},
+		      volume_measurement => #volume_measurement{total = 20, uplink = 9, downlink = 11},
+		      tp_packet_measurement => #tp_packet_measurement{total = 28, uplink = 13, downlink = 15}},
 		[IEbef, IEaft | IEs]
 	end,
     ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, ReportFun),
@@ -4810,8 +4809,8 @@ volume_threshold(Config) ->
 
     MatchSpec = ets:fun2ms(fun({Id, {'online', _}}) -> Id end),
 
-    ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, [[usage_report_trigger, #{'VOLTH' => []}]]),
-    ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, [[usage_report_trigger, #{'VOLQU' => []}]]),
+    ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, #{usage_report_trigger => #{'VOLTH' => []}}),
+    ergw_test_sx_up:usage_report('pgw-u01', PCtx, MatchSpec, #{usage_report_trigger => #{'VOLQU' => []}}),
 
     ct:sleep({seconds, 1}),
 

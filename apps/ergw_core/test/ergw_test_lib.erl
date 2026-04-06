@@ -469,8 +469,8 @@ f_teid(TEID, {_,_,_,_,_,_,_,_} = IP) ->
 
 make_error_indication_report(IP, TEI) ->
     IEs =
-	[[report_type, #{'ERIR' => []}],
-	 [error_indication_report, #{f_teid => f_teid(TEI, IP)}]],
+	#{report_type => #{'ERIR' => []},
+	  error_indication_report => #{f_teid => f_teid(TEI, IP)}},
     Req = #pfcp{version = v1, type = session_report_request, seid = 0, ie = IEs},
     pfcp_packet:encode(Req#pfcp{seq_no = 0}),
     Req.
@@ -857,7 +857,7 @@ query_usage_report(PCtx) ->
     Req = #pfcp{
 	     version = v1,
 	     type = session_modification_request,
-	     ie = [[query_urr, #{urr_id => #urr_id{id = 1}}]]
+	     ie = #{query_urr => #{urr_id => #urr_id{id = 1}}}
 	    },
     case ergw_sx_node:call(PCtx, Req) of
 	#pfcp{type = session_modification_response,
