@@ -404,7 +404,7 @@ handle_event(state_timeout, connect, dead, Data) ->
 handle_event(enter, _, connecting, #data{dp = #node{ip = IP}} = Data) ->
     ergw_sx_node_reg:register(IP, self()),
 
-    Req0 = #pfcp{version = v1, type = association_setup_request, ie = []},
+    Req0 = #pfcp{version = v1, type = association_setup_request, ie = #{}},
     Req = augment_mandatory_ie(Req0, Data),
     ergw_sx_socket:call(IP, ?AssocReqTimeout, ?AssocReqRetries, Req,
 			response_cb(association_setup_request)),
