@@ -108,13 +108,13 @@ query_usage_report(PCtx) ->
 query_usage_report(Type, PCtx)
   when is_record(PCtx, pfcp_ctx) andalso
        (Type == offline orelse Type == online) ->
-    IEs = [[query_urr, GroupMap] || GroupMap <- build_query_usage_report(Type, PCtx)],
+    IEs = #{query_urr => build_query_usage_report(Type, PCtx)},
     session_modification_request(PCtx, IEs);
 
 query_usage_report(ChargingKeys, PCtx)
   when is_record(PCtx, pfcp_ctx) ->
-    IEs = [[query_urr, #{urr_id => #urr_id{id = Id}}] ||
-	   Id <- ergw_pfcp:get_urr_ids(ChargingKeys, PCtx), is_integer(Id)],
+    IEs = #{query_urr => [#{urr_id => #urr_id{id = Id}} ||
+			   Id <- ergw_pfcp:get_urr_ids(ChargingKeys, PCtx), is_integer(Id)]},
     session_modification_request(PCtx, IEs).
 
 %%%===================================================================
@@ -317,22 +317,20 @@ build_sx_ctx_rule(#sx_upd{
     {FarId, PCtx2} = ergw_pfcp:get_id(far, dp_to_cp_far, PCtx1),
     {LeftBearerReq, PCtx} = make_request_bearer(PdrId, LeftBearer, PCtx2),
 
-    PDI = pfcp_packet:ies_to_map(
-	    [#sdf_filter{
-		 flow_description =
-		     <<"permit out 58 from ff00::/8 to assigned">>}
-	    | ergw_pfcp:traffic_endpoint(LeftBearerReq, [])]),
-    PDR = [#pdr_id{id = PdrId},
-	   #precedence{precedence = 100},
-	   [pdi, PDI],
-	   #far_id{id = FarId}
-	   %% TBD: #urr_id{id = 1}
-	  ],
-    FAR = [#far_id{id = FarId},
-	   [apply_action, #{'FORW' => []}],
-	   [forwarding_parameters,
-	    pfcp_packet:ies_to_map(ergw_pfcp:traffic_forward(CpBearer, []))]
-	  ],
+    PDI = ergw_pfcp:traffic_endpoint(LeftBearerReq,
+	    #{sdf_filter =>
+		  #sdf_filter{flow_description =
+				  <<"permit out 58 from ff00::/8 to assigned">>}}),
+    PDR = #{pdr_id => #pdr_id{id = PdrId},
+	    precedence => #precedence{precedence = 100},
+	    pdi => PDI,
+	    far_id => #far_id{id = FarId}
+	    %% TBD: urr_id => #urr_id{id = 1}
+	   },
+    FAR = #{far_id => #far_id{id = FarId},
+	    apply_action => #{'FORW' => []},
+	    forwarding_parameters => ergw_pfcp:traffic_forward(CpBearer, #{})
+	   },
     Update#sx_upd{
       pctx = ergw_pfcp_rules:add(
 	       [{pdr, ipv6_mcast_pdr, PDR},
@@ -453,12 +451,13 @@ build_sx_rule(Name, Definition, DL, UL, Update0) ->
 
 build_sx_filter(FlowInfo)
   when is_list(FlowInfo) ->
-    [#sdf_filter{flow_description = FD} || #{'Flow-Description' := [FD]} <- FlowInfo];
+    pfcp_packet:ies_to_map([#sdf_filter{flow_description = FD}
+			    || #{'Flow-Description' := [FD]} <- FlowInfo]);
 build_sx_filter(AppId)
   when is_binary(AppId) ->
-    [[application_id, AppId]];
+    #{application_id => AppId};
 build_sx_filter(_) ->
-    [].
+    #{}.
 
 to_binary(List) when is_list(List) ->
     list_to_binary(List);
@@ -467,19 +466,22 @@ to_binary(Bin) when is_binary(Bin) ->
 
 pdr(PdrId, Precedence, Side, Src, Dst, FilterInfo, FarId, URRs) ->
     SxFilter = build_sx_filter(FilterInfo),
-    Group =
-	[#pdr_id{id = PdrId},
-	 #precedence{precedence = Precedence},
-	 [pdi, pfcp_packet:ies_to_map(pdi(Side, Src, Dst, SxFilter))],
-	 #far_id{id = FarId}] ++
-	[#urr_id{id = X} || X <- URRs],
-    ergw_pfcp:outer_header_removal(Src, Group).
+    PDI = pdi(Side, Src, Dst, SxFilter),
+    Group0 = #{pdr_id => #pdr_id{id = PdrId},
+	       precedence => #precedence{precedence = Precedence},
+	       pdi => PDI,
+	       far_id => #far_id{id = FarId}},
+    Group1 = case URRs of
+		 []  -> Group0;
+		 [X] -> Group0#{urr_id => #urr_id{id = X}};
+		 Xs  -> Group0#{urr_id => [#urr_id{id = X} || X <- Xs]}
+	     end,
+    ergw_pfcp:outer_header_removal(Src, Group1).
 
 pdi(Side, Src, #bearer{local = UeIP} = Dst, Group)
   when is_record(UeIP, ue_ip) ->
     %% gtp endpoint with UE IP for bearer binding verification
-    [ergw_pfcp:ue_ip_address(Side, Dst)
-    | ergw_pfcp:traffic_endpoint(Src, Group)];
+    ergw_pfcp:traffic_endpoint(Src, Group#{ue_ip_address => ergw_pfcp:ue_ip_address(Side, Dst)});
 pdi(_Side, Src, _Dst, Group) ->
     ergw_pfcp:traffic_endpoint(Src, Group).
 
@@ -509,18 +511,17 @@ far(FarId, [#{'Redirect-Support' :=        [1],   %% ENABLED
 	      'Redirect-Server-Address' := [URL]}],
     _Src, Dst) ->
     RedirInfo = #redirect_information{type = 'URL', address = to_binary(URL)},
-    [#far_id{id = FarId},
-     [apply_action, #{'FORW' => []}],
-     [forwarding_parameters,
-      pfcp_packet:ies_to_map(ergw_pfcp:traffic_forward(Dst, [RedirInfo]))]];
+    #{far_id => #far_id{id = FarId},
+      apply_action => #{'FORW' => []},
+      forwarding_parameters =>
+	  ergw_pfcp:traffic_forward(Dst, #{redirect_information => RedirInfo})};
 far(FarId, _RedirInfo, _Src, #bearer{remote = undefined}) ->
-    [#far_id{id = FarId},
-     [apply_action, #{'DROP' => []}]];
+    #{far_id => #far_id{id = FarId},
+      apply_action => #{'DROP' => []}};
 far(FarId, _RedirInfo, _Src, Dst) ->
-    [#far_id{id = FarId},
-     [apply_action, #{'FORW' => []}],
-     [forwarding_parameters,
-      pfcp_packet:ies_to_map(ergw_pfcp:traffic_forward(Dst, []))]].
+    #{far_id => #far_id{id = FarId},
+      apply_action => #{'FORW' => []},
+      forwarding_parameters => ergw_pfcp:traffic_forward(Dst, #{})}.
 
 %% build_sx_rule/6
 build_sx_rule(Direction, Name, Definition, FilterInfo, URRs,

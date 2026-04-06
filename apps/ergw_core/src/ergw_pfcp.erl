@@ -45,28 +45,25 @@ alloc_info_addr(AI) ->
 
 traffic_endpoint(#bearer{local = FqTEID} = Bearer, Group)
   when is_record(FqTEID, fq_teid) ->
-    [source_interface(Bearer),
-     ergw_pfcp:network_instance(Bearer),
-     ergw_pfcp:f_teid(FqTEID)
-    | Group];
+    Group#{source_interface => source_interface(Bearer),
+           network_instance => network_instance_name(Bearer),
+           f_teid => f_teid(FqTEID)};
 traffic_endpoint(#bearer{local = UeIP} = Bearer, Group)
   when is_record(UeIP, ue_ip) ->
-    [source_interface(Bearer),
-     ergw_pfcp:network_instance(Bearer),
-     ergw_pfcp:ue_ip_address(dst, UeIP)
-    | Group];
+    Group#{source_interface => source_interface(Bearer),
+           network_instance => network_instance_name(Bearer),
+           ue_ip_address => ue_ip_address(dst, UeIP)};
 traffic_endpoint(#bearer{local = undefined, remote = UeIP} = Bearer, Group)
   when is_record(UeIP, ue_ip) ->
-    [source_interface(Bearer),
-     ergw_pfcp:network_instance(Bearer)
-    | Group];
+    Group#{source_interface => source_interface(Bearer),
+           network_instance => network_instance_name(Bearer)};
 traffic_endpoint(_, Group) ->
     Group.
 
 traffic_forward(#bearer{} = Bearer, Group) ->
-    [destination_interface(Bearer),
-     ergw_pfcp:network_instance(Bearer)
-    | outer_header_creation(Bearer, Group)].
+    outer_header_creation(Bearer,
+        Group#{destination_interface => destination_interface(Bearer),
+               network_instance => network_instance_name(Bearer)}).
 
 ue_ip_address(Direction, #bearer{local = UeIP})
   when is_record(UeIP, ue_ip) ->
@@ -97,13 +94,23 @@ destination_interface(#bearer{interface = VRF}) ->
 
 network_instance(Name)
   when is_binary(Name) ->
-    [network_instance, Name];
+    #{network_instance => Name};
 network_instance(#tunnel{vrf = VRF}) ->
     network_instance(VRF);
 network_instance(#bearer{vrf = VRF}) ->
     network_instance(VRF);
 network_instance(#vrf{name = Name}) ->
     network_instance(Name).
+
+network_instance_name(Name)
+  when is_binary(Name) ->
+    Name;
+network_instance_name(#tunnel{vrf = VRF}) ->
+    network_instance_name(VRF);
+network_instance_name(#bearer{vrf = VRF}) ->
+    network_instance_name(VRF);
+network_instance_name(#vrf{name = Name}) ->
+    network_instance_name(Name).
 
 f_seid(#pfcp_ctx{seid = #seid{cp = SEID}}, #node{ip = {_,_,_,_} = IP}) ->
    #f_seid{seid = SEID, ipv4 = ergw_inet:ip2bin(IP)};
@@ -128,11 +135,10 @@ f_teid({upf, ChId}, v6) ->
 
 outer_header_creation(#bearer{remote = FqTEID}, Group)
   when is_record(FqTEID, fq_teid) ->
-    [outer_header_creation(FqTEID) | Group];
+    Group#{outer_header_creation => outer_header_creation(FqTEID)};
 outer_header_creation(#bearer{local = #ue_ip{v4 = V4, nat = NAT}}, Group)
   when V4 /= undefined, is_binary(NAT) ->
-    [[bbf_apply_action, #{'NAT' => []}],
-     [bbf_nat_port_block, NAT] | Group];
+    Group#{bbf_apply_action => #{'NAT' => []}, bbf_nat_port_block => NAT};
 outer_header_creation(_, Group) ->
     Group.
 
@@ -143,7 +149,7 @@ outer_header_creation(#fq_teid{ip = {_,_,_,_,_,_,_,_} = IP, teid = TEID}) ->
 
 outer_header_removal(#bearer{local = FqTEID}, Group)
   when is_record(FqTEID, fq_teid) ->
-    [outer_header_removal(FqTEID) | Group];
+    Group#{outer_header_removal => outer_header_removal(FqTEID)};
 outer_header_removal(_, Group) ->
     Group.
 
@@ -326,42 +332,38 @@ update_pfcp_rules(#pfcp_ctx{sx_rules = Old},
     Del = maps:fold(del_pfcp_rules(_, _, IdMap, _), #{}, maps:without(maps:keys(New), Old)),
     maps:fold(upd_pfcp_rules(_, _, Old, _, Opts), Del, New).
 
-update_m_rec([Type, IE], Map) ->
-    maps:update_with(Type, [IE | _], [IE], Map);
-update_m_rec(Record, Map) when is_tuple(Record) ->
-    maps:update_with(element(1, Record), [Record | _], [Record], Map).
+update_m_rec(Type, IE, Map) ->
+    maps:update_with(Type, [IE | _], [IE], Map).
 
-put_rec([Type, IE], Map) ->
-    maps:put(Type, IE, Map);
-put_rec(Record, Map) when is_tuple(Record) ->
-    maps:put(element(1, Record), Record, Map).
+put_rec(Type, IE, Map) ->
+    maps:put(Type, IE, Map).
 
 del_pfcp_rules({pdr, _}, #{pdr_id := Id}, _, Acc) ->
-    update_m_rec([remove_pdr, #{pdr_id => Id}], Acc);
+    update_m_rec(remove_pdr, #{pdr_id => Id}, Acc);
 del_pfcp_rules({far, _}, #{far_id := Id}, _, Acc) ->
-    update_m_rec([remove_far, #{far_id => Id}], Acc);
+    update_m_rec(remove_far, #{far_id => Id}, Acc);
 del_pfcp_rules({urr, _}, #{urr_id := Id}, _, Acc) ->
-    update_m_rec([remove_urr, #{urr_id => Id}], Acc).
+    update_m_rec(remove_urr, #{urr_id => Id}, Acc).
 
 upd_pfcp_rules({Type, _} = K, V, Old, Acc, Opts) ->
     upd_pfcp_rules_1(Type, V, maps:get(K, Old, undefined), Acc, Opts).
 
 upd_pfcp_rules_1(pdr, V, undefined, Acc, _Opts) ->
-    update_m_rec([create_pdr, V], Acc);
+    update_m_rec(create_pdr, V, Acc);
 upd_pfcp_rules_1(far, V, undefined, Acc, _Opts) ->
-    update_m_rec([create_far, V], Acc);
+    update_m_rec(create_far, V, Acc);
 upd_pfcp_rules_1(urr, M, undefined, Acc, _Opts)
   when is_map(M) ->
     V = maps:remove('Update-Time-Stamp', M),
-    update_m_rec([create_urr, V], Acc);
+    update_m_rec(create_urr, V, Acc);
 
 upd_pfcp_rules_1(_Type, V, V, Acc, _Opts) ->
     Acc;
 
 upd_pfcp_rules_1(pdr, V, OldV, Acc, Opts) ->
-    update_m_rec([update_pdr, update_pfcp_pdr(V, OldV, Opts)], Acc);
+    update_m_rec(update_pdr, update_pfcp_pdr(V, OldV, Opts), Acc);
 upd_pfcp_rules_1(far, V, OldV, Acc, Opts) ->
-    update_m_rec([update_far, update_pfcp_far(V, OldV, Opts)], Acc);
+    update_m_rec(update_far, update_pfcp_far(V, OldV, Opts), Acc);
 
 upd_pfcp_rules_1(urr,
 		 #{'Update-Time-Stamp' := TS} = _M,
@@ -370,7 +372,7 @@ upd_pfcp_rules_1(urr,
 upd_pfcp_rules_1(urr, M, _OldV, Acc, _Opts)
   when is_map(M) ->
     V = maps:remove('Update-Time-Stamp', M),
-    update_m_rec([update_urr, V], Acc).
+    update_m_rec(update_urr, V, Acc).
 
 update_pfcp_simplify(New, Old)
   when is_map(Old), New =/= Old ->
@@ -387,14 +389,14 @@ update_pfcp_simplify(New, _Old) ->
 %% TODO: predefined rules (activate/deactivate)
 update_pfcp_pdr(#{pdr_id := Id} = New, Old, _Opts) ->
     Update = update_pfcp_simplify(New, Old),
-    put_rec(Id, Update).
+    put_rec(pdr_id, Id, Update).
 
 update_pfcp_far(#{far_id := Id} = New, Old, Opts) ->
     ?LOG(debug, "Update PFCP Far Old: ~s", [pfcp_packet:pretty_print(Old)]),
     ?LOG(debug, "Update PFCP Far New: ~s", [pfcp_packet:pretty_print(New)]),
     Update = update_pfcp_simplify(New, Old),
     ?LOG(debug, "Update PFCP Far Update: ~s", [pfcp_packet:pretty_print(Update)]),
-    maps:fold(update_pfcp_far(_, _, Old, _, Opts), #{}, put_rec(Id, Update)).
+    maps:fold(update_pfcp_far(_, _, Old, _, Opts), #{}, put_rec(far_id, Id, Update)).
 
 update_pfcp_far(forwarding_parameters,
 	      #{destination_interface :=
@@ -411,15 +413,15 @@ update_pfcp_far(forwarding_parameters,
 	case Update0 of
 	    #{outer_header_creation := _}
 	      when SendEM andalso (Interface == 'Access' orelse Interface == 'Core')->
-		put_rec([sxsmreq_flags, #{'SNDEM' => []}], Update0);
+		put_rec(sxsmreq_flags, #{'SNDEM' => []}, Update0);
 	    _ ->
 		Update0
 	end,
-    put_rec([update_forwarding_parameters, Update], Far);
+    put_rec(update_forwarding_parameters, Update, Far);
 update_pfcp_far(forwarding_parameters, P, _Old, Far, _Opts) ->
-    put_rec([update_forwarding_parameters, P], Far);
+    put_rec(update_forwarding_parameters, P, Far);
 update_pfcp_far(duplicating_parameters, P, _Old, Far, _Opts) ->
-    put_rec([update_duplicating_parameters, P], Far);
+    put_rec(update_duplicating_parameters, P, Far);
 update_pfcp_far(K, V, _Old, Far, _Opts) ->
     ?LOG(debug, "Update PFCP Far: ~p, ~p", [K, V]),
     Far#{K => V}.

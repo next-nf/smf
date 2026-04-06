@@ -718,12 +718,6 @@ response_cb(CbData) ->
 next_heartbeat(#data{cfg = #{heartbeat := #{interval := Interval}}}) ->
     {state_timeout, Interval, heartbeat}.
 
-put_ie([Type, IE], IEs) when is_map(IEs) ->
-    maps:put(Type, IE, IEs);
-put_ie([Type, IE], IEs) when is_list(IEs) ->
-    [[Type, IE] | IEs];
-put_ie([Type, IE], _IEs) ->
-    [[Type, IE]];
 put_ie(IE, IEs) when is_map(IEs) ->
     maps:put(element(1, IE), IE, IEs);
 put_ie(IE, IEs) when is_list(IEs) ->
@@ -740,8 +734,7 @@ put_build_id(R = #pfcp{ie = IEs}) ->
     VStr = io_lib:format("erGW ~s on Erlang/OTP ~s [erts ~s]",
 			 [Version, erlang:system_info(otp_release),
 			  erlang:system_info(version)]),
-    Id = [tp_build_identifier, iolist_to_binary(VStr)],
-    R#pfcp{ie = put_ie(Id, IEs)}.
+    R#pfcp{ie = IEs#{tp_build_identifier => iolist_to_binary(VStr)}}.
 
 put_recovery_time_stamp(R = #pfcp{ie = IEs}) ->
     TS = #recovery_time_stamp{
@@ -928,20 +921,20 @@ generate_per_feature_pfcp_rule('Access', #vrf{name = Name} = VRF, Bearer, PCtx0)
     {BearerReq, PCtx} = ergw_pfcp_context:make_request_bearer(PdrId, Bearer, PCtx2),
 
     %% GTP-U encapsulated packet from CP
-    PDI = pfcp_packet:ies_to_map(ergw_pfcp:traffic_endpoint(BearerReq, [])),
-    PDR = [#pdr_id{id = PdrId},
-	   #precedence{precedence = 100},
-	   [pdi, PDI],
-	   ergw_pfcp:outer_header_removal(Bearer),
-	   #far_id{id = FarId}],
+    PDI = ergw_pfcp:traffic_endpoint(BearerReq, #{}),
+    PDR0 = #{pdr_id => #pdr_id{id = PdrId},
+	     precedence => #precedence{precedence = 100},
+	     pdi => PDI,
+	     far_id => #far_id{id = FarId}},
+    PDR = ergw_pfcp:outer_header_removal(Bearer, PDR0),
     %% forward to Access interfaces
-    FAR = [#far_id{id = FarId},
-	   [apply_action, #{'FORW' => []}],
-	   [forwarding_parameters,
-	    pfcp_packet:ies_to_map(
-	      [#destination_interface{interface = 'Access'},
-	       ergw_pfcp:network_instance(VRF)])]
-	  ],
+    FAR = #{far_id => #far_id{id = FarId},
+	    apply_action => #{'FORW' => []},
+	    forwarding_parameters =>
+		maps:merge(#{destination_interface =>
+				 #destination_interface{interface = 'Access'}},
+			   ergw_pfcp:network_instance(VRF))
+	   },
 
     ergw_pfcp_rules:add(
       [{pdr, PdrId, PDR},
