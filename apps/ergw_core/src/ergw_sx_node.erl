@@ -36,6 +36,9 @@
 -export([init/1, callback_mode/0, handle_event/4,
 	 terminate/3, code_change/4]).
 
+%% init/1 uses proc_lib + gen_statem:enter_loop; suppress callback return-type mismatch
+-dialyzer({nowarn_function, [init/1]}).
+
 -include_lib("kernel/include/logger.hrl").
 -include_lib("kernel/include/inet.hrl").
 -include_lib("gtplib/include/gtp_packet.hrl").
@@ -48,7 +51,7 @@
 	       mode = transient  :: 'transient' | 'persistent',
 	       node_select       :: atom(),
 	       retries = 0       :: non_neg_integer(),
-	       features          :: map(),
+	       features          :: map() | undefined,
 	       recovery_ts       :: undefined | non_neg_integer(),
 	       pfcp_ctx          :: #pfcp_ctx{},
 	       bearer            :: #{atom() := #bearer{}},
@@ -371,7 +374,7 @@ init([Parent, Node, NodeSelect, IP4, IP6, NotifyUp]) ->
 		  retries = 0,
 		  recovery_ts = undefined,
 		  pfcp_ctx = PCtx,
-		  bearer = #{dp => #bearer{interface = 'CP-function'}},
+		  bearer = #{dp => #bearer{interface = 'CP-Function'}},
 		  cp_socket = Socket,
 		  cp_info = SockInfo,
 		  cp = CP,
@@ -726,7 +729,8 @@ put_ie(IE, _IEs) ->
     [IE].
 
 put_node_id(R = #pfcp{ie = IEs}, #data{cp = #node{node = Node}}) ->
-    NodeId = #node_id{id = string:split(atom_to_binary(Node, utf8), ".", all)},
+    NodeBin = if is_atom(Node) -> atom_to_binary(Node, utf8); true -> Node end,
+    NodeId = #node_id{id = string:split(NodeBin, ".", all)},
     R#pfcp{ie = put_ie(NodeId, IEs)}.
 
 put_build_id(R = #pfcp{ie = IEs}) ->

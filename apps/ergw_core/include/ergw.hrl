@@ -27,7 +27,7 @@
 					       context=Context,where={?FILE, ?LINE}}).
 
 -record(node, {
-	  node	:: atom(),
+	  node	:: atom() | binary(),
 	  ip	:: inet:ip_address()
 	 }).
 

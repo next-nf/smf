@@ -107,7 +107,8 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session,
 	true ->
 	    ok;
 	_ ->
-	    throw(?CTX_ERR(?FATAL, user_authentication_failed, tunnel = LeftTunnel))
+	    throw(#ctx_err{level = ?FATAL, reply = user_authentication_failed,
+			   tunnel = LeftTunnel, where = {?FILE, ?LINE}})
     end,
 
     %% TBD............

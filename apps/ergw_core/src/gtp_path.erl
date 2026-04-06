@@ -34,6 +34,9 @@
 -export([callback_mode/0, init/1, handle_event/4,
 	 terminate/3, code_change/4]).
 
+%% init/1 uses proc_lib + gen_statem:enter_loop (intentional no_return)
+-dialyzer({no_return, [init/1]}).
+
 -ifdef(TEST).
 -export([ping/1, ping/3, set/3, stop/1, maybe_new_path/4]).
 -endif.
