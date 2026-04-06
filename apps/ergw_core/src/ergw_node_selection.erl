@@ -64,8 +64,7 @@ topology_match(CandidatesA, CandidatesB) ->
 topology_select(Candidates, Services, [_|_] = MatchPeers) ->
     TopoM = [{FQDN, 0, Services, [], []} || FQDN <- MatchPeers],
     case ergw_node_selection:topology_match(Candidates, TopoM) of
-	{_, [_|_] = C} -> C;
-	{[_|_] = C, _} -> C;
+	[_|_] = C -> C;
 	_ ->
 	    %% neither colocation, nor topology matched
 	    Candidates
