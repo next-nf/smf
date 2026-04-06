@@ -222,7 +222,7 @@ handle_request(ReqKey,
     Bearer = Bearer0#{left => LeftBearer},
 
     LeftTunnel = ergw_gtp_gsn_lib:update_tunnel_endpoint(LeftTunnelOld, LeftTunnel0),
-    {OldSOpts, NewSOpts} = update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
+    {OldSOpts, NewSOpts} = pgw_s5s8:update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
     URRActions = gtp_context:collect_charging_events(OldSOpts, NewSOpts),
     PCtx =
 	if LeftBearer /= LeftBearerOld ->
@@ -264,7 +264,7 @@ handle_request(ReqKey,
 	end,
 
     LeftTunnel = ergw_gtp_gsn_lib:update_tunnel_endpoint(LeftTunnelOld, LeftTunnel0),
-    {OldSOpts, NewSOpts} = update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
+    {OldSOpts, NewSOpts} = pgw_s5s8:update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
     URRActions = gtp_context:collect_charging_events(OldSOpts, NewSOpts),
     gtp_context:trigger_usage_report(self(), URRActions, PCtx),
 
@@ -288,7 +288,7 @@ handle_request(#request{src = Src, ip = IP, port = Port} = ReqKey,
 	       _Resent, #{session := connected},
 	       #{context := Context, left_tunnel := LeftTunnel,
 		 bearer := #{left := LeftBearer}, 'Session' := Session} = Data) ->
-    {OldSOpts, _} = update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
+    {OldSOpts, _} = pgw_s5s8:update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
 
     Type = update_bearer_request,
     RequestIEs0 = [AMBR,
@@ -364,10 +364,10 @@ handle_response({CommandReqKey, OldSOpts},
     {ok, LeftTunnel} = gtp_path:bind_tunnel(LeftTunnel0),
     DataNew = Data#{left_tunnel => LeftTunnel},
 
-    {_, NewSOpts} = update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
+    {_, NewSOpts} = pgw_s5s8:update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
 
     if Cause =:= request_accepted andalso BearerCause =:= request_accepted ->
-	    {_, NewSOpts} = update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
+	    {_, NewSOpts} = pgw_s5s8:update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
 	    URRActions = gtp_context:collect_charging_events(OldSOpts, NewSOpts),
 	    gtp_context:trigger_usage_report(self(), URRActions, PCtx),
 	    {keep_state, DataNew};
@@ -482,178 +482,6 @@ encode_paa(Type, IPv4, IPv6) ->
 
 close_context(_Side, Reason, _Notify, _State, Data) ->
     ergw_gtp_gsn_lib:close_context(?API, Reason, Data).
-
-copy_ppp_to_session({pap, 'PAP-Authentication-Request', _Id, Username, Password}, Session0) ->
-    Session = Session0#{'Username' => Username, 'Password' => Password},
-    maps:without(['CHAP-Challenge', 'CHAP_Password'], Session);
-copy_ppp_to_session({chap, 'CHAP-Challenge', _Id, Value, _Name}, Session) ->
-    Session#{'CHAP_Challenge' => Value};
-copy_ppp_to_session({chap, 'CHAP-Response', _Id, Value, Name}, Session0) ->
-    Session = Session0#{'CHAP_Password' => Value, 'Username' => Name},
-    maps:without(['Password'], Session);
-copy_ppp_to_session(_, Session) ->
-    Session.
-
-non_empty_ip(_, {0,0,0,0}, Opts) ->
-    Opts;
-non_empty_ip(_, {{0,0,0,0,0,0,0,0}, _}, Opts) ->
-    Opts;
-non_empty_ip(Key, IP, Opts) ->
-    maps:put(Key, IP, Opts).
-
-copy_to_session(_, #v2_protocol_configuration_options{config = {0, Options}},
-		#{'Username' := #{from_protocol_opts := true}}, Session) ->
-    lists:foldr(fun copy_ppp_to_session/2, Session, Options);
-copy_to_session(_, #v2_access_point_name{apn = APN}, _AAAopts, Session) ->
-    {NI, _OI} = ergw_node_selection:split_apn(APN),
-    Session#{'APN' => APN,
-	     'Called-Station-Id' =>
-		 iolist_to_binary(lists:join($., NI))};
-copy_to_session(_, #v2_msisdn{msisdn = MSISDN}, _AAAopts, Session) ->
-    Session#{'Calling-Station-Id' => MSISDN, '3GPP-MSISDN' => MSISDN};
-copy_to_session(_, #v2_international_mobile_subscriber_identity{imsi = IMSI}, _AAAopts, Session) ->
-    case itu_e212:split_imsi(IMSI) of
-	{MCC, MNC, _} ->
-	    Session#{'3GPP-IMSI' => IMSI,
-		     '3GPP-IMSI-MCC-MNC' => {MCC, MNC}};
-	_ ->
-	    Session#{'3GPP-IMSI' => IMSI}
-    end;
-
-copy_to_session(_, #v2_pdn_address_allocation{type = ipv4,
-					      address = IP4}, _AAAopts, Session) ->
-    IP4addr = ergw_inet:bin2ip(IP4),
-    S0 = Session#{'3GPP-PDP-Type' => 'IPv4'},
-    S1 = non_empty_ip('Framed-IP-Address', IP4addr, S0),
-    _S = non_empty_ip('Requested-IP-Address', IP4addr, S1);
-copy_to_session(_, #v2_pdn_address_allocation{type = ipv6,
-					      address = <<IP6PrefixLen:8,
-							  IP6Prefix:16/binary>>},
-		_AAAopts, Session) ->
-    IP6addr = {ergw_inet:bin2ip(IP6Prefix), IP6PrefixLen},
-    S0 = Session#{'3GPP-PDP-Type' => 'IPv6'},
-    S1 = non_empty_ip('Framed-IPv6-Prefix', IP6addr, S0),
-    _S = non_empty_ip('Requested-IPv6-Prefix', IP6addr, S1);
-copy_to_session(_, #v2_pdn_address_allocation{type = ipv4v6,
-					      address = <<IP6PrefixLen:8,
-							  IP6Prefix:16/binary,
-							  IP4:4/binary>>},
-		_AAAopts, Session) ->
-    IP4addr = ergw_inet:bin2ip(IP4),
-    IP6addr = {ergw_inet:bin2ip(IP6Prefix), IP6PrefixLen},
-    S0 = Session#{'3GPP-PDP-Type' => 'IPv4v6'},
-    S1 = non_empty_ip('Framed-IP-Address', IP4addr, S0),
-    S2 = non_empty_ip('Requested-IP-Address', IP4addr, S1),
-    S3 = non_empty_ip('Framed-IPv6-Prefix', IP6addr, S2),
-    _S = non_empty_ip('Requested-IPv6-Prefix', IP6addr, S3);
-copy_to_session(_, #v2_pdn_address_allocation{type = non_ip}, _AAAopts, Session) ->
-    Session#{'3GPP-PDP-Type' => 'Non-IP'};
-
-%% 3GPP TS 29.274, Rel 15, Table 7.2.1-1, Note 1:
-%%   The conditional PDN Type IE is redundant on the S4/S11 and S5/S8 interfaces
-%%   (as the PAA IE contains exactly the same field). The receiver may ignore it.
-%%
-
-copy_to_session(?'Bearer Contexts to be created',
-		#v2_bearer_context{group = #{?'EPS Bearer ID' :=
-						 #v2_eps_bearer_id{eps_bearer_id = EBI}}},
-		_AAAopts, Session) ->
-    Session#{'3GPP-NSAPI' => EBI};
-copy_to_session(_, #v2_selection_mode{mode = Mode}, _AAAopts, Session) ->
-    Session#{'3GPP-Selection-Mode' => Mode};
-copy_to_session(_, #v2_charging_characteristics{value = Value}, _AAAopts, Session) ->
-    Session#{'3GPP-Charging-Characteristics' => Value};
-
-copy_to_session(_, #v2_serving_network{plmn_id = PLMN}, _AAAopts, Session) ->
-    Session#{'3GPP-SGSN-MCC-MNC' => PLMN};
-copy_to_session(_, #v2_mobile_equipment_identity{mei = IMEI}, _AAAopts, Session) ->
-    Session#{'3GPP-IMEISV' => IMEI};
-copy_to_session(_, #v2_rat_type{rat_type = Type}, _AAAopts, Session) ->
-    Session#{'3GPP-RAT-Type' => Type};
-copy_to_session(_, #v2_user_location_information{} = Info, _AAAopts, Session) ->
-    ULI = lists:foldl(
-	    fun(X, S) when is_record(X, cgi)  -> S#{'CGI' => X};
-	       (X, S) when is_record(X, sai)  -> S#{'SAI' => X};
-	       (X, S) when is_record(X, rai)  -> S#{'RAI' => X};
-	       (X, S) when is_record(X, tai)  -> S#{'TAI' => X};
-	       (X, S) when is_record(X, ecgi) -> S#{'ECGI' => X};
-	       (X, S) when is_record(X, lai)  -> S#{'LAI' => X};
-	       (X, S) when is_record(X, macro_enb) -> S#{'macro-eNB' => X};
-	       (X, S) when is_record(X, ext_macro_enb) -> S#{'ext-macro-eNB' => X};
-	       (_, S) -> S
-	    end, #{}, tl(tuple_to_list(Info))),
-    Session#{'User-Location-Info' => ULI};
-copy_to_session(_, #v2_ue_time_zone{timezone = TZ, dst = DST}, _AAAopts, Session) ->
-    Session#{'3GPP-MS-TimeZone' => {TZ, DST}};
-copy_to_session(_, _, _AAAopts, Session) ->
-    Session.
-
-copy_qos_to_session(#{?'Bearer Contexts to be created' :=
-			  #v2_bearer_context{
-			     group = #{?'Bearer Level QoS' :=
-					   #v2_bearer_level_quality_of_service{
-					      pci = PCI, pl = PL, pvi = PVI, label = Label,
-					      maximum_bit_rate_for_uplink = MBR4ul,
-					      maximum_bit_rate_for_downlink = MBR4dl,
-					      guaranteed_bit_rate_for_uplink = GBR4ul,
-					      guaranteed_bit_rate_for_downlink = GBR4dl}}},
-		      ?'APN-AMBR' :=
-			  #v2_aggregate_maximum_bit_rate{
-			     uplink = AMBR4ul, downlink = AMBR4dl}},
-		    Session) ->
-    ARP = #{
-	    'Priority-Level' => PL,
-	    'Pre-emption-Capability' => PCI,
-	    'Pre-emption-Vulnerability' => PVI
-	   },
-    Info = #{
-	     'QoS-Class-Identifier' => Label,
-	     'Max-Requested-Bandwidth-UL' => MBR4ul * 1000,
-	     'Max-Requested-Bandwidth-DL' => MBR4dl * 1000,
-	     'Guaranteed-Bitrate-UL' => GBR4ul * 1000,
-	     'Guaranteed-Bitrate-DL' => GBR4dl * 1000,
-
-	     %% TBD:
-	     %%   [ Bearer-Identifier ]
-
-	     'Allocation-Retention-Priority' => ARP,
-	     'APN-Aggregate-Max-Bitrate-UL' => AMBR4ul * 1000,
-	     'APN-Aggregate-Max-Bitrate-DL' => AMBR4dl * 1000
-
-	     %%  *[ Conditional-APN-Aggregate-Max-Bitrate ]
-	    },
-    Session#{'QoS-Information' => Info};
-copy_qos_to_session(_, Session) ->
-    Session.
-
-ip_to_session({_,_,_,_} = IP, #{ip4 := Key}, Session) ->
-    Session#{Key => IP};
-ip_to_session({_,_,_,_,_,_,_,_} = IP, #{ip6 := Key}, Session) ->
-    Session#{Key => IP}.
-
-copy_tunnel_to_session(#tunnel{version = Version, remote = #fq_teid{ip = IP}}, Session) ->
-    ip_to_session(IP, #{ip4 => '3GPP-SGSN-Address',
-			ip6 => '3GPP-SGSN-IPv6-Address'},
-		  Session#{'GTP-Version' => Version});
-copy_tunnel_to_session(_, Session) ->
-    Session.
-
-copy_bearer_to_session(#bearer{remote = #fq_teid{ip = IP}}, Session) ->
-    ip_to_session(IP, #{ip4 => '3GPP-SGSN-UP-Address',
-			ip6 => '3GPP-SGSN-UP-IPv6-Address'}, Session);
-copy_bearer_to_session(_, Session) ->
-    Session.
-
-update_session_from_gtp_req(IEs, Session, Tunnel, Bearer)
-  when is_record(Tunnel, tunnel) ->
-    OldSOpts = ergw_aaa_session:get(Session),
-    NewSOpts0 = copy_qos_to_session(IEs, OldSOpts),
-    NewSOpts1 = copy_tunnel_to_session(Tunnel, NewSOpts0),
-    NewSOpts2 = copy_bearer_to_session(Bearer, NewSOpts1),
-    NewSOpts =
-	maps:fold(copy_to_session(_, _, undefined, _), NewSOpts2, IEs),
-    ergw_aaa_session:set(Session, NewSOpts),
-    {OldSOpts, NewSOpts}.
 
 get_context_from_req(?'Access Point Name', #v2_access_point_name{apn = APN}, Context) ->
     Context#context{apn = APN};

@@ -18,7 +18,7 @@
 	 handle_event/4, terminate/3]).
 
 -export([delete_context/4, close_context/5]).
--export([init_session/4, init_session_from_gtp_req/5]).
+-export([init_session/4, init_session_from_gtp_req/5, update_session_from_gtp_req/4]).
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("gtplib/include/gtp_packet.hrl").
@@ -630,7 +630,8 @@ copy_to_session(_, #v2_msisdn{msisdn = MSISDN}, _AAAopts, Session) ->
     Session#{'Calling-Station-Id' => MSISDN, '3GPP-MSISDN' => MSISDN};
 copy_to_session(_, #v2_international_mobile_subscriber_identity{imsi = IMSI}, _AAAopts, Session) ->
     case itu_e212:split_imsi(IMSI) of
-	{MCC, MNC, _} ->
+	{MCC, MNC, _}
+	  when is_binary(MCC), is_binary(MNC) ->
 	    Session#{'3GPP-IMSI' => IMSI,
 		     '3GPP-IMSI-MCC-MNC' => {MCC, MNC}};
 	_ ->
