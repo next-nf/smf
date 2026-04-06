@@ -346,13 +346,12 @@ ue_ip_address_pool_ids(Pool) ->
 
 ue_ip_address_pool_information(VRF, Pools, NATblocks) ->
     Blocks = maps:get(VRF, NATblocks, []),
-    IEs0 = pfcp_packet:ies_to_map(ue_ip_address_pool_ids(Pools))
-	   #{network_instance => vrf:normalize_name(VRF)},
-    IEs = case Blocks of
-	      [] -> IEs0;
-	      _  -> IEs0#{bbf_nat_port_block => Blocks}
-	  end,
-    IEs.
+    PoolIEs = pfcp_packet:ies_to_map(ue_ip_address_pool_ids(Pools)),
+    IEs0 = PoolIEs#{network_instance => vrf:normalize_name(VRF)},
+    case Blocks of
+	[] -> IEs0;
+	_  -> IEs0#{bbf_nat_port_block => Blocks}
+    end.
 
 sx_reply(Type, IEs, State) ->
     sx_reply(Type, undefined, IEs, State).
