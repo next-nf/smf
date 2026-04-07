@@ -464,7 +464,8 @@ copy_to_session(_, #ms_international_pstn_isdn_number{
     Session#{'Calling-Station-Id' => MSISDN, '3GPP-MSISDN' => MSISDN};
 copy_to_session(_, #international_mobile_subscriber_identity{imsi = IMSI}, _AAAopts, Session) ->
     case itu_e212:split_imsi(IMSI) of
-	{MCC, MNC, _} ->
+	{MCC, MNC, _}
+	  when is_binary(MCC), is_binary(MNC) ->
 	    Session#{'3GPP-IMSI' => IMSI,
 		     '3GPP-IMSI-MCC-MNC' => {MCC, MNC}};
 	_ ->
