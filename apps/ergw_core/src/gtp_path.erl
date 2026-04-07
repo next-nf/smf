@@ -644,19 +644,8 @@ rx(What, When, {State, Data}) ->
     end.
 
 cas_restart_counter(Counter, #{time := Time0, reg_key := Key} = Data) ->
-    case gtp_path_db_vnode:cas_restart_counter(Key, Counter, Time0 + 1) of
-	{ok, #{result := Result}} ->
-	    {Verdict, New, Time} =
-		lists:foldl(
-		  fun({_Location, {_, _, T1} = R}, {_, _, T2})
-			when T1 > T2 -> R;
-		     (_, A) -> A
-		  end,
-		  {fail, Counter, Time0}, Result),
-	    {Verdict, New, Data#{time => Time}};
-	_Res ->
-	    {fail, Counter, Data}
-    end.
+    {Verdict, New, Time} = gtp_path_db:cas_restart_counter(Key, Counter, Time0 + 1),
+    {Verdict, New, Data#{time => Time}}.
 
 handle_restart_counter(RestartCounter, State0, Data0) ->
     State = State0#state{peer = up},

@@ -24,6 +24,7 @@ start(_StartType, _StartArgs) ->
 	   ergw_prometheus:declare(),
 	   ensure_jobs_queues(),
 	   ergw_db:init(),
+	   gtp_path_db:create(),
 	   Pid <- ergw_core_sup:start_link(),
 	   return(Pid)
        ]).

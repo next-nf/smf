@@ -82,7 +82,7 @@ init([]) ->
 
 handle_register(Pid, Key, Value, State) ->
     ergw_db:insert(?SERVER, {Key, Pid, Value}),
-    gtp_path_db_vnode:attach(Key, node()),
+    gtp_path_db:attach(Key, node()),
     {ok, [Key], State}.
 
 handle_unregister(Key, _Value, State) ->
@@ -91,7 +91,7 @@ handle_unregister(Key, _Value, State) ->
 handle_pid_remove(_Pid, Keys, State) ->
     lists:foreach(fun(Key) ->
 			  ergw_db:delete(?SERVER, Key),
-			  gtp_path_db_vnode:detach(Key, node())
+			  gtp_path_db:detach(Key, node())
 		  end, Keys),
     State.
 
@@ -107,7 +107,7 @@ handle_call({maybe_new_path, #socket{name = SocketName} = Socket, Version, IP, T
 
 handle_call({state, Key, PeerState}, _From, State) ->
     Result = ergw_db:update_element(?SERVER, Key, {3, PeerState}),
-    gtp_path_db_vnode:state(Key, PeerState, node()),
+    gtp_path_db:state(Key, PeerState, node()),
     {reply, Result, State}.
 
 handle_death(_Pid, _Reason, State) ->
@@ -122,5 +122,5 @@ terminate(_Reason, _State) ->
 
 unregister(Key, State) ->
     Pids = [Pid || {_, Pid} <- ergw_db:take(?SERVER, Key)],
-    gtp_path_db_vnode:detach(Key, node()),
+    gtp_path_db:detach(Key, node()),
     {Pids, State}.
