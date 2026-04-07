@@ -97,7 +97,14 @@ end_per_suite(Config) ->
     lists:foreach(fun stop_node/1, Nodes),
     ok.
 
-build_cluster(_Config) ->
+build_cluster(Config) ->
+    Nodes = [N || {_, _, N} <- proplists:get_value(nodes, Config)],
+    %% connect all nodes to each other
+    [erpc:call(N, net_kernel, connect_node, [M])
+     || N <- Nodes, M <- Nodes, N =/= M],
+    %% merge Mnesia schemas so global tables replicate
+    [erpc:call(N, mnesia, change_config, [extra_db_nodes, Nodes -- [N]])
+     || N <- Nodes],
     ok.
 
 node_init_per_group(Id, Config) ->
@@ -136,8 +143,8 @@ init_per_group(Config) ->
 	    ok = ergw_test_sx_up:stop('sgw-u')
     end,
 
-    foreach_node(Config, ?MODULE, node_init_per_group, [Config]),
     build_cluster(Config),
+    foreach_node(Config, ?MODULE, node_init_per_group, [Config]),
     NodeInit = foreach_node(Config, ?MODULE, node_init_apps_per_group, [Config]),
     MasterCfg = ergw_test_lib:init_ets(Config),
 
