@@ -112,7 +112,7 @@ lib_end_per_group(Config) ->
     ok = ergw_test_sx_up:stop('pgw-u02'),
     ok = ergw_test_sx_up:stop('sgw-u'),
     ?config(table_owner, Config) ! stop,
-    [application:stop(App) || App <- [ranch, cowboy, ergw_core, ergw_aaa, ergw_cluster, riak_core]],
+    [application:stop(App) || App <- [ranch, cowboy, ergw_core, ergw_aaa, ergw_cluster]],
     ok.
 
 init_apps(AppCfg) ->

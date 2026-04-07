@@ -97,45 +97,13 @@ end_per_suite(Config) ->
     lists:foreach(fun stop_node/1, Nodes),
     ok.
 
-build_cluster(Config) ->
-    Nodes = proplists:get_value(nodes, Config),
-    [Us|NodeNames] = [X || {_, _, X} <- Nodes],
-    JoinRes = lists:map(fun (Node) -> join_cluster(10, Us, Node) end, NodeNames),
-    ?match([], lists:filter(fun(X) -> X /= ok end, JoinRes)),
-    ok = build_cluster_commit(10, Us).
-
-join_cluster(0, _, _) ->
-    {error, timeout};
-join_cluster(Cnt, Us, Node) ->
-    erpc:call(Node, application, which_applications, []),
-    case (catch erpc:call(Node, riak_core, join, [Us])) of
-	ok ->
-	    ok;
-	{error, node_still_starting} ->
-	    ct:sleep(50),
-	    join_cluster(Cnt - 1, Us, Node);
-	Other ->
-	    Other
-    end.
-
-build_cluster_commit(0, _Us) ->
-    {error, timeout};
-build_cluster_commit(Cnt, Us) ->
-    Fun = fun() ->
-		  riak_core_claimant:plan(),
-		  riak_core_claimant:commit()
-	  end,
-    case erpc:call(Us, Fun) of
-	{error, _} = _Err ->
-	    ct:sleep(10),
-	    build_cluster_commit(Cnt - 1, Us);
-	ok -> ok
-    end.
+build_cluster(_Config) ->
+    ok.
 
 node_init_per_group(Id, Config) ->
     {_, AppCfg} = lists:keyfind(app_cfg, 1, Config),   %% let it crash if undefined
 
-    [application:load(App) || App <- [cowboy, ergw_core, ergw_aaa, riak_core]],
+    [application:load(App) || App <- [cowboy, ergw_core, ergw_aaa]],
     ergw_test_lib:load_config(per_node_config(Id, AppCfg)),
     {ok, _} = application:ensure_all_started(ergw_core),
     ergw_cluster:wait_till_ready(),
@@ -151,7 +119,7 @@ node_init_apps_per_group(Id, Config) ->
     {{aaa_cfg, Id}, AppsCfg}.
 
 node_end_per_group(_Id, _Config) ->
-    [application:stop(App) || App <- [ranch, cowboy, ergw_core, ergw_aaa, ergw_cluster, riak_core]],
+    [application:stop(App) || App <- [ranch, cowboy, ergw_core, ergw_aaa, ergw_cluster]],
     ok.
 
 init_per_group(Config) ->
@@ -189,9 +157,7 @@ end_per_group(Config) ->
 
 %%%===================================================================
 
--define(NODE_OPTS, [%%{[riak_core, ring_state_dir], riak_node_dir},
-		    {[kernel, logger, '_', config, file], log},
-		    {[riak_core, handoff_ip], ip},
+-define(NODE_OPTS, [{[kernel, logger, '_', config, file], log},
 		    {[ergw_core, node, node_id], node_id},
 		    {[ergw_core, sockets, '_', ip], ip}
 		   ]).
@@ -204,8 +170,6 @@ make_ip(Id, {A, B, C, D, E, F, G, H}) ->
 gen_per_node_opt(_, log, V) ->
     lists:flatten(
       io_lib:format("~s.~s", ([node(), V])));
-gen_per_node_opt(_, riak_node_dir, _) ->
-    filename:join([".", "data", node()]);
 gen_per_node_opt(Id, node_id, V) ->
     iolist_to_binary(
       io_lib:format("node~2.10.0w.~s", [Id, V]));

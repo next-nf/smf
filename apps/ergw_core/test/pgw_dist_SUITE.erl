@@ -55,12 +55,6 @@
 	    ]}
 	  ]},
 
-	 {riak_core,
-	  [{ring_state_dir, "<nostore>"},
-	   {handoff_ip, {127,0,1,1}},
-	   {handoff_port, 8099}
-	  ]},
-
 	 {ergw_core,
 	  #{node =>
 		[{node_id, <<"PGW.epc.mnc001.mcc001.3gppnetwork.org">>}],
@@ -801,12 +795,12 @@ path_restart_recovery(Config) ->
     %% create 2nd session with new restart_counter (simulate SGW restart)
     {GtpC2, _, _} = create_session(gtp_context_inc_restart_counter(GtpC1)),
 
-    {ok, AllPaths} = ergw_dist_test_lib:random_node(Config, gtp_path_db_vnode, all, []),
+    AllPaths = ergw_dist_test_lib:random_node(Config, gtp_path_db, all, []),
     ct:pal("Paths: ~p", [AllPaths]),
     ?match(1, length(AllPaths)),
 
-    {ok, AllCtx} =
-	ergw_dist_test_lib:random_node(Config, gtp_context_reg_vnode, all, [<<"context">>]),
+    AllCtx =
+	ergw_dist_test_lib:random_node(Config, ergw_db, tab2list, [gtp_context_global]),
     ct:pal("AllCtx: ~p", [AllCtx]),
     ?match(1, length(AllCtx)),
 
@@ -825,8 +819,8 @@ path_restart_multi(Config) ->
     {GtpC3, _, _} = create_session(random, GtpC2),
     {GtpC4, _, _} = create_session(random, GtpC3),
 
-    {ok, AllCtx} =
-	ergw_dist_test_lib:random_node(Config, gtp_context_reg_vnode, all, [<<"context">>]),
+    AllCtx =
+	ergw_dist_test_lib:random_node(Config, ergw_db, tab2list, [gtp_context_global]),
     ct:pal("AllCtx: ~p", [AllCtx]),
     ?match(5, length(AllCtx)),
 
@@ -993,8 +987,8 @@ duplicate_session_request(Config) ->
     %% create 2nd session with the same IMSI
     {GtpC2, _, _} = create_session(GtpC1),
 
-    {ok, AllCtx} =
-	ergw_dist_test_lib:random_node(Config, gtp_context_reg_vnode, all, [<<"context">>]),
+    AllCtx =
+	ergw_dist_test_lib:random_node(Config, ergw_db, tab2list, [gtp_context_global]),
     ct:pal("AllCtx: ~p", [AllCtx]),
     ?match(1, length(AllCtx)),
 
