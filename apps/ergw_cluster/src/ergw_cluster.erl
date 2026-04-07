@@ -170,16 +170,8 @@ startup() ->
     exit(ok).
 
 start_cluster(Config) ->
-    %% borrowed from riak_core:standard_join
-    {ok, MyRing} = riak_core_ring_manager:get_raw_ring(),
-    Singleton = ([node()] =:= riak_core_ring:all_members(MyRing)),
-    ?LOG(info, "CLUSTER: ring members: ~p", [riak_core_ring:all_members(MyRing)]),
-
     do([error_m ||
-	   case Singleton of
-	       true  -> do_start_cluster(Config);
-	       false -> ok
-	   end,
+	   maybe_start_k8s_dist(Config),
 	   start_raft()
        ]).
 
@@ -187,107 +179,16 @@ stop_cluster() ->
     leave_ra_cluster(10),
     ok.
 
-do_start_cluster(#{enabled := true, seed_nodes := SeedNodes, initial_timeout := Timeout}) ->
+maybe_start_k8s_dist(#{enabled := true}) ->
     case net_kernel:epmd_module() of
 	k8s_epmd ->
 	    {ok, _} = application:ensure_all_started(k8s_dist),
 	    ok;
 	_ ->
 	    ok
-    end,
-
-    Nodes = get_nodes(SeedNodes) -- [node()],
-    Now = erlang:monotonic_time(millisecond),
-    Deadline = Now + Timeout,
-
-    do([error_m ||
-	   Node <- wait_for_nodes(Nodes, Now, Deadline),
-	   join(Node)
-       ]);
-do_start_cluster(_) ->
+    end;
+maybe_start_k8s_dist(_) ->
     ok.
-
-wait_for_nodes(_Nodes, Now, Deadline)
-  when Now > Deadline ->
-    ?LOG(info, "RIAK cluster startup timed out, aborting"),
-    {error, timeout};
-wait_for_nodes(Nodes, _, Deadline) ->
-    case lists:filter(fun(Node) -> net_adm:ping(Node) =:= pong end, Nodes) of
-	[] ->
-	    ?LOG(info, "CLUSTER: no other nodes up"),
-	    timer:sleep(100),
-	    Now = erlang:monotonic_time(millisecond),
-	    wait_for_nodes(Nodes, Now, Deadline);
-	UpNodes ->
-	    ?LOG(info, "CLUSTER: UpNodes: ~p", [UpNodes]),
-	    {ok, hd(lists:usort(UpNodes))}
-    end.
-
-get_nodes(Nodes) when is_list(Nodes) ->
-    Nodes;
-get_nodes({M, F, A} = MFA) ->
-    try erlang:apply(M, F, A) of
-	Nodes when is_list(Nodes) ->
-	    Nodes;
-	Other ->
-	    ?LOG(debug, #{where => get_nodes, type => error, mfa => MFA, return => Other}),
-	    []
-    catch
-	Class:Error:St ->
-	    ?LOG(debug, #{where => get_nodes, type => error, mfa => MFA,
-			  class => Class, error => Error, stack => St}),
-	    []
-    end.
-
-join(Node) ->
-    case riak_core:join(Node) of
-	{error,node_still_starting} ->
-	    timer:sleep(100),
-	    join(Node);
-	{error, unable_to_get_join_ring} ->
-	    timer:sleep(100),
-	    join(Node);
-	{error, not_single_node} ->
-	    ok;
-	ok ->
-	    plan_and_commit()
-    end.
-
-plan_and_commit() ->
-    {ok, MyRing} = riak_core_ring_manager:get_raw_ring(),
-    MembersJoining = ([] =/= riak_core_ring:members(MyRing, [joining])),
-
-    case riak_core_claimant:plan() of
-	{ok, [], []} when MembersJoining ->
-	    timer:sleep(100),
-	    plan_and_commit();
-	{ok, _, _} ->
-	    commit();
-	{error, ring_not_ready} ->
-	    timer:sleep(100),
-	    plan_and_commit();
-	{error, _} = Error ->
-	    Error
-    end.
-
-commit() ->
-    case riak_core_claimant:commit() of
-	ok ->
-	    ok;
-	{error, nothing_planned} ->
-	    %% other node was faster with commit
-	    ok;
-	{error, plan_changed} ->
-	    %% try again
-	    timer:sleep(100),
-	    plan_and_commit();
-	{error, ring_not_ready} ->
-	    timer:sleep(100),
-	    commit();
-	Other ->
-	    ?LOG(info, "cluster join failed with ~0p, aborting", [Other]),
-	    Other
-    end.
 
 %%%===================================================================
 %%% RAFT cluster
