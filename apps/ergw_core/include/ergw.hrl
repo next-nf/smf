@@ -69,7 +69,7 @@
 				   'CP-function' | 'LI Function' | undefined,
 	  vrf			:: term(),
 	  local			:: 'undefined' | #fq_teid{} | #ue_ip{},
-	  remote		:: 'undefined' | 'default' | #fq_teid{}
+	  remote		:: 'undefined' | 'default' | #fq_teid{} | #ue_ip{}
 	 }).
 
 -record(pfcp_ctx, {

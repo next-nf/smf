@@ -708,7 +708,6 @@ notify_up(Server, [{Pid, Ref}|_] = NotifyUp) when is_pid(Pid), is_reference(Ref)
 notify_up(Server, {Pid, Ref} = NotifyUp) when is_pid(Pid), is_reference(Ref) ->
     gen_statem:cast(Server, {notify_up, [NotifyUp]}).
 
-lb(first, [H|T]) -> {H, T};
 lb(random, [H]) -> {H, []};
 lb(random, L) when is_list(L) ->
     Index = rand:uniform(length(L)),
@@ -1005,6 +1004,4 @@ resolve_and_enter_loop(Node, _, #data{node_select = NodeSelect} = Data) ->
     end.
 
 bin2ntoa(IP) when is_binary(IP) ->
-    inet:ntoa(ergw_inet:bin2ip(IP));
-bin2ntoa(IP) ->
-    io_lib:format("~p", [IP]).
+    inet:ntoa(ergw_inet:bin2ip(IP)).

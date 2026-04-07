@@ -239,14 +239,14 @@ pcc_events_to_charging_rule_report(Events) ->
 %% Rf Support - Offline Charging
 %% ===========================================================================
 
-assign([Key], Fun, Avps) ->
-    Fun(Key, Avps);
-assign([Key | Next], Fun, Avps) ->
-    [V] = maps:get(Key, Avps, [#{}]),
-    Avps#{Key => [assign(Next, Fun, V)]}.
+%% assign([Key], Fun, Avps) ->
+%%     Fun(Key, Avps);
+%% assign([Key | Next], Fun, Avps) ->
+%%     [V] = maps:get(Key, Avps, [#{}]),
+%%     Avps#{Key => [assign(Next, Fun, V)]}.
 
-repeated(Keys, Value, Avps) when is_list(Keys) ->
-    assign(Keys, repeated(_, Value, _), Avps);
+%% repeated(Keys, Value, Avps) when is_list(Keys) ->
+%%     assign(Keys, repeated(_, Value, _), Avps);
 repeated(Key, Value, Avps)
   when is_atom(Key) ->
     maps:update_with(Key, fun(V) -> [Value|V] end, [Value], Avps).
@@ -566,7 +566,6 @@ make_gy_credit_request(Ev, Add, CreditsNeeded) ->
 
 %% select/2
 select(_, []) -> {error, none};
-select(first, L) -> {ok, hd(L)};
 select(random, L) when is_list(L) ->
     {ok, lists:nth(rand:uniform(length(L)), L)}.
 

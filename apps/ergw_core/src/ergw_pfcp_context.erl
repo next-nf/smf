@@ -894,7 +894,6 @@ usage_report_to_charging_events(URR, ChargeEv, PCtx)
 
 %% select/2
 select(_, []) -> undefined;
-select(first, L) -> hd(L);
 select(random, L) when is_list(L) ->
     lists:nth(rand:uniform(length(L)), L).
 
@@ -903,13 +902,8 @@ select_upf_with(_, [], _) ->
     {error, ?CTX_ERR(?FATAL, no_resources_available)};
 select_upf_with(Fun, Candidates, Available) ->
     case ergw_node_selection:snaptr_candidate(Candidates) of
-	{{Node, _, _}, Next} when is_map_key(Node, Available) ->
-	    case Fun(Node, maps:get(Node, Available)) of
-		{ok, _} = Result ->
-		    Result;
-		_ ->
-		    select_upf_with(Fun, Next, Available)
-	    end;
+	{{Node, _, _}, _} when is_map_key(Node, Available) ->
+	    Fun(Node, maps:get(Node, Available));
 	{_, Next} ->
 	    select_upf_with(Fun, Next, Available)
     end.

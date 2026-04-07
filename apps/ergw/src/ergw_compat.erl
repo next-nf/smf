@@ -120,11 +120,7 @@ take_opt(Key, Map, Default) when is_map(Map) ->
 return_type(List, list) when is_list(List) ->
     List;
 return_type(List, map) when is_list(List) ->
-    maps:from_list(List);
-return_type(Map, map) when is_map(Map) ->
-    Map;
-return_type(Map, list) when is_map(Map) ->
-    maps:to_list(Map).
+    maps:from_list(List).
 
 check_unique_keys(_Key, Map) when is_map(Map) ->
     ok;

@@ -91,9 +91,9 @@ candidates(Name, Services, NodeSelection) ->
 lowercase_apn([H|_] = APN) when is_binary(H) ->
     [string:lowercase(X) || X <- APN].
 
-expand_apn_plmn(IMSI) when is_binary(IMSI) ->
-    {MCC, MNC, _} = itu_e212:split_imsi(IMSI),
-    {MCC, MNC};
+%% expand_apn_plmn(IMSI) when is_binary(IMSI) ->
+%%     {MCC, MNC, _} = itu_e212:split_imsi(IMSI),
+%%     {MCC, MNC};
 expand_apn_plmn(_) ->
     ergw_core:get_plmn_id().
 

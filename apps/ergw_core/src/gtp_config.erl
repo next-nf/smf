@@ -70,9 +70,6 @@ read_term(FileName) ->
 	    Terms;
 	{error, Reason} ->
 	    ?LOG(error, "Failed to read ~s with ~s", [FileName, file:format_error(Reason)]),
-	    [];
-	Other ->
-	    ?LOG(error, "Failed to read ~s with ~w", [FileName, Other]),
 	    []
     end.
 
@@ -85,8 +82,5 @@ write_terms(FileName, List) ->
 	    ok;
 	{error, Reason} ->
 	    ?LOG(error, "Failed to write to ~s with ~s", [FileName, file:format_error(Reason)]),
-	    ok;
-	Other ->
-	    ?LOG(error, "Failed to write to ~s with ~w", [FileName, Other]),
 	    ok
     end.

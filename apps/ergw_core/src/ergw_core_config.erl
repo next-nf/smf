@@ -127,13 +127,7 @@ validate_options(Fun, M) when is_map(M) ->
       fun(K0, V0, A) ->
 	      {K, V} = validate_option(Fun, K0, V0),
 	      A#{K => V}
-      end, #{}, M);
-validate_options(_Fun, []) ->
-    [];
-%% validate_options(Fun, [Opt | Tail]) when is_atom(Opt) ->
-%%     [validate_option(Fun, Opt, true) | validate_options(Fun, Tail)];
-validate_options(Fun, [{Opt, Value} | Tail]) ->
-    [validate_option(Fun, Opt, Value) | validate_options(Fun, Tail)].
+      end, #{}, M).
 
 normalize_proplists(L0) ->
     L = proplists:unfold(L0),

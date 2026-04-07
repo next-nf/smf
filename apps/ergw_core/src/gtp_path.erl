@@ -615,9 +615,7 @@ rx_rst_cnt(RstCnt, {State0, Data0})
 	    _ ->
 		State0
 	end,
-    {State, Data};
-rx_rst_cnt(_, StateData) ->
-    StateData.
+    {State, Data}.
 
 activity(When, #gtp{type = Type,
 		    ie = #{{recovery, 0} :=

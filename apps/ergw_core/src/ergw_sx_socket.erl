@@ -47,8 +47,7 @@
 	  n1      :: non_neg_integer(),
 	  data    :: binary() | undefined,
 	  msg     :: term(),
-	  from    :: {reference(), pid()} | undefined,
-	  cb_info :: {M :: atom(), F :: atom(), A :: [term()]},
+	  cb_info :: {M :: atom(), F :: atom(), A :: [term()]} | undefined,
 	  send_ts :: non_neg_integer()
 	 }).
 
@@ -178,12 +177,6 @@ handle_call(id, _From, #state{send_socket = Socket, node = Node,
     {ok, #{addr := IP}} = socket:sockname(Socket),
     Reply = {ok, #node{node = Node, ip = IP}, GtpSocket, GtpSocketInfo},
     {reply, Reply, State};
-
-handle_call({call, SendReq0}, From, State0) ->
-    {SendReq, State1} = prepare_send_req(SendReq0#send_req{from = From}, State0),
-    message_counter(tx, State0, SendReq),
-    State = send_request(SendReq, State1),
-    {noreply, State};
 
 handle_call(Request, _From, State) ->
     ?LOG(error, "handle_call: unknown ~p", [Request]),
@@ -597,10 +590,7 @@ send_request(#send_req{address = DstIP, data = Data} = SendReq, State) ->
 
 send_request_reply(#send_req{cb_info = {M, F, A}} = SendReq, Reply) ->
     ?LOG(debug, "send_request_reply: ~p", [SendReq]),
-    apply(M, F, A ++ [Reply]);
-send_request_reply(#send_req{from = {_, _} = From} = SendReq, Reply) ->
-    ?LOG(debug, "send_request_reply: ~p", [SendReq]),
-    gen_server:reply(From, Reply).
+    apply(M, F, A ++ [Reply]).
 
 enqueue_response(ReqKey, Data, DoCache,
 		 #state{responses = Responses} = State)
@@ -619,9 +609,7 @@ do_send_response(#sx_request{ip = IP, port = Port} = ReqKey, Data, DoCache, Stat
 %%%===================================================================
 
 cache_key(#sx_request{key = Key}) ->
-    Key;
-cache_key(Object) ->
-    Object.
+    Key.
 
 %%%===================================================================
 %%% Metrics collections
