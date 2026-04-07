@@ -71,6 +71,12 @@ validate_options(Values) ->
 
 validate_option(enabled, Value) when is_boolean(Value) ->
     Value;
+validate_option(initial_timeout, Value)
+  when is_integer(Value), Value > 0 ->
+    Value;
+validate_option(release_cursor_every, Value)
+  when is_integer(Value) ->
+    Value;
 validate_option(seed_nodes, {M, F, A} = Value)
   when is_atom(M), is_atom(F), is_list(A) ->
     Value;
@@ -160,23 +166,11 @@ startup() ->
     end,
     exit(ok).
 
-start_cluster(Config) ->
+start_cluster(_Config) ->
     do([error_m ||
-	   maybe_start_k8s_dist(Config),
 	   ergw_global:create(),
 	   gtp_config:init()
        ]).
 
 stop_cluster() ->
-    ok.
-
-maybe_start_k8s_dist(#{enabled := true}) ->
-    case net_kernel:epmd_module() of
-	k8s_epmd ->
-	    {ok, _} = application:ensure_all_started(k8s_dist),
-	    ok;
-	_ ->
-	    ok
-    end;
-maybe_start_k8s_dist(_) ->
     ok.
