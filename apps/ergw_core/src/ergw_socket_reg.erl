@@ -45,7 +45,7 @@ register(Type, Name, Value) ->
 
 lookup(Type, Name) ->
     Key = {Type, Name},
-    case ets:lookup(?SERVER, Key) of
+    case ergw_db:lookup(?SERVER, Key) of
 	[{Key, _Pid, Value}] ->
 	    Value;
 	_ ->
@@ -56,35 +56,35 @@ waitfor(Type, Name) ->
     regine_server:call(?SERVER, {waitfor, {Type, Name}}, infinity).
 
 all() ->
-    ets:tab2list(?SERVER).
+    ergw_db:tab2list(?SERVER).
 
 %%%===================================================================
 %%% regine callbacks
 %%%===================================================================
 
 init([]) ->
-    ets:new(?SERVER, [ordered_set, named_table, public, {keypos, 1}]),
+    ergw_db:create(?SERVER, #{type => ordered_set, scope => local}),
     {ok, #state{}}.
 
 handle_register(Pid, Id, Value, State) ->
-    case ets:insert_new(?SERVER, {Id, Pid, Value}) of
+    case ergw_db:insert_new(?SERVER, {Id, Pid, Value}) of
 	true ->  {ok, [Id], notify(Id, Value, State)};
 	false -> {error, duplicate}
     end.
 
 handle_unregister(Key, _Value, State) ->
-    Pids = [Pid || {_, Pid, _} <- ets:take(?SERVER, Key)],
+    Pids = [Pid || {_, Pid, _} <- ergw_db:take(?SERVER, Key)],
     {Pids, State}.
 
 handle_pid_remove(_Pid, Keys, State) ->
-    lists:foreach(fun(Key) -> ets:delete(?SERVER, Key) end, Keys),
+    lists:foreach(fun(Key) -> ergw_db:delete(?SERVER, Key) end, Keys),
     State.
 
 handle_death(_Pid, _Reason, State) ->
     State.
 
 handle_call({waitfor, Key}, From, #state{waitfor = WF} = State) ->
-    case ets:lookup(?SERVER, Key) of
+    case ergw_db:lookup(?SERVER, Key) of
 	[{Key, _Pid, Value}] ->
 	    {reply, Value, State};
 	_ ->
