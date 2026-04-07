@@ -41,7 +41,7 @@ register(Key, Pid) when is_pid(Pid) ->
 %%     regine_server:unregister(?SERVER, Key, undefined).
 
 lookup(Key) ->
-    case ets:lookup(?SERVER, Key) of
+    case ergw_db:lookup(?SERVER, Key) of
 	[{Key, Pid}] ->
 	    {ok, Pid};
 	_ ->
@@ -71,7 +71,7 @@ available() ->
     regine_server:call(?SERVER, available).
 
 all() ->
-    ets:tab2list(?SERVER).
+    ergw_db:tab2list(?SERVER).
 
 count_available() ->
     maps:size(available()).
@@ -89,11 +89,11 @@ count_monitors(Pid) ->
 %%%===================================================================
 
 init([]) ->
-    ets:new(?SERVER, [ordered_set, named_table, public, {keypos, 1}]),
+    ergw_db:create(?SERVER, #{type => ordered_set, scope => local}),
     {ok, #{}}.
 
 handle_register(Pid, Id, _Value, State) ->
-    case ets:insert_new(?SERVER, {Id, Pid}) of
+    case ergw_db:insert_new(?SERVER, {Id, Pid}) of
 	true ->  {ok, [Id], State};
 	false -> {error, duplicate}
     end.
@@ -102,7 +102,7 @@ handle_unregister(Key, _Value, State) ->
     unregister(Key, State).
 
 handle_pid_remove(_Pid, Keys, State) ->
-    lists:foreach(fun(Key) -> ets:delete(?SERVER, Key) end, Keys),
+    lists:foreach(fun(Key) -> ergw_db:delete(?SERVER, Key) end, Keys),
     maps:without(Keys, State).
 
 handle_death(_Pid, _Reason, State) ->
@@ -141,5 +141,5 @@ terminate(_Reason, _State) ->
 %%%===================================================================
 
 unregister(Key, State) ->
-    Pids = [Pid || {_, Pid} <- ets:take(?SERVER, Key)],
+    Pids = [Pid || {_, Pid} <- ergw_db:take(?SERVER, Key)],
     {Pids, maps:remove(Key, State)}.
