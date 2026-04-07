@@ -7,7 +7,7 @@
 		    ergw_aaa, ergw_cluster,
 		    prometheus, cowboy, prometheus_cowboy,
 		    prometheus_diameter_collector,
-		    compiler, os_mon, jobs, ra,
+		    compiler, os_mon, jobs,
 		    ergw_sbi_client,
 		    zoneinfo]},
     {mod, {ergw_core_app, []}},
