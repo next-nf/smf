@@ -55,13 +55,8 @@
 %%====================================================================
 
 start_node(Config) ->
-    case ergw_cluster:is_ready() of
-	true ->
-	    Cnf = validate_options(Config),
-	    gen_statem:call(?SERVER, {start, Cnf});
-	false ->
-	    {error, cluster_not_ready}
-    end.
+    Cnf = validate_options(Config),
+    gen_statem:call(?SERVER, {start, Cnf}).
 
 -ifdef(TEST).
 start() ->
