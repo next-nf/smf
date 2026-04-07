@@ -72,8 +72,7 @@ get(_, _, _) ->
 put(Key, Val) ->
     case is_global_key(Key) of
 	true ->
-	    {ok, _} = ergw_global:put(Key, Val),
-	    ok;
+	    ok = ergw_global:put(Key, Val);
 	false ->
 	    ok = application:set_env(ergw_core, Key, Val)
     end.
