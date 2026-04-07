@@ -135,7 +135,7 @@ components:
               - Access
               - Core
               - SGi-LAN
-              - CP-Function
+              - CP-function
               - LI Function
               - TDF-Source
 

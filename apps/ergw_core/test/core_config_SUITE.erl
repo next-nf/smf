@@ -537,7 +537,7 @@ upf_node_defaults() ->
 upf_node_defaults(_Config)  ->
     Default =
 	[{vrfs,
-	  [{cp, [{features, ['CP-Function']}]},
+	  [{cp, [{features, ['CP-function']}]},
 	   {irx, [{features, ['Access']}]},
 	   {sgi, [{features, ['SGi-LAN']}]}
 	  ]},
@@ -599,8 +599,8 @@ upf_node(_Config)  ->
     ?bad(ValF(<<"test">>, [{port, invalid}])),
     ?ok(ValF(<<"test">>, [{rport, 1234}])),
 
-    ?ok(ValF(<<"test">>, set_cfg_value([vrfs, cp, features], ['CP-Function'], Node))),
-    ?ok(ValF(<<"test">>, set_cfg_value([vrfs, 'cp2', features], ['CP-Function'], Node))),
+    ?ok(ValF(<<"test">>, set_cfg_value([vrfs, cp, features], ['CP-function'], Node))),
+    ?ok(ValF(<<"test">>, set_cfg_value([vrfs, 'cp2', features], ['CP-function'], Node))),
     ok.
 
 metrics() ->

@@ -66,7 +66,7 @@
 
 -record(bearer, {
 	  interface             :: 'Access' | 'Core' | 'SGi-LAN' |
-				   'CP-Function' | 'LI Function' | undefined,
+				   'CP-function' | 'LI Function' | undefined,
 	  vrf			:: term(),
 	  local			:: 'undefined' | #fq_teid{} | #ue_ip{},
 	  remote		:: 'undefined' | 'default' | #fq_teid{}
@@ -143,7 +143,7 @@
 -record(vrf, {
 	  name                   :: atom(),
 	  features = ['SGi-Lan'] :: ['Access' | 'Core' | 'SGi-LAN' |
-				     'CP-Function' | 'LI Function'],
+				     'CP-function' | 'LI Function'],
 	  teid_range,
 	  ipv4,
 	  ipv6

@@ -197,7 +197,7 @@ connect_sx_node(Node, #{node_selection := NodeSelect} = Opts) ->
 validate_node_vrf_option(features, Features)
   when length(Features) /= 0 ->
     Rem = lists:usort(Features) --
-	['Access', 'Core', 'SGi-LAN', 'CP-Function', 'LI Function'],
+	['Access', 'Core', 'SGi-LAN', 'CP-function', 'LI Function'],
     if Rem /= [] ->
 	    erlang:error(badarg, [features, Features]);
        true ->
@@ -374,7 +374,7 @@ init([Parent, Node, NodeSelect, IP4, IP6, NotifyUp]) ->
 		  retries = 0,
 		  recovery_ts = undefined,
 		  pfcp_ctx = PCtx,
-		  bearer = #{dp => #bearer{interface = 'CP-Function'}},
+		  bearer = #{dp => #bearer{interface = 'CP-function'}},
 		  cp_socket = Socket,
 		  cp_info = SockInfo,
 		  cp = CP,
@@ -906,12 +906,12 @@ update_m_rec(Record, Map) when is_tuple(Record) ->
 
 make_cp_bearer(TEI,  #gtp_socket_info{vrf = VRF, ip = IP}) ->
     FqTEID = #fq_teid{ip = IP, teid = TEI},
-    #bearer{interface = 'CP-Function', vrf = VRF, remote = FqTEID}.
+    #bearer{interface = 'CP-function', vrf = VRF, remote = FqTEID}.
 
 assign_local_data_teid(Key, PCtx, #node{ip = NodeIP}, VRFs, Bearer) ->
     [VRF|_] =
 	lists:filter(fun(#vrf{features = Features}) ->
-			     lists:member('CP-Function', Features)
+			     lists:member('CP-function', Features)
 		     end, maps:values(VRFs)),
     ergw_gsn_lib:assign_local_data_teid(Key, PCtx, VRF, NodeIP, Bearer).
 

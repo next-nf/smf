@@ -260,7 +260,7 @@
                 },
                 {
                     "features": [
-                        "CP-Function"
+                        "CP-function"
                     ],
                     "name": {
                         "apn": "cp"
@@ -318,7 +318,7 @@
                     },
                     {
                         "features": [
-                            "CP-Function"
+                            "CP-function"
                         ],
                         "name": {
                             "apn": "cp"

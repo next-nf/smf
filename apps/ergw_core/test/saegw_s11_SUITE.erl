@@ -220,7 +220,7 @@
 	    upf_nodes =>
 		#{default =>
 		      [{vrfs,
-			[{cp, [{features, ['CP-Function']}]},
+			[{cp, [{features, ['CP-function']}]},
 			 {irx, [{features, ['Access']}]},
 			 {sgi, [{features, ['SGi-LAN']}]}
 			]},

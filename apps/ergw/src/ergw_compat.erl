@@ -361,7 +361,7 @@ translate_node_selection_option(Opt, Values) ->
 translate_node_vrf_option(features, Features)
   when is_list(Features), length(Features) /= 0 ->
     Rem = lists:usort(Features) --
-	['Access', 'Core', 'SGi-LAN', 'CP-Function', 'LI Function'],
+	['Access', 'Core', 'SGi-LAN', 'CP-function', 'LI Function'],
     if Rem /= [] ->
 	    throw({error, {options, {features, Features}}});
        true ->
