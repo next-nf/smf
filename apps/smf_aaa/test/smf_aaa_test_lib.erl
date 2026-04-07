@@ -9,7 +9,7 @@
 
 -compile({parse_transform, cut}).
 
--define(ERGW_AAA_NO_IMPORTS, true).
+-define(SMF_AAA_NO_IMPORTS, true).
 
 -export([meck_init/1, meck_reset/1, meck_unload/1, meck_validate/1]).
 -export([set_cfg_value/3, get_cfg_value/2]).
@@ -200,7 +200,7 @@ outstanding_reqs() ->
 
 get_session_stats() ->
     lists:sort([{Handler, State, Value} ||
-     {[{"handler", Handler}, {"state", State}], Value} <-
+     {[{handler, Handler}, {state, State}], Value} <-
      prometheus_gauge:values(default, aaa_sessions_total)]).
 
 get_session_stats(Handler, State) ->
@@ -212,9 +212,8 @@ get_session_stats(Handler, State) ->
     end.
 
 reset_session_stats() ->
-    %% there seems to be no easier way doing this ...
     [prometheus_gauge:remove(default, aaa_sessions_total, [Handler, State]) ||
-     {[{"handler", Handler}, {"state", State}], _} <-
+     {[{handler, Handler}, {state, State}], _} <-
      prometheus_gauge:values(default, aaa_sessions_total)].
 
 wait_for_session(_Service, _State, _Instances, 0) ->

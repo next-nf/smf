@@ -9,7 +9,7 @@
 
 -compile([{parse_transform, cut}]).
 
--define(ERGW_NO_IMPORTS, true).
+-define(SMF_NO_IMPORTS, true).
 
 -export([init_per_suite/1,
 	 end_per_suite/1,

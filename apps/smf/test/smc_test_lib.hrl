@@ -5,7 +5,7 @@
 %% as published by the Free Software Foundation; either version
 %% 2 of the License, or (at your option) any later version.
 
--ifndef(ERGW_NO_IMPORTS).
+-ifndef(SMF_NO_IMPORTS).
 
 -import('smc_test_lib', [lib_init_per_group/1,
 			  lib_end_per_group/1,

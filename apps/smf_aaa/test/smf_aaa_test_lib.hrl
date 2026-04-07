@@ -23,7 +23,7 @@
 		  end
 	  end)())).
 
--ifndef(ERGW_AAA_NO_IMPORTS).
+-ifndef(SMF_AAA_NO_IMPORTS).
 -import(smf_aaa_test_lib, [meck_init/1, meck_reset/1, meck_unload/1, meck_validate/1,
 			    set_cfg_value/3, get_cfg_value/2,
 			    get_stats/1, diff_stats/2, wait_for_diameter/2,

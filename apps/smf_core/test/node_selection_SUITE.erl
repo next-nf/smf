@@ -12,8 +12,8 @@
 
 -include("smf_test_lib.hrl").
 
--define(ERGW1, {100, 255, 4, 133}).
--define(ERGW2, {100, 255, 4, 125}).
+-define(SMF1, {100, 255, 4, 133}).
+-define(SMF2, {100, 255, 4, 125}).
 -define(HUB1,  {100, 255, 5, 46}).
 -define(HUB2,  {100, 255, 5, 45}).
 -define(UP1,   {172,20,16,91}).
@@ -78,7 +78,7 @@
 	      [{5,0,0,1},{5,0,0,4}],
 	      []}]).
 
--define(ERGW_NODE_SELECTION,
+-define(SMF_NODE_SELECTION,
 	#{default =>
 	      #{type => static,
 		entries =>
@@ -147,7 +147,7 @@
 		     %% A/AAAA record alternatives
 		     #{type => host,
 		       name => <<"topon.s5s8.pgw.epc.mnc001.mcc001.3gppnetwork.org">>,
-		       ip4  => [?ERGW1]},
+		       ip4  => [?SMF1]},
 		     #{type => host,
 		       name => <<"topon.sx.prox01.node.epc.mnc001.mcc001.3gppnetwork.org">>,
 		       ip4  => [?UP1]},
@@ -200,7 +200,7 @@ end_per_suite(_Config) ->
 
 init_per_group(static, Config) ->
     {ok, Pid} = smf_inet_res:start(),
-    ok = smf_inet_res:load_config(smf_node_selection:validate_options(?ERGW_NODE_SELECTION)),
+    ok = smf_inet_res:load_config(smf_node_selection:validate_options(?SMF_NODE_SELECTION)),
     ok = meck:new(smf_node_selection, [passthrough, no_link]),
     [{cache_server, Pid} | Config];
 init_per_group(dns, Config) ->
@@ -240,7 +240,7 @@ srv_lookup(_Config) ->
 					 ?SERVICES, default),
     ?match([{<<"pgw-list-2.node.epc.mnc001.mcc001.3gppnetwork.org">>, _, _, [_|_], _}], R),
     [{_, _, _, IP4, _}] = R,
-    ?equal(lists:sort([?ERGW1, ?ERGW2]), lists:sort(IP4)),
+    ?equal(lists:sort([?SMF1, ?SMF2]), lists:sort(IP4)),
 
     ok.
 
@@ -261,13 +261,13 @@ lookup_services_order(_Config) ->
 					 Services, default),
     ?match([{<<"smf.ovh.node.epc.mnc001.mcc001.3gppnetwork.org">>, _, _, [_|_], _}], R1),
     [{_, _, _, IP4_1, _}] = R1,
-    ?equal(lists:sort([?ERGW1, ?ERGW2]), lists:sort(IP4_1)),
+    ?equal(lists:sort([?SMF1, ?SMF2]), lists:sort(IP4_1)),
 
     R2 = smf_node_selection:candidates(<<"test-01.apn.epc.mnc001.mcc001.3gppnetwork.org">>,
 					Services, [default]),
     ?match([{<<"smf.ovh.node.epc.mnc001.mcc001.3gppnetwork.org">>, _, _, [_|_], _}], R2),
     [{_, _, _, IP4_2, _}] = R2,
-    ?equal(lists:sort([?ERGW1, ?ERGW2]), lists:sort(IP4_2)),
+    ?equal(lists:sort([?SMF1, ?SMF2]), lists:sort(IP4_2)),
     ok.
 
 a_lookup() ->

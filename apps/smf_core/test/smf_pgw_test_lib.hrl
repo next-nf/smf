@@ -5,7 +5,7 @@
 %% as published by the Free Software Foundation; either version
 %% 2 of the License, or (at your option) any later version.
 
--ifndef(ERGW_PGW_NO_IMPORTS).
+-ifndef(SMF_PGW_NO_IMPORTS).
 
 -import('smf_pgw_test_lib', [make_request/3, make_response/3, validate_response/4,
 			      create_session/1, create_session/2,

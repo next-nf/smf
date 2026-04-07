@@ -7,7 +7,7 @@
 
 -module(smc_ggsn_test_lib).
 
--define(ERGW_GGSN_NO_IMPORTS, true).
+-define(SMF_GGSN_NO_IMPORTS, true).
 
 -export([make_request/3, make_response/3, validate_response/4,
 	 create_pdp_context/1, create_pdp_context/2,

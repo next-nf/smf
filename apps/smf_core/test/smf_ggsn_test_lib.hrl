@@ -5,7 +5,7 @@
 %% as published by the Free Software Foundation; either version
 %% 2 of the License, or (at your option) any later version.
 
--ifndef(ERGW_GGSN_NO_IMPORTS).
+-ifndef(SMF_GGSN_NO_IMPORTS).
 
 -import('smf_ggsn_test_lib', [make_request/3, make_response/3, validate_response/4,
 			       create_pdp_context/1, create_pdp_context/2,

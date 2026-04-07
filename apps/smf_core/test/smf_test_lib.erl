@@ -9,7 +9,7 @@
 
 -compile({parse_transform, cut}).
 
--define(ERGW_NO_IMPORTS, true).
+-define(SMF_NO_IMPORTS, true).
 
 -export([lib_init_per_group/1,
 	 lib_end_per_group/1,

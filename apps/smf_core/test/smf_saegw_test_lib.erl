@@ -7,7 +7,7 @@
 
 -module(smf_saegw_test_lib).
 
--define(ERGW_SAEGW_NO_IMPORTS, true).
+-define(SMF_SAEGW_NO_IMPORTS, true).
 
 -export([make_request/3, make_response/3, validate_response/4,
 	 create_session/1, create_session/2,
