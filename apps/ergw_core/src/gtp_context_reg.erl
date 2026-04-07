@@ -29,6 +29,7 @@
 -include("include/ergw.hrl").
 
 -define(SERVER, ?MODULE).
+-define(GLOBAL_TAB, gtp_context_global).
 
 %%%===================================================================
 %%% API
@@ -97,6 +98,7 @@ init([]) ->
     ergw_db:create(?SERVER, #{type => bag, scope => local,
 			      decentralized_counters => true,
 			      write_concurrency => true, read_concurrency => true}),
+    ergw_db:create(?GLOBAL_TAB, #{type => set, scope => global}),
     {ok, #{}}.
 
 handle_call({await_unreg, Pid}, From, State0)
@@ -178,20 +180,18 @@ add_keys(InsFun, Keys, Handler, Pid) ->
 
 global_add_key(#context_key{id = {Type, _, _}} = Key, RegV)
   when Type == imei; Type == imsi ->
-    gtp_context_reg_vnode:put(<<"context">>, Key, RegV);
+    ergw_db:insert(?GLOBAL_TAB, {Key, RegV});
 global_add_key(_, _) ->
     ok.
 
-global_del_key(#context_key{id = {Type, _, _}} = Key, RegV)
+global_del_key(#context_key{id = {Type, _, _}} = Key, _RegV)
   when Type == imei; Type == imsi ->
-    gtp_context_reg_vnode:delete(<<"context">>, Key, RegV);
+    ergw_db:delete(?GLOBAL_TAB, Key);
 global_del_key(_, _) ->
     ok.
 
 global_lookup(Key) ->
-    case gtp_context_reg_vnode:get(<<"context">>, Key) of
-	{ok, #{reason := finished, result := Result}} ->
-	    lists:usort([Value || {_Location, {ok, Value}} <- Result]);
-	_ ->
-	    []
+    case ergw_db:lookup(?GLOBAL_TAB, Key) of
+	[{_, Value}] -> [Value];
+	[] -> []
     end.
