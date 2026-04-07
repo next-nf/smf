@@ -102,7 +102,8 @@ build_cluster(Config) ->
     %% connect all nodes to each other
     [erpc:call(N, net_kernel, connect_node, [M])
      || N <- Nodes, M <- Nodes, N =/= M],
-    %% merge Mnesia schemas so global tables replicate
+    %% start Mnesia on all nodes and merge schemas
+    [erpc:call(N, application, ensure_all_started, [mnesia]) || N <- Nodes],
     [erpc:call(N, mnesia, change_config, [extra_db_nodes, Nodes -- [N]])
      || N <- Nodes],
     ok.
