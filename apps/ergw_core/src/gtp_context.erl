@@ -389,11 +389,9 @@ handle_event({call, From},
 	     {sx, #pfcp{type = session_report_request,
 			ie = #{report_type := #{'ERIR' := _},
 			       error_indication_report :=
-				   #{f_teid :=
-					 #f_teid{ipv4 = IP4, ipv6 = IP6} = FTEID0}}}},
+				   #{f_teid := FTEID0}}}},
 	     State, #{pfcp := PCtx} = Data0) ->
-    FTEID = FTEID0#f_teid{ipv4 = ergw_inet:bin2ip(IP4), ipv6 = ergw_inet:bin2ip(IP6)},
-    case fteid_tunnel_side(FTEID, Data0) of
+    case fteid_tunnel_side(FTEID0, Data0) of
 	none ->
 	    %% late EIR, we already switched to a new peer
 	    {keep_state_and_data, [{reply, From, {ok, PCtx}}]};
