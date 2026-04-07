@@ -65,7 +65,7 @@
 
 -spec init() -> ok.
 init() ->
-    Mod = application:get_env(ergw_core, db_backend, ergw_db_ets),
+    Mod = application:get_env(ergw_core, db_backend, ergw_db_mnesia),
     persistent_term:put(?PT_KEY, Mod),
     ok.
 
