@@ -3,7 +3,7 @@
     {vsn, semver},
     {description, "3GPP GGSN/PGW"},
     {applications, [kernel, stdlib, crypto,
-		    ra, riak_core, riak_core_lite_util]},
+		    ra]},
     {mod, {ergw_cluster_app, []}},
     {registered, []}
 ]}.
