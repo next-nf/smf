@@ -6,6 +6,7 @@
 This is a 3GPP GGSN and PDN-GW implemented in Erlang. It strives to eventually support all the functionality as defined by [3GPP TS 23.002](http://www.3gpp.org/dynareport/23002.htm) Section 4.1.3.1 for the GGSN and Section 4.1.4.2.2 for the PDN-GW.
 
 # CONTENTS
+* [DEPLOYMENT](#deployment)
 * [IMPLEMENTED FEATURES](#implemented-features)
 * [EXPERIMENTAL FEATURES](#experimental-features)
 * [USER PLANE](#user-plane)
@@ -20,6 +21,32 @@ This is a 3GPP GGSN and PDN-GW implemented in Erlang. It strives to eventually s
    * [REQUIRED](#required)
    * [CONFIGURATION](#configuration)
    * [COMPILE & RUN](#compile--run)
+
+# DEPLOYMENT
+
+## Deployment Philosophy: The Case for Bare Metal
+
+While the industry moves toward universal containerization, the SMF project (incorporating GGSN/PGW and future SMF+PGW roles) takes a deliberate stand against Kubernetes (K8s) for its core packet-processing and signaling engine. The architecture prioritizes deterministic latency and hardware-line-rate throughput -- two metrics that are frequently compromised by the "abstraction tax" of orchestrators.
+
+## Why K8s Is Discouraged for the Core
+
+The SMF is not a microservice; it is a high-performance network function. Running it in K8s introduces a "leaky abstraction" where the complexities of telco networking collide with the limitations of container orchestration:
+
+* **Hardware Affinity & The NUMA Gap:** High-capacity User Planes require strict 1:1 mapping between NIC queues, memory channels, and CPU cores. Kubernetes’ scheduler is fundamentally designed to move workloads around, which is antithetical to the static, pinned environment required for DPDK/SR-IOV stability.
+
+* **The Networking "Death Spiral":** Telco protocols like SCTP and GTP-U require stable identity and multi-homing. In K8s, a minor liveness probe failure or a CNI hiccup can trigger a pod eviction, dropping hundreds of thousands of active subscriber sessions in a futile "self-healing" loop that actually causes more downtime than it prevents.
+
+* **Troubleshooting Opacity:** When milliseconds matter, you cannot afford to peel back layers of Multus, sidecars, and overlay tunnels to find a bottleneck. On bare metal, the path from the wire to the process is direct and observable.
+
+## The Hybrid Compromise
+
+The value of Kubernetes for stateless or standard I/O workloads is recognized. A hybrid deployment model is actively encouraged:
+
+* **Support Components** (e.g., Subscriber Databases, Redis state stores, Logging/Metrics stacks) live in Kubernetes, where their scaling patterns and standard TCP/IP requirements align perfectly with cloud-native tooling.
+
+* **The SMF/PGW Core** remains on bare metal (or dedicated VMs), where it has unencumbered access to the physical hardware, ensuring that 99.999% availability isn’t just a goal, but a structural reality.
+
+> **Note to Architects:** Deploying the SMF core in Kubernetes is technically possible but operationally discouraged. Choosing that path means trading 3GPP reliability for operational uniformity -- a trade that costs the user more than it saves the operator.
 
 # IMPLEMENTED FEATURES
 Messages:
