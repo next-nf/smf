@@ -46,7 +46,7 @@ lookup(#context_key{id = {Type, _, _}} = Key)
 	    undefined
     end;
 lookup(Key) when is_tuple(Key) ->
-    case ets:lookup(?SERVER, Key) of
+    case ergw_db:lookup(?SERVER, Key) of
 	[{Key, Value}] ->
 	    Value;
 	_ ->
@@ -54,15 +54,15 @@ lookup(Key) when is_tuple(Key) ->
     end.
 
 select(Key) ->
-    ets:select(?SERVER, [{{Key, '$1'},[],['$1']}]).
+    ergw_db:select(?SERVER, [{{Key, '$1'},[],['$1']}]).
 
 register(Keys, Handler, Pid)
   when is_list(Keys), is_atom(Handler), is_pid(Pid) ->
-    register(fun ets:insert/2, Keys, Handler, Pid).
+    register(fun ergw_db:insert/2, Keys, Handler, Pid).
 
 register_new(Keys, Handler, Pid)
   when is_list(Keys), is_atom(Handler), is_pid(Pid) ->
-    register(fun ets:insert_new/2, Keys, Handler, Pid).
+    register(fun ergw_db:insert_new/2, Keys, Handler, Pid).
 
 update(Delete, Insert, Handler, Pid)
   when is_list(Delete), is_list(Insert), is_atom(Handler), is_pid(Pid) ->
@@ -70,7 +70,7 @@ update(Delete, Insert, Handler, Pid)
     [global_del_key(DKey, RegV) || DKey <- Delete],
     [global_add_key(IKey, RegV) || IKey <- Insert],
 
-    ets_delete_objects(?SERVER, mk_reg_objects(Delete, Handler, Pid)),
+    db_delete_objects(?SERVER, mk_reg_objects(Delete, Handler, Pid)),
     add_keys(fun ets:insert/2, Insert, Handler, Pid).
 
 unregister(Keys, Handler, Pid)
@@ -78,11 +78,11 @@ unregister(Keys, Handler, Pid)
     RegV = {Handler, Pid},
     [global_del_key(Key, RegV) || Key <- Keys],
 
-    ets_delete_objects(?SERVER, mk_reg_objects(Keys, Handler, Pid)),
+    db_delete_objects(?SERVER, mk_reg_objects(Keys, Handler, Pid)),
     ok.
 
 all() ->
-    ets:tab2list(?SERVER).
+    ergw_db:tab2list(?SERVER).
 
 await_unreg(Key) ->
     gen_server:call(?SERVER, {await_unreg, Key}, 1000).
@@ -94,9 +94,9 @@ await_unreg(Key) ->
 init([]) ->
     process_flag(trap_exit, true),
 
-    ets:new(?SERVER, [bag, named_table, public, {keypos, 1},
-		      {decentralized_counters, true},
-		      {write_concurrency, true}, {read_concurrency, true}]),
+    ergw_db:create(?SERVER, #{type => bag, scope => local,
+			      decentralized_counters => true,
+			      write_concurrency => true, read_concurrency => true}),
     {ok, #{}}.
 
 handle_call({await_unreg, Pid}, From, State0)
@@ -116,8 +116,8 @@ handle_info({'EXIT', Pid, _Reason}, State) ->
     Notify = maps:get(Pid, State, []),
     proc_lib:spawn(
       fun() ->
-	      Objs = ets:lookup(?SERVER, Pid),
-	      ets_delete_objects(?SERVER, Objs ++ mk_reg_pids(Objs)),
+	      Objs = ergw_db:lookup(?SERVER, Pid),
+	      db_delete_objects(?SERVER, Objs ++ mk_reg_pids(Objs)),
 	      [global_del_key(Key, {Handler, Pid}) || {_, {Handler, Key}} <- Objs],
 	      [gen_server:reply(From, ok) || From <- Notify],
 	      ok
@@ -162,17 +162,17 @@ mk_reg_objects([Key|T], Handler, Pid) ->
 mk_reg_pids(Objs) ->
     [{Pid, {Handler, Key}} || {Key, {Handler, Pid}} <- Objs].
 
-ets_delete_objects(Tab, Objects) ->
-    [ets:delete_object(Tab, Obj) || Obj <-Objects].
+db_delete_objects(Tab, Objects) ->
+    [ergw_db:delete_object(Tab, Obj) || Obj <- Objects].
 
 add_keys(InsFun, Keys, Handler, Pid) ->
     Insert = mk_reg_keys(Keys, Handler, Pid),
-    ets:insert(?SERVER, mk_reg_pids(Insert)),
+    ergw_db:insert(?SERVER, mk_reg_pids(Insert)),
     case InsFun(?SERVER, Insert) of
-	true  ->
+	R when R =:= ok; R =:= true ->
 	    ok;
 	false ->
-	    ets_delete_objects(?SERVER, mk_reg_pids(Insert)),
+	    db_delete_objects(?SERVER, mk_reg_pids(Insert)),
 	    {error, duplicate}
     end.
 
