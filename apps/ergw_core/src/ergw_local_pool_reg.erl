@@ -39,34 +39,34 @@ register(Pool) ->
     regine_server:register(?SERVER, self(), Pool, undefined).
 
 lookup(Pool) when is_binary(Pool) ->
-    case ets:lookup(?TAB, Pool) of
+    case ergw_db:lookup(?TAB, Pool) of
 	[{_, Pid}] -> Pid;
 	_ -> undefined
     end.
 
 all() ->
-    ets:tab2list(?TAB).
+    ergw_db:tab2list(?TAB).
 
 %%%===================================================================
 %%% regine callbacks
 %%%===================================================================
 
 init([]) ->
-    ets:new(?TAB, [named_table, set, protected, {keypos, 1}, {read_concurrency, true}]),
+    ergw_db:create(?TAB, #{type => set, scope => local, read_concurrency => true}),
     {ok, state}.
 
 handle_register(Pid, Pool, _Value, State) ->
-    case ets:insert_new(?TAB, {Pool, Pid}) of
+    case ergw_db:insert_new(?TAB, {Pool, Pid}) of
 	false -> {error, duplicate};
 	true  -> {ok, [Pool], State}
     end.
 
 handle_unregister(Pool, _Value, State) ->
-    Objs = ets:take(?TAB, Pool),
+    Objs = ergw_db:take(?TAB, Pool),
     {[Pid || {_, Pid} <- Objs], State}.
 
 handle_pid_remove(_Pid, Pools, State) ->
-    [ets:delete(?TAB, Pool) || Pool <- Pools],
+    [ergw_db:delete(?TAB, Pool) || Pool <- Pools],
     State.
 
 handle_death(_Pid, _Reason, State) ->
