@@ -1,0 +1,8 @@
+%% -*- erlang -*-
+{application, smf_cluster, [
+    {vsn, semver},
+    {description, "3GPP GGSN/PGW"},
+    {applications, [kernel, stdlib, crypto]},
+    {mod, {smf_cluster_app, []}},
+    {registered, []}
+]}.

@@ -1,8 +1,0 @@
-%% -*- erlang -*-
-{application, ergw_cluster, [
-    {vsn, semver},
-    {description, "3GPP GGSN/PGW"},
-    {applications, [kernel, stdlib, crypto]},
-    {mod, {ergw_cluster_app, []}},
-    {registered, []}
-]}.

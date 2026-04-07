@@ -1,0 +1,22 @@
+{application, smf_aaa,
+ [
+  {description, "erGW AAA"},
+  {vsn, semver},
+  {registered, []},
+  {applications, [
+		  kernel,
+		  stdlib,
+		  crypto,
+		  sasl,
+		  setup,
+		  regine,
+		  eradius,
+		  prometheus,
+		  diameter,
+		  gtplib
+		 ]},
+  {mod, { smf_aaa_app, []}},
+  {env, [{product_name, "erGW-AAA"},
+	 {rate_limits,  #{default => #{outstanding_requests => 50, rate => 50}}}
+	]}
+ ]}.

@@ -1,4 +1,4 @@
-# erGW - 3GPP GGSN and PDN-GW in Erlang
+# Next-SMF - 3GPP GGSN and PDN-GW in Erlang
 [![Build Status][gh badge]][gh]
 [![Coverage Status][coveralls badge]][coveralls]
 [![Erlang Versions][erlang version badge]][gh]
@@ -72,7 +72,7 @@ for them are not guaranteed to work across versions. Check [CONFIG.md](CONFIG.md
  * metrics, see [METRICS.md](METRICS.md)
 
 # USER PLANE
-*erGW* uses the 3GPP control and user plane separation (CUPS) of EPC nodes
+*Next-SMF* uses the 3GPP control and user plane separation (CUPS) of EPC nodes
 architecture as layed out in [3GPP TS 23.214](http://www.3gpp.org/dynareport/23244.htm)
 and [3GPP TS 29.244](http://www.3gpp.org/dynareport/29244.htm).
 
@@ -90,9 +90,9 @@ Many thanks to [On Waves](https://www.on-waves.com/) for sponsoring the RADIUS A
 Example of configuration **RADIUS**:
 ```erlang
 %% ...
-{ergw_aaa, [
+{smf_aaa, [
     {handlers, [
-        {ergw_aaa_static, [
+        {smf_aaa_static, [
             {'Node-Id',        <<"CHANGE-ME">>},            %% <- CHANGE
             {'NAS-Identifier', <<"CHANGE-ME">>},            %% <- CHANGE
             {'NAS-IP-Address', {127,0,0,3}},                %% <- CHANGE
@@ -100,7 +100,7 @@ Example of configuration **RADIUS**:
             {'Framed-Protocol',         'PPP'},
             {'Service-Type',            'Framed-User'}
         ]},
-        {ergw_aaa_radius, [
+        {smf_aaa_radius, [
             {server,
                 {{127,0,0,4}, 1813, <<"CHANGE-ME-SECRET">>} %% <- CHANGE IP and SECRET
             },
@@ -120,10 +120,10 @@ Example of configuration **RADIUS**:
     ]},
     {services, [
         {'Default', [
-            {handler, 'ergw_aaa_static'}
+            {handler, 'smf_aaa_static'}
         ]},
         {'RADIUS-Acct', [
-            {handler, 'ergw_aaa_radius'}
+            {handler, 'smf_aaa_radius'}
         ]}
     ]},
     {apps, [
@@ -144,11 +144,11 @@ Example of configuration **RADIUS**:
 Example of configuration **epc-ocs** `function` of **DIAMETER**:
 ```erlang
 %% ...
-{ergw_aaa, [
+{smf_aaa, [
 %% ...
     {functions, [
         {'epc-ocs', [
-            {handler, ergw_aaa_diameter},
+            {handler, smf_aaa_diameter},
             {'Origin-Host', <<"CHANGE-ME">>},                           %% <- CHANGE: Origin-Host needs to be resolvable 
                                                                         %% to local IP (either through /etc/hosts or DNS)
             {'Origin-Realm', <<"CHANGE-ME">>},                          %% <- CHANGE
@@ -165,14 +165,14 @@ Example of configuration **epc-ocs** `function` of **DIAMETER**:
 ]},
 %% ...
 ```
-Example of configuration **ergw-pgw-epc-rf** `function` of **DIAMETER**:
+Example of configuration **smf-pgw-epc-rf** `function` of **DIAMETER**:
 ```erlang
 %% ...
-{ergw_aaa, [
+{smf_aaa, [
     %% ...
     {functions, [
-        {'ergw-pgw-epc-rf', [
-            {handler, ergw_aaa_diameter},
+        {'smf-pgw-epc-rf', [
+            {handler, smf_aaa_diameter},
             {'Origin-Host', <<"CHANGE-ME">>},                           %% <- CHANGE
             {'Origin-Realm', <<"CHANGE-ME">>},                          %% <- CHANGE
             {transports, [
@@ -187,8 +187,8 @@ Example of configuration **ergw-pgw-epc-rf** `function` of **DIAMETER**:
     ]},
     {handlers, [
         %% ...
-        {ergw_aaa_rf, [
-            {function, 'ergw-pgw-epc-rf'},
+        {smf_aaa_rf, [
+            {function, 'smf-pgw-epc-rf'},
             {'Destination-Realm', <<"CHANGE-ME">>}                      %% <- CHANGE
         ]},
         {termination_cause_mapping, [
@@ -207,7 +207,7 @@ Example of configuration **ergw-pgw-epc-rf** `function` of **DIAMETER**:
     ]},
     {services, [
         %% ...
-        {'Rf', [{handler, 'ergw_aaa_rf'}]},
+        {'Rf', [{handler, 'smf_aaa_rf'}]},
         %% ...
     ]},
     {apps, [
@@ -258,7 +258,7 @@ Other shortcomings:
 # ERLANG Version Support
 All minor version of the current major release and the highest minor version of
 the previous major release will be supported.
-Due to a bug in OTP 22.x, the `netdev` configuration option of *erGW* is broken
+Due to a bug in OTP 22.x, the `netdev` configuration option of *Next-SMF* is broken
 ([see](https://github.com/erlang/otp/pull/2600)). If you need this feature, you
 must use OTP 23.x.
 
@@ -266,45 +266,45 @@ When in doubt check the `otp_release` section in [.github/workflows/main.yml](.g
 versions.
 
 # DOCKER IMAGES
-Docker images are build by [GitHub Actions](.github/workflows/docker.yaml) and pushed to [hub.docker.com](https://hub.docker.com/r/ergw/ergw-c-node/tags),
-and by gitlab.com and pushed to [quay.io](https://quay.io/repository/travelping/ergw-c-node?tab=tags).
+Docker images are build by [GitHub Actions](.github/workflows/docker.yaml) and pushed to [hub.docker.com](https://hub.docker.com/r/smf/smf-c-node/tags),
+and by gitlab.com and pushed to [quay.io](https://quay.io/repository/travelping/smf-c-node?tab=tags).
 
 ## BUILDING DOCKER IMAGE
-**erGW** Docker image can be get from [quay.io](https://quay.io/repository/travelping/ergw-c-node?tab=tags). For create a new image based on `ergw-c-node` from `quay.io` need run second command:
+**Next-SMF** Docker image can be get from [quay.io](https://quay.io/repository/travelping/smf-c-node?tab=tags). For create a new image based on `smf-c-node` from `quay.io` need run second command:
 
 ```sh
-$ docker run -t -i --rm quay.io/travelping/ergw-c-node:2.4.2 -- /bin/sh
+$ docker run -t -i --rm quay.io/travelping/smf-c-node:2.4.2 -- /bin/sh
 / # cd opt
 /opt # ls
-ergw-c-node
+smf-c-node
 ```
 
 # BUILDING & RUNNING
 ## REQUIRED
 * Erlang OTP **23.2.7** is the recommended version.
 * [Rebar3](https://www.rebar3.org/)
-An *erGW* installation needs a user plane provider to handle the GTP-U path. This
+An *Next-SMF* installation needs a user plane provider to handle the GTP-U path. This
 instance can be installed on the same or different host.
 
 A suitable user plane node based on [VPP](https://wiki.fd.io/view/VPP) can be found at [VPP-UFP](https://github.com/travelping/vpp/).
 
 ## CONFIGURATION
-**erGW** can be started with [rebar3](https://s3.amazonaws.com/rebar3/rebar3) command line tools, and build with run can looks like:
+**Next-SMF** can be started with [rebar3](https://s3.amazonaws.com/rebar3/rebar3) command line tools, and build with run can looks like:
 
 ```sh
-$ git clone https://github.com/travelping/ergw.git
-$ cd ergw
+$ git clone https://github.com/travelping/smf.git
+$ cd smf
 $ wget https://s3.amazonaws.com/rebar3/rebar3
 $ chmod u+x ./rebar3
-$ touch ergw.config
+$ touch smf.config
 ```
 
-Then fill just created **ergw.config** file with content like described below providing a suitable configuration, e.g.:
+Then fill just created **smf.config** file with content like described below providing a suitable configuration, e.g.:
 
 ```erlang
 %-*-Erlang-*-
-[{setup, [{data_dir, "/var/lib/ergw"},
-          {log_dir,  "/var/log/ergw-c-node"}
+[{setup, [{data_dir, "/var/lib/smf"},
+          {log_dir,  "/var/log/smf-c-node"}
          ]},
 
  {kernel,
@@ -320,7 +320,7 @@ Then fill just created **ergw.config** file with content like described below pr
     ]}
   ]},
 
- {ergw, [{'$setup_vars',
+ {smf, [{'$setup_vars',
           [{"ORIGIN", {value, "epc.mnc001.mcc001.3gppnetwork.org"}}]},
          {plmn_id, {<<"001">>, <<"01">>}},
 
@@ -431,9 +431,9 @@ Then fill just created **ergw.config** file with content like described below pr
          ]}
         ]},
 
- {ergw_aaa,
+ {smf_aaa,
   [{handlers,
-    [{ergw_aaa_static,
+    [{smf_aaa_static,
         [{'NAS-Identifier',          <<"NAS-Identifier">>},
          {'Acct-Interim-Interval',   600},
          {'Framed-Protocol',         'PPP'},
@@ -458,7 +458,7 @@ Then fill just created **ergw.config** file with content like described below pr
     ]},
 
    {services,
-    [{'Default', [{handler, 'ergw_aaa_static'}]}
+    [{'Default', [{handler, 'smf_aaa_static'}]}
     ]},
 
    {apps,
@@ -504,15 +504,15 @@ Then fill just created **ergw.config** file with content like described below pr
 ## COMPILE & RUN
 ```sh
 $ ./rebar3 compile
-$ sudo ./rebar3 shell --setcookie secret --sname ergw --config ergw.config --apps ergw
+$ sudo ./rebar3 shell --setcookie secret --sname smf --config smf.config --apps smf
 ===> Verifying dependencies...
 CONFIG: enabling persistent_term support
 ===> Analyzing applications...
-===> Compiling ergw
+===> Compiling smf
 Erlang/OTP 23 [erts-11.0.3] [source] [64-bit] [smp:8:8] [ds:8:8:10] [async-threads:1] [hipe]
 
 Eshell V11.0.3  (abort with ^G)
-(ergw@localhost)1> application:info().
+(smf@localhost)1> application:info().
 ```
 
 The configuration is documented in [CONFIG.md](CONFIG.md)
@@ -538,7 +538,7 @@ docker run -d --rm \
         --publish 127.0.10.1:53:53/udp \
         --publish 127.0.10.1:53:53/tcp \
         --publish 127.0.10.1:953:953/tcp \
-        quay.io/travelping/ergw-dns-test-server:latest
+        quay.io/travelping/smf-dns-test-server:latest
 ```
 
 and
@@ -550,8 +550,8 @@ export CI_DNS_SERVER=127.0.10.1
 before running the unit tests.
 
 <!-- Badges -->
-[gh]: https://github.com/travelping/ergw/actions/workflows/main.yml
-[gh badge]: https://img.shields.io/github/workflow/status/travelping/ergw/CI?style=flat-square
-[coveralls]: https://coveralls.io/github/travelping/ergw
-[coveralls badge]: https://img.shields.io/coveralls/travelping/ergw/master.svg?style=flat-square
+[gh]: https://github.com/travelping/smf/actions/workflows/main.yml
+[gh badge]: https://img.shields.io/github/workflow/status/travelping/smf/CI?style=flat-square
+[coveralls]: https://coveralls.io/github/travelping/smf
+[coveralls badge]: https://img.shields.io/coveralls/travelping/smf/master.svg?style=flat-square
 [erlang version badge]: https://img.shields.io/badge/erlang-R22.3.4%20to%2023.1-blue.svg?style=flat-square

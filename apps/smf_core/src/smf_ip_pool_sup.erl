@@ -1,0 +1,49 @@
+%% Copyright 2015-2019, Travelping GmbH <info@travelping.com>
+
+%% This program is free software; you can redistribute it and/or
+%% modify it under the terms of the GNU General Public License
+%% as published by the Free Software Foundation; either version
+%% 2 of the License, or (at your option) any later version.
+
+-module(smf_ip_pool_sup).
+
+-behaviour(supervisor).
+
+%% API
+-export([start_link/0, start_local_pool_sup/0]).
+
+%% Supervisor callbacks
+-export([init/1]).
+
+-ignore_xref([start_link/0]).
+
+-define(SERVER, ?MODULE).
+
+%% ===================================================================
+%% API functions
+%% ===================================================================
+
+start_link() ->
+    supervisor:start_link({local, ?SERVER}, ?MODULE, []).
+
+start_local_pool_sup() ->
+    ChildSpecs =
+	[#{id      => smf_local_pool_reg,
+	   start   => {smf_local_pool_reg, start_link, []},
+	   restart => permanent,
+	   type    => worker,
+	   modules => [smf_local_pool_reg]},
+	 #{id      => smf_local_pool_sup,
+	   start   => {smf_local_pool_sup, start_link, []},
+	   restart => permanent,
+	   type    => supervisor,
+	   modules => [smf_local_pool_sup]}],
+    [supervisor:start_child(?SERVER, Cs) || Cs <- ChildSpecs],
+    ok.
+
+%% ===================================================================
+%% Supervisor callbacks
+%% ===================================================================
+
+init([]) ->
+    {ok, {{one_for_one, 5, 10}, []}}.

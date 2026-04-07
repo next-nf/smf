@@ -1,0 +1,12 @@
+*~
+*.beam
+/ebin/*.app
+/_build
+/log*
+
+/rebar.lock
+
+# diameter compiler atrifacts
+/src/diameter_*
+/include/diameter_*
+rebar3

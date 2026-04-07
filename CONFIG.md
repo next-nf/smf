@@ -1,4 +1,4 @@
-erGW configuration (WiP)
+Next-SMF configuration (WiP)
 ========================
 
 Concepts
@@ -29,7 +29,7 @@ on the CP and UP node.
 network instance identifier. When an APN name is used as name, we can assume
 DNS label type encoding, however the Domain Name encoding is left open.
 
-The VPP UP uses DNS label encoding in all cases. erGW might someday also work
+The VPP UP uses DNS label encoding in all cases. Next-SMF might someday also work
 with other GTP UP nodes. It therefore takes a more generic approach. Internally
 a VRF name (and therefore a Network Instance name) is always a opaque binary.
 When reading from configuration, supported formats are converted to such a binary.
@@ -56,7 +56,7 @@ Samples:
 > support inter-PLMN roaming, the internal GPRS DNS functionality is used to
 > translate the APN into the IP address of the GGSN.
 
-However, once a GTP tunnel request has been reached a erGW, the APN message
+However, once a GTP tunnel request has been reached a Next-SMF, the APN message
 element is just a selector to choose the final settings for a given tunnel.
 
 ### GTP routes ###
@@ -170,7 +170,7 @@ which sockets, the AAA provider and the defaults AAA attribute mapping.
 
   - `{handler, atom()}`
 
-    the protocol handler module, ergw ships with handlers for Gn, S5/S8 and S2a
+    the protocol handler module, smf ships with handlers for Gn, S5/S8 and S2a
 
   - `{protocol, atom()}`
 
@@ -368,7 +368,7 @@ NAPTR records for APN's on such a gateway should use "Service Parameters" of
 Rate Limiting
 -------------
 
-erGW uses the [Erlang jobs](https://github.com/uwiger/jobs/blob/master/README.md)
+Next-SMF uses the [Erlang jobs](https://github.com/uwiger/jobs/blob/master/README.md)
 to apply rate limiting to all incoming GTP messages.
 
 GTP messages are classified into `create`, `delete` and `other` classes. Each class

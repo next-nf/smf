@@ -1,0 +1,15 @@
+%% -*- erlang -*-
+{application, smf_core, [
+    {vsn, semver},
+    {description, "3GPP GGSN/PGW"},
+    {applications, [kernel, stdlib, crypto, gun,
+		    erlando, regine, gtplib, pfcplib, xxhash,
+		    smf_aaa, smf_cluster,
+		    prometheus, cowboy, prometheus_cowboy,
+		    prometheus_diameter_collector,
+		    compiler, os_mon, jobs, mnesia,
+		    smf_sbi_client,
+		    zoneinfo]},
+    {mod, {smf_core_app, []}},
+    {registered, []}
+]}.
