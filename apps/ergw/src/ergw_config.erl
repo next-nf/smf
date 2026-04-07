@@ -92,9 +92,15 @@ parse_json(Bin) ->
 	    {error, invalid_json}
     end.
 
-apply(Config) ->
+apply(DynConfig) ->
+    Config = maps:merge(DynConfig, load_static_config()),
     ergw_core_init(Config),
     ok.
+
+load_static_config() ->
+    Static = [node, sockets, handlers, http_api],
+    maps:from_list([{K, V} || K <- Static,
+			      {ok, V} <- [application:get_env(ergw_core, K)]]).
 
 %% copied from ergw_aaa test suites
 ergw_aaa_init(Config) ->
