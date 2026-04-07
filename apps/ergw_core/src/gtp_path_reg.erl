@@ -44,7 +44,7 @@ unregister(Key) ->
     regine_server:unregister(?SERVER, Key, undefined).
 
 lookup(Key) ->
-    case ets:lookup(?SERVER, Key) of
+    case ergw_db:lookup(?SERVER, Key) of
 	[{Key, Pid, _}] ->
 	    Pid;
 	_ ->
@@ -58,7 +58,7 @@ state(Key, State) ->
     regine_server:call(?SERVER, {state, Key, State}).
 
 all() ->
-    ets:tab2list(?SERVER).
+    ergw_db:tab2list(?SERVER).
 
 all({_,_,_,_} = IP) ->
     all_ip(IP);
@@ -66,23 +66,22 @@ all({_,_,_,_,_,_,_,_} = IP) ->
     all_ip(IP);
 all(Socket) when is_atom(Socket) ->
     Ms = ets:fun2ms(fun({{Name, _, _}, Pid, State}) when Name =:= Socket -> {Pid, State} end),
-    ets:select(?SERVER, Ms).
+    ergw_db:select(?SERVER, Ms).
 
 all_ip(IP) ->
-    %%ets:select(Tab,[{{'$1','$2','$3'},[],['$$']}])
     Ms = ets:fun2ms(fun({{_, _, PeerIP}, Pid, State}) when PeerIP =:= IP -> {Pid, State} end),
-    ets:select(?SERVER, Ms).
+    ergw_db:select(?SERVER, Ms).
 
 %%%===================================================================
 %%% regine callbacks
 %%%===================================================================
 
 init([]) ->
-    ets:new(?SERVER, [ordered_set, named_table, public, {keypos, 1}]),
+    ergw_db:create(?SERVER, #{type => ordered_set, scope => local}),
     {ok, #state{}}.
 
 handle_register(Pid, Key, Value, State) ->
-    ets:insert(?SERVER, {Key, Pid, Value}),
+    ergw_db:insert(?SERVER, {Key, Pid, Value}),
     gtp_path_db_vnode:attach(Key, node()),
     {ok, [Key], State}.
 
@@ -91,7 +90,7 @@ handle_unregister(Key, _Value, State) ->
 
 handle_pid_remove(_Pid, Keys, State) ->
     lists:foreach(fun(Key) ->
-			  ets:delete(?SERVER, Key),
+			  ergw_db:delete(?SERVER, Key),
 			  gtp_path_db_vnode:detach(Key, node())
 		  end, Keys),
     State.
@@ -107,7 +106,7 @@ handle_call({maybe_new_path, #socket{name = SocketName} = Socket, Version, IP, T
     end;
 
 handle_call({state, Key, PeerState}, _From, State) ->
-    Result = ets:update_element(?SERVER, Key, {3, PeerState}),
+    Result = ergw_db:update_element(?SERVER, Key, {3, PeerState}),
     gtp_path_db_vnode:state(Key, PeerState, node()),
     {reply, Result, State}.
 
@@ -122,6 +121,6 @@ terminate(_Reason, _State) ->
 %%%===================================================================
 
 unregister(Key, State) ->
-    Pids = [Pid || {_, Pid} <- ets:take(?SERVER, Key)],
+    Pids = [Pid || {_, Pid} <- ergw_db:take(?SERVER, Key)],
     gtp_path_db_vnode:detach(Key, node()),
     {Pids, State}.
