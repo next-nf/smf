@@ -772,8 +772,7 @@ send_echo_request(State, #{socket := Socket, handler := Handler,
     {State#state{echo = Ref}, Data#{echo_cnt => Cnt + 1}}.
 
 ring_path_restart(RstCnt, #{reg_key := Key}) ->
-    {ok, Ring} = riak_core_ring_manager:get_my_ring(),
-    erpc:multicast(riak_core_ring:all_members(Ring),
+    erpc:multicast([node() | nodes()],
 		   ?MODULE, path_restart, [Key, RstCnt]).
 
 path_recovery_change(#state{recovery = RstCnt, contexts = CtxS0} = State,
