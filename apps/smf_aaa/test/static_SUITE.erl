@@ -226,26 +226,29 @@ gx_session(Config) ->
     GxOpts = #{'Event-Trigger' => ?'DIAMETER_GX_EVENT-TRIGGER_UE_IP_ADDRESS_ALLOCATE',
 	       'Bearer-Operation' => ?'DIAMETER_GX_BEARER-OPERATION_ESTABLISHMENT'},
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, Session1, Events1} =
-	smf_aaa_session:invoke(SId, GxOpts, {gx, 'CCR-Initial'}, []),
+    AAA0 = smf_aaa_session:new(Session),
+    {ok, AAA1, Events1} =
+	smf_aaa_session:call(AAA0, GxOpts, {gx, 'CCR-Initial'}, []),
     ?match([{pcc, install, [#{}]}], Events1),
+    Session1 = smf_aaa_session:get_session(AAA1),
     ?equal(false, maps:is_key('Result-Code', Session1)),
 
     GxUpd = #{'Event-Trigger' => ?'DIAMETER_GX_EVENT-TRIGGER_SGSN_CHANGE',
 	      'Bearer-Operation' => ?'DIAMETER_GX_BEARER-OPERATION_MODIFICATION'},
-    {ok, Session2, Events2} =
-	smf_aaa_session:invoke(SId, GxUpd, {gx, 'CCR-Update'}, []),
+    {ok, AAA2, Events2} =
+	smf_aaa_session:call(AAA1, GxUpd, {gx, 'CCR-Update'}, []),
     ?match([{pcc, remove, [#{}]}], Events2),
+    Session2 = smf_aaa_session:get_session(AAA2),
     ?equal(false, maps:is_key('Result-Code', Session2)),
 
     GxTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       'Event-Trigger' => ?'DIAMETER_GX_EVENT-TRIGGER_UE_IP_ADDRESS_RELEASE',
 	       'Bearer-Operation' => ?'DIAMETER_GX_BEARER-OPERATION_TERMINATION'},
-    {Result3, Session3, Events3} =
-	smf_aaa_session:invoke(SId, GxTerm, {gx, 'CCR-Terminate'}, []),
+    {Result3, AAA3, Events3} =
+	smf_aaa_session:call(AAA2, GxTerm, {gx, 'CCR-Terminate'}, []),
     ?equal({fail, 5003}, Result3),
     ?match([{stop, {gx, peer_reject}}], Events3),
+    Session3 = smf_aaa_session:get_session(AAA3),
     ?equal(false, maps:is_key('Result-Code', Session3)),
 
     %% make sure nothing crashed
@@ -258,9 +261,9 @@ gy_session(Config) ->
     Session = init_session(#{}, Config),
     GyOpts = #{credits => #{3000 => empty}},
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, Session1, Events1} =
-	smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, []),
+    AAA0 = smf_aaa_session:new(Session),
+    {ok, AAA1, Events1} =
+	smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, []),
     ?match([{update_credits,
 	     [#{'Envelope-Reporting' := [0],
 		'Granted-Service-Unit' :=
@@ -270,6 +273,7 @@ gy_session(Config) ->
 		'Result-Code' := [2001],
 		'Time-Quota-Threshold' := [60],
 		'Volume-Quota-Threshold' := [10240]}]}], Events1),
+    Session1 = smf_aaa_session:get_session(AAA1),
     ?equal(false, maps:is_key('Multiple-Services-Credit-Control', Session1)),
 
     UsedCredits =
@@ -281,9 +285,10 @@ gy_session(Config) ->
 	 },
     GyTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       used_credits => maps:to_list(UsedCredits)},
-    {ok, Session2, Events2} =
-	smf_aaa_session:invoke(SId, GyTerm, {gy, 'CCR-Terminate'}, []),
+    {ok, AAA2, Events2} =
+	smf_aaa_session:call(AAA1, GyTerm, {gy, 'CCR-Terminate'}, []),
     ?match([], Events2),
+    Session2 = smf_aaa_session:get_session(AAA2),
     ?equal(false, maps:is_key('Multiple-Services-Credit-Control', Session2)),
 
     %% make sure nothing crashed
@@ -295,7 +300,7 @@ unconfigured_session() ->
 unconfigured_session(Config) ->
     Session = init_session(#{}, Config),
 
-    {ok, _SId} = smf_aaa_session_sup:new_session(self(), Session),
+    _AAA = smf_aaa_session:new(Session),
     %% make sure nothing crashed
     meck_validate(Config),
     ok.
