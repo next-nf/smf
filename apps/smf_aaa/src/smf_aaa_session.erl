@@ -27,6 +27,15 @@
 %% Session Object API
 -export([to_session/1, native_to_seconds/1]).
 
+%% Functional API (operates on #aaa_state{}, no process)
+-export([new/1,
+	 call/4,        %% call(AAAState, SessionOpts, Procedure, Opts) -> {Result, AAAState, Events}
+	 handle_reply/4, %% handle_reply(Promise, Handler, Msg, AAAState) -> {AAAState, Events}
+	 complete_request/4, %% complete_request(Request, Result, Avps, AAAState) -> {Reply, AAAState}
+	 get_session/1, set_session/2, merge_session/2,
+	 get_handler/2, set_handler/3,
+	 terminate_action/1]).
+
 -include_lib("kernel/include/logger.hrl").
 -include("include/smf_aaa_session.hrl").
 
@@ -160,6 +169,75 @@ unset(Session, Options) when is_list(Options) ->
     gen_statem:call(Session, {unset, Options});
 unset(Session, Option) when is_atom(Option) ->
     gen_statem:call(Session, {unset, [Option]}).
+
+%%===================================================================
+%% Functional API
+%%===================================================================
+
+new(SessionOpts) ->
+    AppId = maps:get('AAA-Application-Id', SessionOpts, default),
+    SessionId = smf_aaa_session_seq:inc(AppId),
+
+    App = smf_aaa:get_application(AppId),
+    OriginHost = maps:get('Origin-Host', App, net_adm:localhost()),
+    DiamSessionId =
+	iolist_to_binary(smf_aaa_session_seq:diameter_session_id(OriginHost, SessionId)),
+
+    DefaultSessionOpts =
+	#{'Session-Start'       => erlang:monotonic_time(),
+	  'Session-Id'          => SessionId,
+	  'Multi-Session-Id'    => SessionId,
+	  'Diameter-Session-Id' => DiamSessionId
+	 },
+
+    smf_aaa_session_reg:register(SessionId),
+    smf_aaa_session_reg:register(DiamSessionId),
+
+    AAA0 = #aaa_state{
+	       application = AppId,
+	       handlers    = #{},
+	       session     = DefaultSessionOpts
+	      },
+    {_Reply, AAA1, _Events} = call(AAA0, SessionOpts, init, #{}),
+    AAA1.
+
+call(#aaa_state{} = AAA0, SessionOpts, Procedure, Opts) when is_list(Opts) ->
+    call(AAA0, SessionOpts, Procedure, normalize_opts(Opts));
+call(#aaa_state{session = SessionIn} = AAA0, SessionOpts, Procedure, Opts0) when is_map(Opts0) ->
+    Opts = Opts0#{now => maps:get(now, Opts0, erlang:monotonic_time())},
+    Session0 = session_merge(SessionIn, SessionOpts),
+    Session1 = maps:fold(fun handle_session_opts/3, Session0, Opts),
+    Session2 = update_accounting_state(Procedure, Session1, Opts),
+    action(Procedure, Opts, AAA0#aaa_state{session = Session2}).
+
+handle_reply(Promise, Handler, Msg, #aaa_state{handlers = HandlersS, session = Session} = AAA) ->
+    Opts = #{},
+    State = maps:get(Handler, HandlersS, undefined),
+    {_, SessOut, EvsOut, StateOut} =
+	Handler:handle_response(Promise, Msg, Session, [], Opts, State),
+    aaa_state_stats(Handler, State, StateOut),
+    {AAA#aaa_state{handlers = maps:put(Handler, StateOut, HandlersS), session = SessOut}, EvsOut}.
+
+complete_request(#aaa_request{handler = Handler}, Result, Avps0,
+		 #aaa_state{session = Session0} = AAA) ->
+    Session = session_merge(Session0, #{}),
+    Avps = Handler:from_session(Session, Avps0),
+    Reply = {Result, Avps},
+    {Reply, AAA#aaa_state{session = Session}}.
+
+get_session(#aaa_state{session = Session}) -> Session.
+
+set_session(Values, #aaa_state{session = Session} = AAA) when is_map(Values) ->
+    AAA#aaa_state{session = maps:merge(Session, Values)}.
+
+merge_session(SessionOpts, #aaa_state{session = Session} = AAA) ->
+    AAA#aaa_state{session = session_merge(Session, SessionOpts)}.
+
+get_handler(Handler, #aaa_state{handlers = Handlers}) ->
+    maps:get(Handler, Handlers, undefined).
+
+set_handler(Handler, State, #aaa_state{handlers = Handlers} = AAA) ->
+    AAA#aaa_state{handlers = maps:put(Handler, State, Handlers)}.
 
 %%===================================================================
 %% gen_statem callbacks
@@ -344,6 +422,8 @@ prepare_next_session_id(Session) ->
     smf_aaa_session_reg:register(NewSessionId),
     Session#{'Session-Id' => NewSessionId}.
 
+terminate_action(#aaa_state{} = AAA) ->
+    call(AAA, #{'Termination-Cause' => error}, terminate, #{});
 terminate_action(Data) ->
     exec(terminate, #{'Termination-Cause' => error}, #{}, Data).
 
@@ -379,12 +459,11 @@ update_session(_Session, [], _Data) ->
 update_session(Session, Events, #data{owner = Owner}) ->
     Owner ! {update_session, Session, Events}.
 
-exec(Procedure, SessionOpts, Opts0, #data{owner = Owner, session = SessionIn} = Data) ->
-    Opts = Opts0#{now => maps:get(now, Opts0, erlang:monotonic_time()), owner => Owner},
-    Session0 = session_merge(SessionIn, SessionOpts),
-    Session1 = maps:fold(fun handle_session_opts/3, Session0, Opts),
-    Session2 = update_accounting_state(Procedure, Session1, Opts),
-    action(Procedure, Opts, Data#data{session = Session2}).
+exec(Procedure, SessionOpts, Opts0, #data{owner = Owner} = Data) ->
+    AAA0 = data_to_aaa(Data),
+    Opts = Opts0#{owner => Owner},
+    {Result, AAA1, Events} = call(AAA0, SessionOpts, Procedure, Opts),
+    {Result, aaa_to_data(AAA1, Data), Events}.
 
 native_to_seconds(Native) ->
     round(Native / erlang:convert_time_unit(1, second, native)).
@@ -429,23 +508,23 @@ services(Procedure, App)
 services(Procedure, App) ->
     maps:get(Procedure, App, []).
 
-action(Procedure, Opts, #data{application = AppId} = Data) ->
+action(Procedure, Opts, #aaa_state{application = AppId} = AAA) ->
     #{procedures := Procedures} = smf_aaa:get_application(AppId),
     Pipeline = services(Procedure, Procedures),
-    pipeline(Procedure, Data, [], Opts, Pipeline).
+    pipeline(Procedure, AAA, [], Opts, Pipeline).
 
-pipeline(_, Data, Events, _Opts, []) ->
-    {ok, Data, Events};
-pipeline(Procedure, DataIn, EventsIn, Opts, [Head|Tail]) ->
-    case step(Head, Procedure, DataIn, EventsIn, Opts) of
-	{ok, DataOut, EventsOut} ->
-	    pipeline(Procedure, DataOut, EventsOut, Opts, Tail);
+pipeline(_, AAA, Events, _Opts, []) ->
+    {ok, AAA, Events};
+pipeline(Procedure, AAAIn, EventsIn, Opts, [Head|Tail]) ->
+    case step(Head, Procedure, AAAIn, EventsIn, Opts) of
+	{ok, AAAOut, EventsOut} ->
+	    pipeline(Procedure, AAAOut, EventsOut, Opts, Tail);
 	Other ->
 	    Other
     end.
 
 step(#{service := Service} = SvcOpts, Procedure,
-     #data{handlers = HandlersS, session = Session0} = Data, Events, Opts) ->
+     #aaa_state{handlers = HandlersS, session = Session0} = AAA, Events, Opts) ->
     Svc = smf_aaa:get_service(Service),
     StepOpts = maps:merge(Opts, SvcOpts),
     Handler = maps:get(handler, Svc),
@@ -454,8 +533,15 @@ step(#{service := Service} = SvcOpts, Procedure,
     {Result, SessOut, EvsOut, StateOut} =
 	Handler:invoke(Service, Procedure, Session, Events, StepOpts, State),
     aaa_state_stats(Handler, State, StateOut),
-    {Result, Data#data{handlers = maps:put(Handler, StateOut, HandlersS),
-		       session = SessOut}, EvsOut}.
+    {Result, AAA#aaa_state{handlers = maps:put(Handler, StateOut, HandlersS),
+			   session = SessOut}, EvsOut}.
+
+%% Conversion between #data{} (gen_statem) and #aaa_state{} (functional)
+data_to_aaa(#data{application = App, handlers = H, session = S}) ->
+    #aaa_state{application = App, handlers = H, session = S}.
+
+aaa_to_data(#aaa_state{application = App, handlers = H, session = S}, Data) ->
+    Data#data{application = App, handlers = H, session = S}.
 
 aaa_state_stats_dec(_, From)
     when From =:= undefined; From =:= stopped ->

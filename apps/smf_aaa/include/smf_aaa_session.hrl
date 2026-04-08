@@ -22,6 +22,12 @@
 		      events = []
 		     }).
 
+-record(aaa_state, {
+		    application = default :: atom(),
+		    handlers = #{} :: #{atom() => term()},
+		    session = #{} :: map()
+		   }).
+
 -record(diam_call,{
 		   seqno,
 		   tries,
