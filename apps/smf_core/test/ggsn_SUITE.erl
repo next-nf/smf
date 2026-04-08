@@ -2301,12 +2301,12 @@ volume_threshold(Config) ->
     CCRUvolth =
 	lists:filter(
 	  fun({_, {smf_aaa_charging, gy_ccr_update,
-		   [_,
+		   [_, _,
 		    #{used_credits :=
 			  [{3000,
 			    #{'Reporting-Reason' :=
 				  [?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_THRESHOLD']}}]},
-		    _, _]}, _}) ->
+		    _]}, _}) ->
 		  true;
 	     (_) ->
 		  false
@@ -2316,12 +2316,12 @@ volume_threshold(Config) ->
     CCRUvolqu =
 	lists:filter(
 	  fun({_, {smf_aaa_charging, gy_ccr_update,
-		   [_,
+		   [_, _,
 		    #{used_credits :=
 			  [{3000,
 			    #{'Reporting-Reason' :=
 				  [?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_QUOTA_EXHAUSTED']}}]},
-		    _, _]}, _}) ->
+		    _]}, _}) ->
 		  true;
 	     (_) ->
 		  false
@@ -2344,8 +2344,7 @@ gx_rar_gy_interaction(Config) ->
 
     ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
     {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
-    {ok, AAA} = smf_context:test_cmd(gtp, CtxKey, session),
-    SessionOpts = smf_aaa_session:get_session(AAA),
+    {ok, SessionOpts} = smf_context:test_cmd(gtp, CtxKey, session),
 
     {ok, #pfcp_ctx{timers = T1}} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
     ?equal(1, maps:size(T1)),
@@ -2370,8 +2369,7 @@ gx_rar_gy_interaction(Config) ->
     {ok, #pfcp_ctx{timers = T2}} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
     ?equal(2, maps:size(T2)),
 
-    {ok, AAA1} = smf_context:test_cmd(gtp, CtxKey, session),
-    SOpts1 = smf_aaa_session:get_session(AAA1),
+    {ok, SOpts1} = smf_context:test_cmd(gtp, CtxKey, session),
     RemoveCR =
 	[{pcc, remove, [#{'Charging-Rule-Name' => [<<"r-0002">>]}]}],
     Server ! AAAReq#aaa_request{session = SOpts1, events = RemoveCR},
@@ -2432,8 +2430,7 @@ gx_rar(Config) ->
 
     ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
     {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
-    {ok, AAA} = smf_context:test_cmd(gtp, CtxKey, session),
-    SessionOpts = smf_aaa_session:get_session(AAA),
+    {ok, SessionOpts} = smf_context:test_cmd(gtp, CtxKey, session),
 
     Self = self(),
     ResponseFun =
