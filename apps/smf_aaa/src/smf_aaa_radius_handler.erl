@@ -24,17 +24,14 @@
 %%===================================================================
 radius_request(#radius_request{cmd = discreq, attrs = Attrs} = Req, _NasProp, _Args) ->
     #{?Acct_Session_Id := HexSessionId} = maps:from_list([{Id, V} || {#attribute{id = Id}, V} <- Attrs]),
-    Cmd = case smf_aaa_session_reg:lookup(to_session_id(HexSessionId)) of
-        Session when is_pid(Session) ->
-                %% NOTE : Strictly speaking 'ASR' is a wrong name for radius disconnect.
-                %%        It may be considered in the future to rename the smf API to
-                %%        something more generic (which may require change in termination
-                %%        cause mapping as well).
-                smf_aaa_session:request(Session, smf_aaa_radius, {?API, 'ASR'}, #{}),
-                discack;
-        _ ->
-                discnak
-        end,
+    Cmd = case smf_aaa_session:send_request(
+		   smf_aaa_session_reg:lookup(to_session_id(HexSessionId)),
+		   smf_aaa_radius, {?API, 'ASR'}, #{}) of
+	      {{error, unknown_session}, _} ->
+		  discnak;
+	      _ ->
+		  discack
+	  end,
     {reply, Req#radius_request{cmd = Cmd}};
 
 radius_request(#radius_request{}, _NasProp, _Args) ->

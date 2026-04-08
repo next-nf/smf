@@ -31,7 +31,8 @@
 -export([new/1,
 	 call/4,        %% call(AAAState, SessionOpts, Procedure, Opts) -> {Result, AAAState, Events}
 	 handle_reply/4, %% handle_reply(Promise, Handler, Msg, AAAState) -> {AAAState, Events}
-	 complete_request/4, %% complete_request(Request, Result, Avps, AAAState) -> {Reply, AAAState}
+	 send_request/4,     %% send_request(Owner, Handler, Procedure, Avps) -> {Result, Avps} (blocking)
+	 aaa_reply/4,        %% aaa_reply(Request, Result, Avps, AAAState) -> ok
 	 get_session/1, set_session/2, merge_session/2,
 	 get_handler/2, set_handler/3,
 	 terminate_action/1]).
@@ -218,12 +219,40 @@ handle_reply(Promise, Handler, Msg, #aaa_state{handlers = HandlersS, session = S
     aaa_state_stats(Handler, State, StateOut),
     {AAA#aaa_state{handlers = maps:put(Handler, StateOut, HandlersS), session = SessOut}, EvsOut}.
 
-complete_request(#aaa_request{handler = Handler}, Result, Avps0,
-		 #aaa_state{session = Session0} = AAA) ->
-    Session = session_merge(Session0, #{}),
-    Avps = Handler:from_session(Session, Avps0),
-    Reply = {Result, Avps},
-    {Reply, AAA#aaa_state{session = Session}}.
+%% send_request/3 — for protocol handlers (diameter/radius callbacks).
+%% Sends #aaa_request{} to the GTP context (Owner) and blocks for reply.
+send_request(Owner, Handler, Procedure, Avps) when is_pid(Owner) ->
+    Ref = make_ref(),
+    Request = #aaa_request{
+		 from = {self(), Ref},
+		 handler = Handler,
+		 procedure = Procedure,
+		 session = Avps,
+		 events = []},
+    Owner ! Request,
+    receive
+	{Ref, Reply} -> Reply
+    after 10000 ->
+	    {{error, timeout}, #{}}
+    end;
+send_request(_, _Handler, _Procedure, _Avps) ->
+    {{error, unknown_session}, #{}}.
+
+%% aaa_reply/4 — for gtp_context to reply to server-initiated requests.
+%% Converts session data to wire AVPs and sends reply to the waiting handler.
+aaa_reply(#aaa_request{from = {Pid, Ref}, handler = Handler},
+	  Result, Avps, #aaa_state{session = Session}) ->
+    ReplyAvps = Handler:from_session(Session, Avps),
+    Pid ! {Ref, {Result, ReplyAvps}},
+    ok;
+aaa_reply(#aaa_request{from = Fun, handler = Handler} = Request, Result, Avps,
+	  #aaa_state{session = Session}) when is_function(Fun, 4) ->
+    ReplyAvps = case Handler of
+		    undefined -> Avps;
+		    _ -> Handler:from_session(Session, Avps)
+		end,
+    Fun(Request, Result, ReplyAvps, #{}),
+    ok.
 
 get_session(#aaa_state{session = Session}) -> Session.
 

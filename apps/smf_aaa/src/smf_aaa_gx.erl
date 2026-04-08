@@ -318,12 +318,8 @@ handle_cca(Answer, RC, _AVPs, Session, Events, _Opts, State)
 
 handle_common_request(Command, #{'Session-Id' := SessionId} = Avps, {_PeerRef, Caps}) ->
     {Result, ReplyAvps0} =
-	case smf_aaa_session_reg:lookup(SessionId) of
-	    Session when is_pid(Session) ->
-		smf_aaa_session:request(Session, ?MODULE, {?API, Command}, Avps);
-	    _ ->
-		{{error, unknown_session}, #{}}
-	end,
+	smf_aaa_session:send_request(
+	  smf_aaa_session_reg:lookup(SessionId), ?MODULE, {?API, Command}, Avps),
 
     #diameter_caps{origin_host = {OH,_},
 		   origin_realm = {OR,_},

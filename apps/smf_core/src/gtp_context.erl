@@ -475,16 +475,25 @@ handle_event(cast, {handle_response, ReqInfo, Request, Response0}, State,
 	    erlang:raise(Class, Reason, Stacktrace)
     end;
 
-handle_event(info, #aaa_request{procedure = {_, 'ASR'} = Procedure} = Request, State, Data) ->
-    smf_aaa_session:response(Request, ok, #{}, #{}),
+handle_event(info, #aaa_request{procedure = {_, 'ASR'} = Procedure} = Request,
+	     State, #{aaa := AAA} = Data) ->
+    smf_aaa_session:aaa_reply(Request, ok, #{}, AAA),
     delete_context(undefined, Procedure, State, Data);
 
 handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
-				events = Events} = Request,
+				handler = Handler, session = Avps,
+				events = ReqEvents} = Request,
 	     #{session := connected} = _State,
 	     #{context := Context, pfcp := PCtx0,
 	       left_tunnel := LeftTunnel, bearer := Bearer,
 	       aaa := AAA0, pcc := PCC0} = Data) ->
+    Events = case Handler of
+		 undefined -> ReqEvents;
+		 _ ->
+		     Session0 = smf_aaa_session:get_session(AAA0),
+		     {_, ToSessEvents} = Handler:to_session({gx, 'RAR'}, {Session0, []}, Avps),
+		     ReqEvents ++ ToSessEvents
+	     end,
 %%% 1. update PCC
 %%%    a) calculate PCC rules to be removed
 %%%    b) calculate PCC rules to be installed
@@ -542,13 +551,21 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
     %% TODO Charging-Rule-Report for successfully installed/removed rules
 
     GxReport = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors2 ++ PCCErrors4),
-    smf_aaa_session:response(Request, ok, GxReport, #{}),
+    smf_aaa_session:aaa_reply(Request, ok, GxReport, AAA3),
     {keep_state, Data#{pfcp := PCtx, pcc := PCC4, aaa := AAA3}};
 
 handle_event(info, #aaa_request{procedure = {gy, 'RAR'},
-				events = Events} = Request,
-	     #{session := connected} = _State, Data) ->
-    smf_aaa_session:response(Request, ok, #{}, #{}),
+				handler = Handler, session = Avps,
+				events = ReqEvents} = Request,
+	     #{session := connected} = _State, #{aaa := AAA0} = Data) ->
+    Events = case Handler of
+		 undefined -> ReqEvents;
+		 _ ->
+		     Session0 = smf_aaa_session:get_session(AAA0),
+		     {_, ToSessEvents} = Handler:to_session({gy, 'RAR'}, {Session0, []}, Avps),
+		     ReqEvents ++ ToSessEvents
+	     end,
+    smf_aaa_session:aaa_reply(Request, ok, #{}, AAA0),
     Now = erlang:monotonic_time(),
 
     %% Triggered CCR.....
@@ -560,12 +577,13 @@ handle_event(info, #aaa_request{procedure = {gy, 'RAR'},
 		undefined
 	end,
     {Data1, GyEvs1} = smf_gtp_gsn_lib:triggered_charging_event(interim, Now, ChargingKeys, Data),
-    Session1 = smf_aaa_session:get_session(maps:get(aaa, Data1)),
-    Actions1 = [{next_event, internal, {session, Ev, Session1}} || Ev <- GyEvs1],
+    Session2 = smf_aaa_session:get_session(maps:get(aaa, Data1)),
+    Actions1 = [{next_event, internal, {session, Ev, Session2}} || Ev <- GyEvs1],
     {keep_state, Data1, Actions1};
 
-handle_event(info, #aaa_request{procedure = {_, 'RAR'}} = Request, _State, _Data) ->
-    smf_aaa_session:response(Request, {error, unknown_session}, #{}, #{}),
+handle_event(info, #aaa_request{procedure = {_, 'RAR'}} = Request, _State,
+	     #{aaa := AAA}) ->
+    smf_aaa_session:aaa_reply(Request, {error, unknown_session}, #{}, AAA),
     keep_state_and_data;
 
 handle_event(info, {'$reply', Promise, Handler, Msg, _Opts}, _State,
