@@ -361,8 +361,8 @@ handle_event({call, From}, info, _, Data) ->
 
 handle_event({call, From}, {?TestCmdTag, pfcp_ctx}, _State, #{pfcp := PCtx}) ->
     {keep_state_and_data, [{reply, From, {ok, PCtx}}]};
-handle_event({call, From}, {?TestCmdTag, session}, _State, #{'Session' := Session}) ->
-    {keep_state_and_data, [{reply, From, {ok, Session}}]};
+handle_event({call, From}, {?TestCmdTag, session}, _State, #{aaa := AAA}) ->
+    {keep_state_and_data, [{reply, From, {ok, AAA}}]};
 handle_event({call, From}, {?TestCmdTag, pcc_rules}, _State, #{pcc := PCC}) ->
     {keep_state_and_data, [{reply, From, {ok, PCC#pcc_ctx.rules}}]};
 handle_event({call, From}, {?TestCmdTag, kill}, State, Data) ->
@@ -432,12 +432,12 @@ handle_event({call, From},
 	     {sx, #pfcp{type = session_report_request,
 			ie = #{report_type := #{'USAR' := _},
 			       usage_report_srr := UsageReport}}},
-	      _State, #{pfcp := PCtx, 'Session' := Session, pcc := PCC}) ->
+	      _State, #{pfcp := PCtx, aaa := AAA0, pcc := PCC} = Data) ->
     Now = erlang:monotonic_time(),
     ChargeEv = interim,
 
-    smf_gtp_gsn_session:usage_report_request(ChargeEv, Now, UsageReport, PCtx, PCC, Session),
-    {keep_state_and_data, [{reply, From, {ok, PCtx}}]};
+    AAA1 = smf_gtp_gsn_session:usage_report_request(ChargeEv, Now, UsageReport, PCtx, PCC, AAA0),
+    {keep_state, Data#{aaa := AAA1}, [{reply, From, {ok, PCtx}}]};
 
 handle_event(cast, {handle_message, Request, #gtp{} = Msg0, Resent}, State, Data) ->
     Msg = gtp_packet:decode_ies(Msg0),
@@ -481,7 +481,7 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 	     #{session := connected} = _State,
 	     #{context := Context, pfcp := PCtx0,
 	       left_tunnel := LeftTunnel, bearer := Bearer,
-	       'Session' := Session, pcc := PCC0} = Data) ->
+	       aaa := AAA0, pcc := PCC0} = Data) ->
 %%% 1. update PCC
 %%%    a) calculate PCC rules to be removed
 %%%    b) calculate PCC rules to be installed
@@ -519,11 +519,11 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
     {Online, Offline, Monitor} =
 	smf_pfcp_context:usage_report_to_charging_events(UsageReport, ChargeEv, PCtx1),
 
-    smf_gsn_lib:process_accounting_monitor_events(ChargeEv, Monitor, Now, Session),
+    AAA1 = smf_gsn_lib:process_accounting_monitor_events(ChargeEv, Monitor, Now, AAA0),
     GyReqServices = smf_pcc_context:gy_credit_request(Online, PCC0, PCC2),
-    {ok, _, GyEvs} =
-	smf_gsn_lib:process_online_charging_events(ChargeEv, GyReqServices, Session, ReqOps),
-    smf_gsn_lib:process_offline_charging_events(ChargeEv, Offline, Now, Session),
+    {AAA2, GyEvs} =
+	smf_gsn_lib:process_online_charging_events(ChargeEv, GyReqServices, AAA1, ReqOps),
+    AAA3 = smf_gsn_lib:process_offline_charging_events(ChargeEv, Offline, Now, AAA2),
 
 %%% step 5:
     {PCC4, PCCErrors4} = smf_pcc_context:gy_events_to_pcc_ctx(Now, GyEvs, PCC2),
@@ -540,7 +540,7 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 
     GxReport = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors2 ++ PCCErrors4),
     smf_aaa_session:response(Request, ok, GxReport, #{}),
-    {keep_state, Data#{pfcp := PCtx, pcc := PCC4}};
+    {keep_state, Data#{pfcp := PCtx, pcc := PCC4, aaa := AAA3}};
 
 handle_event(info, #aaa_request{procedure = {gy, 'RAR'},
 				events = Events} = Request,
@@ -556,12 +556,24 @@ handle_event(info, #aaa_request{procedure = {gy, 'RAR'},
 	    _ ->
 		undefined
 	end,
-    smf_gtp_gsn_lib:triggered_charging_event(interim, Now, ChargingKeys, Data),
-    keep_state_and_data;
+    Data1 = smf_gtp_gsn_lib:triggered_charging_event(interim, Now, ChargingKeys, Data),
+    {keep_state, Data1};
 
 handle_event(info, #aaa_request{procedure = {_, 'RAR'}} = Request, _State, _Data) ->
     smf_aaa_session:response(Request, {error, unknown_session}, #{}, #{}),
     keep_state_and_data;
+
+handle_event(info, {'$reply', Promise, Handler, Msg, _Opts}, _State,
+	     #{aaa := AAA0} = Data) ->
+    {AAA1, Events} = smf_aaa_session:handle_reply(Promise, Handler, Msg, AAA0),
+    case Events of
+	[] ->
+	    {keep_state, Data#{aaa := AAA1}};
+	_ ->
+	    Session = smf_aaa_session:get_session(AAA1),
+	    Actions = [{next_event, internal, {session, Ev, Session}} || Ev <- Events],
+	    {keep_state, Data#{aaa := AAA1}, Actions}
+    end;
 
 handle_event(info, {update_session, Session, Events}, _State, _Data) ->
     ?LOG(debug, "SessionEvents: ~p~n       Events: ~p", [Session, Events]),

@@ -459,28 +459,30 @@ charging_event_to_rf(URR, {_, Init}, Reason, {SDCs, TDVs}) ->
     {SDCs, [TDV|TDVs]}.
 
 %% process_online_charging_events/4
-process_online_charging_events(Reason, Request, Session, ReqOpts)
+process_online_charging_events(Reason, Request, AAA0, ReqOpts)
   when is_map(Request) ->
     Used = maps:get(used_credits, Request, #{}),
     Needed = maps:get(credits, Request, #{}),
     case Reason of
 	{terminate, Cause} ->
 	    TermReq = Request#{'Termination-Cause' => Cause},
-	    smf_aaa_session:invoke(Session, TermReq, {gy, 'CCR-Terminate'}, ReqOpts);
+	    {_, AAA1, Evs} = smf_aaa_session:call(AAA0, TermReq, {gy, 'CCR-Terminate'}, ReqOpts),
+	    {AAA1, Evs};
 	_ when map_size(Used) /= 0;
 	       map_size(Needed) /= 0 ->
-	    smf_aaa_session:invoke(Session, Request, {gy, 'CCR-Update'}, ReqOpts);
+	    {_, AAA1, Evs} = smf_aaa_session:call(AAA0, Request, {gy, 'CCR-Update'}, ReqOpts),
+	    {AAA1, Evs};
 	_ ->
-	    SOpts = smf_aaa_session:get(Session),
-	    {ok, SOpts, []}
+	    {AAA0, []}
     end.
 
 
-process_offline_charging_events(ChargeEv, Ev, Now, Session)
+process_offline_charging_events(ChargeEv, Ev, Now, AAA)
   when is_list(Ev) ->
-    process_offline_charging_events(ChargeEv, Ev, Now, smf_aaa_session:get(Session), Session).
+    SessionOpts = smf_aaa_session:get_session(AAA),
+    process_offline_charging_events(ChargeEv, Ev, Now, SessionOpts, AAA).
 
-process_offline_charging_events(ChargeEv0, Ev, Now, SessionOpts, Session)
+process_offline_charging_events(ChargeEv0, Ev, Now, SessionOpts, AAA0)
   when is_list(Ev) ->
     {Reason, _} = ChargeEv = update_offline_charging_event(Ev, ChargeEv0),
     Init = init_cev_from_session(Now, SessionOpts),
@@ -490,11 +492,13 @@ process_offline_charging_events(ChargeEv0, Ev, Now, SessionOpts, Session)
     Request = #{'service_data' => SDCs, 'traffic_data' => TDVs},
     case Reason of
 	terminate ->
-	    smf_aaa_session:invoke(Session, Request, {rf, 'Terminate'}, SOpts);
+	    {_, AAA1, _} = smf_aaa_session:call(AAA0, Request, {rf, 'Terminate'}, SOpts),
+	    AAA1;
 	_ when length(SDCs) /= 0; length(TDVs) /= 0 ->
-	    smf_aaa_session:invoke(Session, Request, {rf, 'Update'}, SOpts);
+	    {_, AAA1, _} = smf_aaa_session:call(AAA0, Request, {rf, 'Update'}, SOpts),
+	    AAA1;
 	_ ->
-	    ok
+	    AAA0
     end.
 
 accounting_session_time(Now, #{'Session-Start' := Start} = Update) ->
@@ -522,12 +526,12 @@ monitor_event_to_accounting(Now, #{'Level'      := 'IP-CAN',
 monitor_event_to_accounting(_Now, _Ev, Update) ->
     Update.
 
-process_accounting_monitor_events(Reason, Ev, Now, Session)
+process_accounting_monitor_events(Reason, Ev, Now, AAA0)
   when is_list(Ev) ->
     Keys = ['InPackets', 'OutPackets',
 	    'InOctets',  'OutOctets',
 	    'Session-Start'],
-    Update0 = maps:with(Keys, smf_aaa_session:get(Session)),
+    Update0 = maps:with(Keys, smf_aaa_session:get_session(AAA0)),
     Update1 = lists:foldl(monitor_event_to_accounting(Now, _, _), Update0, Ev),
     SOpts = #{now => Now, async => true},
 
@@ -536,12 +540,14 @@ process_accounting_monitor_events(Reason, Ev, Now, Session)
 	    Update2 = Update1#{'Termination-Cause' => Cause},
 	    Update3 = maps:remove('Session-Start', Update2),
 	    Update = accounting_session_time(Now, Update3),
-	    smf_aaa_session:invoke(Session, Update, stop, SOpts);
+	    {_, AAA1, _} = smf_aaa_session:call(AAA0, Update, stop, SOpts),
+	    AAA1;
 	_ when Update0 /= Update1 ->
 	    Update = maps:remove('Session-Start', Update1),
-	    smf_aaa_session:invoke(Session, Update, interim, SOpts);
+	    {_, AAA1, _} = smf_aaa_session:call(AAA0, Update, interim, SOpts),
+	    AAA1;
 	_ ->
-	    ok
+	    AAA0
     end.
 
 %% gy_credit_report/1

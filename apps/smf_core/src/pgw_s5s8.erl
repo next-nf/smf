@@ -101,11 +101,11 @@ validate_option(Opt, Value) ->
     gtp_context:validate_option(Opt, Value).
 
 init(_Opts, Data0) ->
-    {ok, Session} = smf_aaa_session_sup:new_session(self(), to_session([])),
-    SessionOpts = smf_aaa_session:get(Session),
+    AAA = smf_aaa_session:new(to_session([])),
+    SessionOpts = smf_aaa_session:get_session(AAA),
     OCPcfg = maps:get('Offline-Charging-Profile', SessionOpts, #{}),
     PCC = #pcc_ctx{offline_charging_profile = OCPcfg},
-    Data = Data0#{'Version' => v2, 'Session' => Session, pcc => PCC},
+    Data = Data0#{'Version' => v2, aaa => AAA, pcc => PCC},
     {ok, smf_context:init_state(), Data}.
 
 handle_event(Type, Content, State, #{'Version' := v1} = Data) ->
@@ -173,7 +173,7 @@ handle_request(ReqKey,
 	       _Resent, State,
 	       #{context := Context0, aaa_opts := AAAopts, node_selection := NodeSelect,
 		 left_tunnel := LeftTunnel0, bearer := #{left := LeftBearer0},
-		 'Session' := Session, pcc := PCC0} = Data) ->
+		 aaa := AAA0, pcc := PCC0} = Data) ->
     PeerUpNode =
 	case IEs of
 	    #{?'SGW-U node name' := #v2_fully_qualified_domain_name{fqdn = SGWuFQDN}} ->
@@ -211,8 +211,8 @@ handle_request(ReqKey,
     SessionOpts1 = init_session_from_gtp_req(IEs, AAAopts, LeftTunnel, LeftBearer1, SessionOpts0),
     %% SessionOpts = init_session_qos(ReqQoSProfile, SessionOpts1),
 
-    {Verdict, Cause, SessionOpts, Context, Bearer, PCC4, PCtx} =
-       case smf_gtp_gsn_lib:create_session(APN, pdn_alloc(PAA), DAF, UpSelInfo, Session,
+    {Verdict, Cause, SessionOpts, Context, Bearer, PCC4, PCtx, AAA} =
+       case smf_gtp_gsn_lib:create_session(APN, pdn_alloc(PAA), DAF, UpSelInfo, AAA0,
 					    SessionOpts1, Context1, LeftTunnel, LeftBearer1, PCC0) of
 	   {ok, Result} -> Result;
 	   {error, Err} -> throw(Err)
@@ -220,7 +220,7 @@ handle_request(ReqKey,
 
     FinalData =
 	Data#{context => Context, pfcp => PCtx, pcc => PCC4,
-	      left_tunnel => LeftTunnel, bearer => Bearer},
+	      left_tunnel => LeftTunnel, bearer => Bearer, aaa => AAA},
 
     ResponseIEs = create_session_response(Cause, SessionOpts, IEs, EBI, LeftTunnel, Bearer, Context),
     Response = response(create_session_response, LeftTunnel, ResponseIEs, Request),
@@ -247,8 +247,8 @@ handle_request(ReqKey,
 	       #{context := Context, pfcp := PCtx0,
 		 left_tunnel := LeftTunnelOld,
 		 bearer := #{left := LeftBearerOld} = Bearer0,
-		 'Session' := Session, pcc := PCC} = Data) ->
-    process_secondary_rat_usage_data_reports(IEs, Context, Session),
+		 aaa := AAA0, pcc := PCC} = Data) ->
+    process_secondary_rat_usage_data_reports(IEs, Context, AAA0),
 
     {LeftTunnel0, LeftBearer} =
 	case update_tunnel_from_gtp_req(
@@ -259,21 +259,20 @@ handle_request(ReqKey,
     Bearer = Bearer0#{left => LeftBearer},
 
     LeftTunnel = smf_gtp_gsn_lib:update_tunnel_endpoint(LeftTunnelOld, LeftTunnel0),
-    {OldSOpts, NewSOpts} = update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
-    URRActions = gtp_context:collect_charging_events(OldSOpts, NewSOpts),
-    PCtx =
+    {URRActions, AAA1} = update_session_from_gtp_req(IEs, AAA0, LeftTunnel, LeftBearer),
+    {PCtx, AAA2} =
 	if LeftBearer /= LeftBearerOld ->
 		SendEM = LeftTunnelOld#tunnel.version == LeftTunnel#tunnel.version,
 		case smf_gtp_gsn_lib:apply_bearer_change(
 		       Bearer, URRActions, SendEM, PCtx0, PCC) of
 		    {ok, {RPCtx, SessionInfo}} ->
-			smf_aaa_session:set(Session, SessionInfo),
-			RPCtx;
+			AAA1a = smf_aaa_session:set_session(SessionInfo, AAA1),
+			{RPCtx, AAA1a};
 		    {error, Err2} -> throw(Err2#ctx_err{context = Context, tunnel = LeftTunnel})
 		end;
 	   true ->
 		gtp_context:trigger_usage_report(self(), URRActions, PCtx0),
-		PCtx0
+		{PCtx0, AAA1}
 	end,
 
     ResponseIEs0 =
@@ -302,7 +301,7 @@ handle_request(ReqKey,
     Response = response(modify_bearer_response, LeftTunnel, ResponseIEs, Request),
     gtp_context:send_response(ReqKey, Request, Response),
 
-    DataNew = Data#{pfcp => PCtx, left_tunnel => LeftTunnel, bearer => Bearer},
+    DataNew = Data#{pfcp => PCtx, left_tunnel => LeftTunnel, bearer => Bearer, aaa => AAA2},
     Actions = context_idle_action([], Context),
     {keep_state, DataNew, Actions};
 
@@ -311,9 +310,9 @@ handle_request(ReqKey,
 	       _Resent, #{session := connected} = _State,
 	       #{context := Context, pfcp := PCtx,
 		 left_tunnel := LeftTunnelOld, bearer := #{left := LeftBearerOld},
-		 'Session' := Session} = Data)
+		 aaa := AAA0} = Data)
   when not is_map_key(?'Bearer Contexts to be modified', IEs) ->
-    process_secondary_rat_usage_data_reports(IEs, Context, Session),
+    process_secondary_rat_usage_data_reports(IEs, Context, AAA0),
 
     {LeftTunnel0, LeftBearer} =
 	case update_tunnel_from_gtp_req(
@@ -323,15 +322,14 @@ handle_request(ReqKey,
 	end,
 
     LeftTunnel = smf_gtp_gsn_lib:update_tunnel_endpoint(LeftTunnelOld, LeftTunnel0),
-    {OldSOpts, NewSOpts} = update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
-    URRActions = gtp_context:collect_charging_events(OldSOpts, NewSOpts),
+    {URRActions, AAA1} = update_session_from_gtp_req(IEs, AAA0, LeftTunnel, LeftBearer),
     gtp_context:trigger_usage_report(self(), URRActions, PCtx),
 
     ResponseIEs = [#v2_cause{v2_cause = request_accepted}],
     Response = response(modify_bearer_response, LeftTunnel, ResponseIEs, Request),
     gtp_context:send_response(ReqKey, Request, Response),
 
-    DataNew = Data#{pfcp => PCtx, left_tunnel => LeftTunnel},
+    DataNew = Data#{pfcp => PCtx, left_tunnel => LeftTunnel, aaa => AAA1},
     Actions = context_idle_action([], Context),
     {keep_state, DataNew, Actions};
 
@@ -344,8 +342,9 @@ handle_request(#request{src = Src, ip = IP, port = Port} = ReqKey,
 				   group = #{?'EPS Bearer ID' := EBI} = Bearer}} = IEs},
 	       _Resent, #{session := connected},
 	       #{context := Context, left_tunnel := LeftTunnel,
-		 bearer := #{left := LeftBearer}, 'Session' := Session} = Data) ->
-    {OldSOpts, _} = update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
+		 bearer := #{left := LeftBearer}, aaa := AAA0} = Data) ->
+    OldSOpts = smf_aaa_session:get_session(AAA0),
+    {_URRActions, AAA1} = update_session_from_gtp_req(IEs, AAA0, LeftTunnel, LeftBearer),
 
     Type = update_bearer_request,
     RequestIEs0 =
@@ -358,17 +357,16 @@ handle_request(#request{src = Src, ip = IP, port = Port} = ReqKey,
       LeftTunnel, Src, IP, Port, ?T3, ?N3, Msg#gtp{seq_no = SeqNo}, {ReqKey, OldSOpts}),
 
     Actions = context_idle_action([], Context),
-    {keep_state, Data, Actions};
+    {keep_state, Data#{aaa => AAA1}, Actions};
 
 handle_request(ReqKey,
 	       #gtp{type = change_notification_request, ie = IEs} = Request,
 	       _Resent, #{session := connected} = _State,
 	       #{context := Context, pfcp := PCtx, left_tunnel := LeftTunnel,
-		 bearer := #{left := LeftBearer}, 'Session' := Session}) ->
-    process_secondary_rat_usage_data_reports(IEs, Context, Session),
+		 bearer := #{left := LeftBearer}, aaa := AAA0} = Data) ->
+    process_secondary_rat_usage_data_reports(IEs, Context, AAA0),
 
-    {OldSOpts, NewSOpts} = update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
-    URRActions = gtp_context:collect_charging_events(OldSOpts, NewSOpts),
+    {URRActions, AAA1} = update_session_from_gtp_req(IEs, AAA0, LeftTunnel, LeftBearer),
     gtp_context:trigger_usage_report(self(), URRActions, PCtx),
 
     ResponseIEs0 = [#v2_cause{v2_cause = request_accepted}],
@@ -377,7 +375,7 @@ handle_request(ReqKey,
     gtp_context:send_response(ReqKey, Request, Response),
 
     Actions = context_idle_action([], Context),
-    {keep_state_and_data, Actions};
+    {keep_state, Data#{aaa => AAA1}, Actions};
 
 handle_request(ReqKey,
 	       #gtp{type = suspend_notification} = Request,
@@ -404,12 +402,12 @@ handle_request(ReqKey,
 handle_request(ReqKey,
 	       #gtp{type = delete_session_request, ie = IEs} = Request,
 	       _Resent, #{session := connected} = State,
-	       #{context := Context, left_tunnel := LeftTunnel, 'Session' := Session} = Data0) ->
+	       #{context := Context, left_tunnel := LeftTunnel, aaa := AAA0} = Data0) ->
     FqTEID = maps:get(?'Sender F-TEID for Control Plane', IEs, undefined),
 
     case match_tunnel(?'S5/S8-C SGW', LeftTunnel, FqTEID) of
 	ok ->
-	    process_secondary_rat_usage_data_reports(IEs, Context, Session),
+	    process_secondary_rat_usage_data_reports(IEs, Context, AAA0),
 	    Data = smf_gtp_gsn_lib:close_context(?API, normal, Data0),
 	    Response = response(delete_session_response, LeftTunnel, request_accepted),
 	    gtp_context:send_response(ReqKey, Request, Response),
@@ -437,14 +435,15 @@ handle_response({CommandReqKey, OldSOpts},
 				  }} = IEs},
 		_Request, #{session := connected} = State,
 		#{pfcp := PCtx, left_tunnel := LeftTunnel, bearer := #{left := LeftBearer},
-		  'Session' := Session} = Data) ->
+		  aaa := AAA0} = Data) ->
     gtp_context:request_finished(CommandReqKey),
 
     if Cause =:= request_accepted andalso BearerCause =:= request_accepted ->
-	    {_, NewSOpts} = update_session_from_gtp_req(IEs, Session, LeftTunnel, LeftBearer),
+	    {_URRActions, AAA1} = update_session_from_gtp_req(IEs, AAA0, LeftTunnel, LeftBearer),
+	    NewSOpts = smf_aaa_session:get_session(AAA1),
 	    URRActions = gtp_context:collect_charging_events(OldSOpts, NewSOpts),
 	    gtp_context:trigger_usage_report(self(), URRActions, PCtx),
-	    {keep_state, Data};
+	    {keep_state, Data#{aaa => AAA1}};
        true ->
 	    ?LOG(error, "Update Bearer Request failed with ~p/~p",
 			[Cause, BearerCause]),
@@ -469,8 +468,8 @@ handle_response({From, TermCause},
 		#gtp{type = delete_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = RespCause}} = IEs},
 		_Request, State,
-		#{context := Context, 'Session' := Session} = Data0) ->
-    process_secondary_rat_usage_data_reports(IEs, Context, Session),
+		#{context := Context, aaa := AAA0} = Data0) ->
+    process_secondary_rat_usage_data_reports(IEs, Context, AAA0),
     Data = smf_gtp_gsn_lib:close_context(?API, TermCause, Data0),
     if is_tuple(From) -> gen_statem:reply(From, {ok, RespCause});
        true -> ok
@@ -774,11 +773,11 @@ sec_rat_udr_to_report([H|T], Ctx, Reports) ->
     sec_rat_udr_to_report(H, Ctx, sec_rat_udr_to_report(T, Ctx, Reports)).
 
 process_secondary_rat_usage_data_reports(#{?'Secondary RAT Usage Data Report' := SecRatUDR},
-					 Context, Session) ->
+					 Context, AAA) ->
     Report =
 	#{'RAN-Secondary-RAT-Usage-Report' =>
 	      sec_rat_udr_to_report(SecRatUDR, Context, [])},
-    smf_aaa_session:invoke(Session, Report, {rf, 'Update'}, #{async => false}),
+    {_, _AAA1, _Events} = smf_aaa_session:call(AAA, Report, {rf, 'Update'}, #{async => false}),
     ok;
 process_secondary_rat_usage_data_reports(_, _, _) ->
     ok.
@@ -790,16 +789,17 @@ init_session_from_gtp_req(IEs, AAAopts, Tunnel, Bearer, Session0)
     Session = copy_bearer_to_session(Bearer, Session2),
     maps:fold(copy_to_session(_, _, AAAopts, _), Session, IEs).
 
-update_session_from_gtp_req(IEs, Session, Tunnel, Bearer)
+update_session_from_gtp_req(IEs, AAA0, Tunnel, Bearer)
   when is_record(Tunnel, tunnel) ->
-    OldSOpts = smf_aaa_session:get(Session),
+    OldSOpts = smf_aaa_session:get_session(AAA0),
     NewSOpts0 = copy_qos_to_session(IEs, OldSOpts),
     NewSOpts1 = copy_tunnel_to_session(Tunnel, NewSOpts0),
     NewSOpts2 = copy_bearer_to_session(Bearer, NewSOpts1),
     NewSOpts =
 	maps:fold(copy_to_session(_, _, undefined, _), NewSOpts2, IEs),
-    smf_aaa_session:set(Session, NewSOpts),
-    {OldSOpts, NewSOpts}.
+    AAA1 = smf_aaa_session:set_session(NewSOpts, AAA0),
+    URRActions = gtp_context:collect_charging_events(OldSOpts, NewSOpts),
+    {URRActions, AAA1}.
 
 get_context_from_bearer(?'EPS Bearer ID', #v2_eps_bearer_id{eps_bearer_id = EBI},
 			#context{default_bearer_id = undefined} = Context) ->
