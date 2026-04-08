@@ -1798,12 +1798,12 @@ volume_threshold(Config) ->
     CCRUvolth =
 	lists:filter(
 	  fun({_, {smf_aaa_charging, gy_ccr_update,
-		   [_,
+		   [_, _,
 		    #{used_credits :=
 			  [{3000,
 			    #{'Reporting-Reason' :=
 				  [?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_THRESHOLD']}}]},
-		    _, _]}, _}) ->
+		    _]}, _}) ->
 		  true;
 	     (_) ->
 		  false
@@ -1813,12 +1813,12 @@ volume_threshold(Config) ->
     CCRUvolqu =
 	lists:filter(
 	  fun({_, {smf_aaa_charging, gy_ccr_update,
-		   [_,
+		   [_, _,
 		    #{used_credits :=
 			  [{3000,
 			    #{'Reporting-Reason' :=
 				  [?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_QUOTA_EXHAUSTED']}}]},
-		    _, _]}, _}) ->
+		    _]}, _}) ->
 		  true;
 	     (_) ->
 		  false
