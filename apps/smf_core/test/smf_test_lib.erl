@@ -343,8 +343,9 @@ validate_charging_options(rulebase, RuleBase) ->
 %%%===================================================================
 
 meck_modules() ->
-    [smf_sx_socket, smf_gtp_c_socket, smf_aaa_session, smf_gsn_lib,
-     smf_pfcp_context, gtp_context].
+    [smf_sx_socket, smf_gtp_c_socket, smf_aaa_session,
+     smf_aaa_pcf, smf_aaa_charging, smf_aaa_auth,
+     smf_gsn_lib, smf_pfcp_context, gtp_context].
 
 meck_init_hut_handle_request(Hut) ->
     meck:expect(Hut, handle_request,

@@ -30,27 +30,18 @@
 
 %% Per-protocol context records
 -record(pcf_ctx, {
-		  handler       :: atom(),
-		  handler_state :: term(),
-		  app_id        :: atom(),
-		  service       :: binary() | undefined
+		  app_id   :: atom(),
+		  handlers = #{} :: #{atom() => term()}
 		 }).
 
 -record(charging_ctx, {
-		       gy_handler       :: atom(),
-		       gy_handler_state :: term(),
-		       rf_handler       :: atom(),
-		       rf_handler_state :: term(),
-		       app_id           :: atom(),
-		       gy_service       :: binary() | undefined,
-		       rf_service       :: binary() | undefined
+		       app_id   :: atom(),
+		       handlers = #{} :: #{atom() => term()}
 		      }).
 
 -record(aaa_auth_ctx, {
-		       handler       :: atom(),
-		       handler_state :: term(),
-		       app_id        :: atom(),
-		       service       :: binary() | undefined
+		       app_id   :: atom(),
+		       handlers = #{} :: #{atom() => term()}
 		      }).
 
 -record(diam_call,{

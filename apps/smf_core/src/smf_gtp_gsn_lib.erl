@@ -10,7 +10,7 @@
 -compile([{parse_transform, do},
 	  {parse_transform, cut}]).
 
--export([connect_upf_candidates/4, create_session/10]).
+-export([connect_upf_candidates/4, create_session/13]).
 -export([triggered_charging_event/4, usage_report/3, close_context/3, close_context/4]).
 -export([update_tunnel_endpoint/2,
 	 apply_bearer_change/5]).
@@ -34,15 +34,17 @@ connect_upf_candidates(APN, Services, NodeSelect, PeerUpNode) ->
 
     {ok, {Candidates, SxConnectId}}.
 
-create_session(APN, PAA, DAF, UPSelInfo, AAA, SessionOpts, Context, LeftTunnel, LeftBearer, PCC) ->
+create_session(APN, PAA, DAF, UPSelInfo, Session, PCF, Charging, Auth,
+	       SessionOpts, Context, LeftTunnel, LeftBearer, PCC) ->
     try
-	{ok, create_session_fun(APN, PAA, DAF, UPSelInfo, AAA, SessionOpts, Context, LeftTunnel, LeftBearer, PCC)}
+	{ok, create_session_fun(APN, PAA, DAF, UPSelInfo, Session, PCF, Charging, Auth,
+				SessionOpts, Context, LeftTunnel, LeftBearer, PCC)}
     catch
 	throw:Error ->
 	    {error, Error}
     end.
 
-create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, AAA0,
+create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Charging0, Auth0,
 		   SessionOpts0, Context0, LeftTunnel, LeftBearer, PCC0) ->
 
     smf_sx_node:wait_connect(SxConnectId),
@@ -59,20 +61,20 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, AAA0,
 	    {error, Err3} -> throw(Err3#ctx_err{context = Context0, tunnel = LeftTunnel})
 	end,
 
-    {SessionOpts2, AuthSEvs, AAA1} =
-	case smf_gtp_gsn_session:authenticate(AAA0, SessionOpts1) of
+    {Session1, AuthSEvs, Auth1} =
+	case smf_gtp_gsn_session:authenticate(Auth0, Session0, SessionOpts1) of
 	    {ok, Result4} -> Result4;
 	    {error, Err4} -> throw(Err4#ctx_err{context = Context0, tunnel = LeftTunnel})
 	end,
 
     {PCtx0, NodeCaps, RightBearer0} =
-	case smf_pfcp_context:reselect_upf(Candidates, SessionOpts2, APNOpts, UPinfo) of
+	case smf_pfcp_context:reselect_upf(Candidates, Session1, APNOpts, UPinfo) of
 	    {ok, Result5} -> Result5;
 	    {error, Err5} -> throw(Err5#ctx_err{context = Context0, tunnel = LeftTunnel})
 	end,
 
     {Result6, {Cause, SessionOpts3, RightBearer, Context1}} =
-	smf_gsn_lib:allocate_ips(PAA, APNOpts, SessionOpts2, DAF, LeftTunnel, RightBearer0, Context0),
+	smf_gsn_lib:allocate_ips(PAA, APNOpts, Session1, DAF, LeftTunnel, RightBearer0, Context0),
     case Result6 of
 	ok -> ok;
 	{error, Err6} -> throw(Err6#ctx_err{context = Context1, tunnel = LeftTunnel})
@@ -87,7 +89,7 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, AAA0,
 	    {error, Err7} -> throw(Err7#ctx_err{context = Context, tunnel = LeftTunnel})
 	end,
 
-    AAA2 = smf_aaa_session:set_session(SessionOpts3, AAA1),
+    Session2 = maps:merge(Session1, SessionOpts3),
 
     Now = erlang:monotonic_time(),
     SOpts = #{now => Now},
@@ -95,8 +97,8 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, AAA0,
     GxOpts = #{'Event-Trigger' => ?'DIAMETER_GX_EVENT-TRIGGER_UE_IP_ADDRESS_ALLOCATE',
 	       'Bearer-Operation' => ?'DIAMETER_GX_BEARER-OPERATION_ESTABLISHMENT'},
 
-    {_, GxEvents, AAA3} =
-	case smf_gtp_gsn_session:ccr_initial(AAA2, gx, GxOpts, SOpts) of
+    {_, GxEvents, PCF1} =
+	case smf_gtp_gsn_session:ccr_initial_gx(PCF0, Session2, GxOpts, SOpts) of
 	    {ok, Result8} -> Result8;
 	    {error, Err8} -> throw(Err8#ctx_err{context = Context, tunnel = LeftTunnel})
 	end,
@@ -115,15 +117,16 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, AAA0,
     CreditsAdd = smf_pcc_context:pcc_ctx_to_credit_request(PCC1),
     GyReqServices = #{credits => CreditsAdd},
 
-    {_GySessionOpts, GyEvs, AAA4} =
-	case smf_gtp_gsn_session:ccr_initial(AAA3, gy, GyReqServices, SOpts) of
+    {_GySession, GyEvs, Charging1} =
+	case smf_gtp_gsn_session:ccr_initial_gy(Charging0, Session2, GyReqServices, SOpts) of
 	    {ok, Result9} -> Result9;
 	    {error, Err9} -> throw(Err9#ctx_err{context = Context, tunnel = LeftTunnel})
 	end,
 
     ?LOG(debug, "Initial GyEvs: ~p", [GyEvs]),
 
-    {ok, AAA5, RfSEvs} = smf_aaa_session:call(AAA4, #{}, {rf, 'Initial'}, SOpts),
+    {ok, Charging2, Session3, RfSEvs} =
+	smf_aaa_charging:rf_initial(Charging1, Session2, #{}, SOpts),
 
     {PCC2, PCCErrors2} = smf_pcc_context:gy_events_to_pcc_ctx(Now, GyEvs, PCC1),
     PCC3 = smf_pcc_context:session_events_to_pcc_ctx(AuthSEvs, PCC2),
@@ -136,24 +139,28 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, AAA0,
 	   end,
 
     SessionOpts = maps:merge(SessionOpts3, SessionInfo),
-    {_, AAA6, _} = smf_aaa_session:call(AAA5, SessionOpts, start, SOpts#{async => true}),
+    Session4 = maps:merge(Session3, SessionOpts),
+    {_, Auth2, Session5, _} = smf_aaa_auth:start(Auth1, Session4, SessionOpts, SOpts#{async => true}),
 
     GxReport = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors1 ++ PCCErrors2),
-    AAA7 = if map_size(GxReport) /= 0 ->
-		   {_, AAA6a, _} = smf_aaa_session:call(AAA6, GxReport,
-							  {gx, 'CCR-Update'}, SOpts#{async => true}),
-		   AAA6a;
-	       true ->
-		   AAA6
-	   end,
+    {PCF2, Session6} =
+	if map_size(GxReport) /= 0 ->
+	       {ok, PCF1a, Session5a, _} =
+		   smf_aaa_pcf:ccr_update(PCF1, Session5, GxReport, SOpts#{async => true}),
+	       {PCF1a, Session5a};
+	   true ->
+	       {PCF1, Session5}
+	end,
 
     case gtp_context:remote_context_register_new(LeftTunnel, Bearer, Context) of
 	ok ->
-	    {ok, Cause, SessionOpts, Context, Bearer, PCC4, PCtx, AAA7};
+	    {ok, Cause, SessionOpts, Context, Bearer, PCC4, PCtx,
+	     Session6, PCF2, Charging2, Auth2};
 	{error, #ctx_err{level = Level, where = {File, Line}}} ->
 	    ?LOG(debug, #{type => ctx_err, level => Level, file => File,
 			  line => Line, reply => system_failure}),
-	    {error, system_failure, SessionOpts, Context, Bearer, PCC4, PCtx, AAA7}
+	    {error, system_failure, SessionOpts, Context, Bearer, PCC4, PCtx,
+	     Session6, PCF2, Charging2, Auth2}
     end.
 
 
@@ -210,21 +217,23 @@ apply_bearer_change(Bearer, URRActions, SendEM, PCtx0, PCC) ->
 %%====================================================================
 
 triggered_charging_event(ChargeEv, Now, Request,
-			 #{pfcp := PCtx, aaa := AAA0, pcc := PCC} = Data) ->
+			 #{pfcp := PCtx, aaa_session := S0, pcf := _PCF,
+			   charging := C0, aaa_auth := A0, pcc := PCC} = Data) ->
     case query_usage_report(Request, PCtx) of
 	{ok, {_, UsageReport, _}} ->
-	    {AAA1, GyEvs} = smf_gtp_gsn_session:usage_report_request(
-			      ChargeEv, Now, UsageReport, PCtx, PCC, AAA0),
-	    {Data#{aaa := AAA1}, GyEvs};
+	    {S1, C1, A1, GyEvs} = smf_gtp_gsn_session:usage_report_request(
+				     ChargeEv, Now, UsageReport, PCtx, PCC,
+				     S0, C0, A0),
+	    {Data#{aaa_session := S1, charging := C1, aaa_auth := A1}, GyEvs};
 	{error, CtxErr} ->
 	    ?LOG(error, "Triggered Charging Event failed with ~p", [CtxErr]),
 	    {Data, []}
     end.
 
-usage_report(URRActions, UsageReport, #{pfcp := PCtx, aaa := AAA0} = Data) ->
-    AAA1 = smf_gtp_gsn_session:usage_report(URRActions, UsageReport, PCtx, AAA0),
-    Data#{aaa := AAA1};
-usage_report(_URRActions, _UsageReport, #{aaa := _} = Data) ->
+usage_report(URRActions, UsageReport, #{pfcp := PCtx, aaa_session := S0, charging := C0} = Data) ->
+    {S1, C1} = smf_gtp_gsn_session:usage_report(URRActions, UsageReport, PCtx, {S0, C0}),
+    Data#{aaa_session := S1, charging := C1};
+usage_report(_URRActions, _UsageReport, #{aaa_session := _} = Data) ->
     ?LOG(info, "PFCP Usage Report after PFCP context closure"),
     Data.
 
@@ -240,11 +249,15 @@ close_context(_API, _TermCause, Data) ->
     Data.
 
 %% close_context/4
-close_context(API, TermCause, UsageReport, #{pfcp := PCtx, aaa := AAA0} = Data)
+close_context(API, TermCause, UsageReport,
+	      #{pfcp := PCtx, aaa_session := S0,
+		pcf := PCF0, charging := C0, aaa_auth := A0} = Data)
   when is_atom(TermCause) ->
-    AAA1 = smf_gtp_gsn_session:close_context(TermCause, UsageReport, PCtx, AAA0),
+    {S1, PCF1, C1, A1} =
+	smf_gtp_gsn_session:close_context(TermCause, UsageReport, PCtx,
+					   S0, PCF0, C0, A0),
     smf_prometheus:termination_cause(API, TermCause),
-    maps:remove(pfcp, Data#{aaa := AAA1}).
+    maps:remove(pfcp, Data#{aaa_session := S1, pcf := PCF1, charging := C1, aaa_auth := A1}).
 
 %%====================================================================
 %% Helper

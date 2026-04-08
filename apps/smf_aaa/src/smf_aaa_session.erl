@@ -28,7 +28,8 @@
 	 handle_handler_reply/5,
 	 session_merge/2,
 	 update_accounting_state/3,
-	 prepare_next_session_id/1]).
+	 prepare_next_session_id/1,
+	 get_services/2]).
 
 %% Event helpers
 -export([ev_add/2, ev_del/2, ev_set/2]).
@@ -126,13 +127,16 @@ send_request(_, _Handler, _Procedure, _Avps) ->
     {{error, unknown_session}, #{}}.
 
 %% aaa_reply/4 — for gtp_context to reply to server-initiated requests.
+%% Accepts either #aaa_state{} or a plain session map.
+aaa_reply(Request, Result, Avps, #aaa_state{session = Session}) ->
+    aaa_reply(Request, Result, Avps, Session);
 aaa_reply(#aaa_request{from = {Pid, Ref}, handler = Handler},
-	  Result, Avps, #aaa_state{session = Session}) ->
+	  Result, Avps, Session) when is_map(Session) ->
     ReplyAvps = Handler:from_session(Session, Avps),
     Pid ! {Ref, {Result, ReplyAvps}},
     ok;
 aaa_reply(#aaa_request{from = Fun, handler = Handler} = Request, Result, Avps,
-	  #aaa_state{session = Session}) when is_function(Fun, 4) ->
+	  Session) when is_map(Session), is_function(Fun, 4) ->
     ReplyAvps = case Handler of
 		    undefined -> Avps;
 		    _ -> Handler:from_session(Session, Avps)
@@ -273,7 +277,7 @@ update_accounting_state(stop, Session, #{now := Now}) ->
 update_accounting_state(_Procedure, Session, _Opts) ->
     Session.
 
-services(Procedure, App)
+get_services(Procedure, App)
   when Procedure =:= init;
        Procedure =:= terminate ->
     Procedures =
@@ -287,12 +291,12 @@ services(Procedure, App)
       fun(_, #{service := Svc} = V, S) ->
 	      [maps:merge(smf_aaa:get_service(Svc), V) | S]
       end, Session, maps:without(Keys, Procedures));
-services(Procedure, App) ->
+get_services(Procedure, App) ->
     maps:get(Procedure, App, []).
 
 action(Procedure, Opts, #aaa_state{application = AppId} = AAA) ->
     #{procedures := Procedures} = smf_aaa:get_application(AppId),
-    Pipeline = services(Procedure, Procedures),
+    Pipeline = get_services(Procedure, Procedures),
     pipeline(Procedure, AAA, [], Opts, Pipeline).
 
 pipeline(_, AAA, Events, _Opts, []) ->

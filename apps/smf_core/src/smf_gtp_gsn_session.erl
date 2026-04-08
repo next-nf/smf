@@ -10,11 +10,12 @@
 -compile([{parse_transform, do},
 	  {parse_transform, cut}]).
 
--export([authenticate/2,
-	 ccr_initial/4,
-	 usage_report_request/6,
+-export([authenticate/3,
+	 ccr_initial_gx/4,
+	 ccr_initial_gy/4,
+	 usage_report_request/8,
 	 usage_report/4,
-	 close_context/4]).
+	 close_context/7]).
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("gtplib/include/gtp_packet.hrl").
@@ -24,69 +25,78 @@
 -include_lib("smf_aaa/include/smf_aaa_session.hrl").
 -include("include/smf.hrl").
 
-authenticate(AAA0, SessionOpts) ->
+authenticate(Auth0, Session0, SessionOpts) ->
     ?LOG(debug, "SessionOpts: ~p", [SessionOpts]),
-    case smf_aaa_session:call(AAA0, SessionOpts, authenticate, [inc_session_id]) of
-	{ok, AAA1, SEvs} ->
-	    SOpts = smf_aaa_session:get_session(AAA1),
-	    {ok, {SOpts, SEvs, AAA1}};
+    case smf_aaa_auth:authenticate(Auth0, Session0, SessionOpts, [inc_session_id]) of
+	{ok, Auth1, Session1, SEvs} ->
+	    {ok, {Session1, SEvs, Auth1}};
 	Other ->
 	    ?LOG(debug, "AuthResult: ~p", [Other]),
 	    {error, ?CTX_ERR(?FATAL, user_authentication_failed)}
     end.
 
-ccr_initial(AAA0, API, SessionOpts, ReqOpts) ->
-    case smf_aaa_session:call(AAA0, SessionOpts, {API, 'CCR-Initial'}, ReqOpts) of
-	{ok, AAA1, SEvs} ->
-	    SOpts = smf_aaa_session:get_session(AAA1),
-	    {ok, {SOpts, SEvs, AAA1}};
-	{_Fail, _, _} ->
-	    %% TBD: replace with sensible mapping
+ccr_initial_gx(PCF0, Session0, SessionOpts, ReqOpts) ->
+    case smf_aaa_pcf:ccr_initial(PCF0, Session0, SessionOpts, ReqOpts) of
+	{ok, PCF1, Session1, SEvs} ->
+	    {ok, {Session1, SEvs, PCF1}};
+	{_Fail, _, _, _} ->
+	    {error, ?CTX_ERR(?FATAL, system_failure)}
+    end.
+
+ccr_initial_gy(C0, Session0, SessionOpts, ReqOpts) ->
+    case smf_aaa_charging:gy_ccr_initial(C0, Session0, SessionOpts, ReqOpts) of
+	{ok, C1, Session1, SEvs} ->
+	    {ok, {Session1, SEvs, C1}};
+	{_Fail, _, _, _} ->
 	    {error, ?CTX_ERR(?FATAL, system_failure)}
     end.
 
 
-usage_report_request(ChargeEv, Now, UsageReport, PCtx, PCC, AAA0) ->
+usage_report_request(ChargeEv, Now, UsageReport, PCtx, PCC,
+		     Session0, Charging0, Auth0) ->
     ReqOpts = #{now => Now, async => true},
 
     {Online, Offline, Monitor} =
 	smf_pfcp_context:usage_report_to_charging_events(UsageReport, ChargeEv, PCtx),
-    AAA1 = smf_gsn_lib:process_accounting_monitor_events(ChargeEv, Monitor, Now, AAA0),
+    {Auth1, Session1} = smf_gsn_lib:process_accounting_monitor_events(ChargeEv, Monitor, Now, Auth0, Session0),
     GyReqServices = smf_pcc_context:gy_credit_request(Online, PCC),
-    {AAA2, GyEvs} = smf_gsn_lib:process_online_charging_events(ChargeEv, GyReqServices, AAA1, ReqOpts),
-    AAA3 = smf_gsn_lib:process_offline_charging_events(ChargeEv, Offline, Now, AAA2),
-    {AAA3, GyEvs}.
+    {Charging1, Session2, GyEvs} = smf_gsn_lib:process_online_charging_events(ChargeEv, GyReqServices, Charging0, Session1, ReqOpts),
+    {Charging2, Session3} = smf_gsn_lib:process_offline_charging_events(ChargeEv, Offline, Now, Charging1, Session2),
+    {Session3, Charging2, Auth1, GyEvs}.
 
-usage_report(URRActions, UsageReport, PCtx, AAA0) ->
+usage_report(URRActions, UsageReport, PCtx, {Session0, Charging0}) ->
     Now = erlang:monotonic_time(),
     case proplists:get_value(offline, URRActions) of
 	{ChargeEv, OldS} ->
 	    {_Online, Offline, _} =
 		smf_pfcp_context:usage_report_to_charging_events(UsageReport, ChargeEv, PCtx),
-	    smf_gsn_lib:process_offline_charging_events(ChargeEv, Offline, Now, OldS, AAA0);
+	    {Charging1, Session1} = smf_gsn_lib:process_offline_charging_events(ChargeEv, Offline, Now, OldS, Charging0, Session0),
+	    {Session1, Charging1};
 	_ ->
-	    AAA0
+	    {Session0, Charging0}
     end.
 
-close_context(Reason, UsageReport, PCtx, AAA0) ->
+close_context(Reason, UsageReport, PCtx, Session0, PCF0, Charging0, Auth0) ->
     %% TODO: Monitors, AAA over SGi
 
     %%  1. CCR on Gx to get PCC rules
     Now = erlang:monotonic_time(),
     ReqOpts = #{now => Now, async => true},
-    AAA1 = case smf_aaa_session:call(AAA0, #{}, {gx, 'CCR-Terminate'}, ReqOpts#{async => false}) of
-	{ok, AAA0a, _} ->
-	    ?LOG(debug, "Gx terminate succeeded"),
-	    AAA0a;
-	GxOther ->
-	    ?LOG(warning, "Gx terminate failed with: ~p", [GxOther]),
-	    AAA0
-    end,
+    {PCF1, Session1} =
+	case smf_aaa_pcf:ccr_terminate(PCF0, Session0, #{}, ReqOpts#{async => false}) of
+	    {ok, PCF0a, Session0a, _} ->
+		?LOG(debug, "Gx terminate succeeded"),
+		{PCF0a, Session0a};
+	    _ ->
+		?LOG(warning, "Gx terminate failed"),
+		{PCF0, Session0}
+	end,
 
     ChargeEv = {terminate, Reason},
     {Online, Offline, Monitor} =
 	smf_pfcp_context:usage_report_to_charging_events(UsageReport, ChargeEv, PCtx),
-    AAA2 = smf_gsn_lib:process_accounting_monitor_events(ChargeEv, Monitor, Now, AAA1),
+    {Auth1, Session2} = smf_gsn_lib:process_accounting_monitor_events(ChargeEv, Monitor, Now, Auth0, Session1),
     GyReqServices = smf_gsn_lib:gy_credit_report(Online),
-    {AAA3, _} = smf_gsn_lib:process_online_charging_events(ChargeEv, GyReqServices, AAA2, ReqOpts),
-    smf_gsn_lib:process_offline_charging_events(ChargeEv, Offline, Now, AAA3).
+    {Charging1, Session3, _} = smf_gsn_lib:process_online_charging_events(ChargeEv, GyReqServices, Charging0, Session2, ReqOpts),
+    {Charging2, Session4} = smf_gsn_lib:process_offline_charging_events(ChargeEv, Offline, Now, Charging1, Session3),
+    {Session4, PCF1, Charging2, Auth1}.
