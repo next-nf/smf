@@ -22,6 +22,14 @@
 %% Session Object API
 -export([to_session/1, native_to_seconds/1]).
 
+%% Shared helpers for per-protocol modules
+-export([new_session/1,
+	 invoke_handler/6,
+	 handle_handler_reply/5,
+	 session_merge/2,
+	 update_accounting_state/3,
+	 prepare_next_session_id/1]).
+
 %% Event helpers
 -export([ev_add/2, ev_del/2, ev_set/2]).
 -export([trigger/4, trigger/5]).
@@ -148,6 +156,54 @@ set_handler(Handler, State, #aaa_state{handlers = Handlers} = AAA) ->
 
 terminate_action(#aaa_state{} = AAA) ->
     call(AAA, #{'Termination-Cause' => error}, terminate, #{}).
+
+%%===================================================================
+%% Shared helpers for per-protocol modules
+%%===================================================================
+
+%% Create a new session map with IDs and register in session registry.
+%% Does NOT create handler state — that's done by each protocol module.
+new_session(SessionOpts) ->
+    AppId = maps:get('AAA-Application-Id', SessionOpts, default),
+    SessionId = smf_aaa_session_seq:inc(AppId),
+
+    App = smf_aaa:get_application(AppId),
+    OriginHost = maps:get('Origin-Host', App, net_adm:localhost()),
+    DiamSessionId =
+	iolist_to_binary(smf_aaa_session_seq:diameter_session_id(OriginHost, SessionId)),
+
+    DefaultSessionOpts =
+	#{'Session-Start'       => erlang:monotonic_time(),
+	  'Session-Id'          => SessionId,
+	  'Multi-Session-Id'    => SessionId,
+	  'Diameter-Session-Id' => DiamSessionId
+	 },
+
+    smf_aaa_session_reg:register(SessionId),
+    smf_aaa_session_reg:register(DiamSessionId),
+
+    maps:merge(DefaultSessionOpts, SessionOpts).
+
+%% Invoke a single handler on a session. Used by per-protocol modules.
+%% Returns {Result, Session1, Events, HandlerState1}.
+invoke_handler(Handler, Service, Procedure, Session0, Events, Opts) ->
+    Svc = smf_aaa:get_service(Service),
+    StepOpts = maps:merge(Opts, Svc),
+    State = maps:get(handler_state, Opts, undefined),
+    SessionT = termination_cause_mapping(Session0, StepOpts),
+    {Result, SessOut, EvsOut, StateOut} =
+	Handler:invoke(Service, Procedure, SessionT, Events, StepOpts, State),
+    aaa_state_stats(Handler, State, StateOut),
+    {Result, SessOut, EvsOut, StateOut}.
+
+%% Handle an async reply for a single handler. Used by per-protocol modules.
+%% Returns {Session1, Events, HandlerState1}.
+handle_handler_reply(Promise, Handler, Msg, Session, HandlerState) ->
+    Opts = #{},
+    {_, SessOut, EvsOut, StateOut} =
+	Handler:handle_response(Promise, Msg, Session, [], Opts, HandlerState),
+    aaa_state_stats(Handler, HandlerState, StateOut),
+    {SessOut, EvsOut, StateOut}.
 
 %%===================================================================
 %% Session Object API
