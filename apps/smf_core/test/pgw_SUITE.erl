@@ -4435,10 +4435,10 @@ aa_pool_select(Config) ->
 
     ok = meck:expect(smf_aaa_session, call,
 		     fun (Session, SessionOpts, Procedure = authenticate, Opts) ->
-			     {_, SIn, Ev} =
+			     {_, AAAIn, Ev} =
 				 meck:passthrough([Session, SessionOpts, Procedure, Opts]),
-			     SOut = maps:merge(SIn, AAAReply),
-			     {ok, SOut, Ev};
+			     AAAOut = smf_aaa_session:set_session(AAAReply, AAAIn),
+			     {ok, AAAOut, Ev};
 			 (Session, SessionOpts, Procedure, Opts) ->
 			     meck:passthrough([Session, SessionOpts, Procedure, Opts])
 		     end),
@@ -4461,10 +4461,10 @@ aa_nat_select(Config) ->
     AAAReply = #{'NAT-Pool-Id' => <<"nat-E">>},
     ok = meck:expect(smf_aaa_session, call,
 		     fun (Session, SessionOpts, Procedure = authenticate, Opts) ->
-			     {_, SIn, Ev} =
+			     {_, AAAIn, Ev} =
 				 meck:passthrough([Session, SessionOpts, Procedure, Opts]),
-			     SOut = maps:merge(SIn, AAAReply),
-			     {ok, SOut, Ev};
+			     AAAOut = smf_aaa_session:set_session(AAAReply, AAAIn),
+			     {ok, AAAOut, Ev};
 			 (Session, SessionOpts, Procedure, Opts) ->
 			     meck:passthrough([Session, SessionOpts, Procedure, Opts])
 		     end),
@@ -4501,10 +4501,10 @@ aa_pool_select_fail(Config) ->
 
     ok = meck:expect(smf_aaa_session, call,
 		     fun (Session, SessionOpts, Procedure = authenticate, Opts) ->
-			     {_, SIn, Ev} =
+			     {_, AAAIn, Ev} =
 				 meck:passthrough([Session, SessionOpts, Procedure, Opts]),
-			     SOut = maps:merge(SIn, AAAReply),
-			     {ok, SOut, Ev};
+			     AAAOut = smf_aaa_session:set_session(AAAReply, AAAIn),
+			     {ok, AAAOut, Ev};
 			 (Session, SessionOpts, Procedure, Opts) ->
 			     meck:passthrough([Session, SessionOpts, Procedure, Opts])
 		     end),
