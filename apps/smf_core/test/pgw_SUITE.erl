@@ -1045,14 +1045,22 @@ end_per_testcase(create_session_request_gy_fail, Config) ->
 end_per_testcase(create_session_request_rf_fail, Config) ->
     ok = meck:delete(smf_aaa_auth, start, 4),
     end_per_testcase(Config);
+end_per_testcase(simple_aaa, Config) ->
+    ok = meck:delete(smf_aaa_auth, authenticate, 4),
+    end_per_testcase(Config);
 end_per_testcase(TestCase, Config)
-  when TestCase == gy_ccr_asr_overlap;
-       TestCase == simple_aaa;
-       TestCase == simple_ofcs;
+  when TestCase == simple_ofcs;
        TestCase == ofcs_no_interim;
-       TestCase == tariff_time_change ->
+       TestCase == split_charging1;
+       TestCase == split_charging2 ->
+    ok = meck:delete(smf_aaa_charging, rf_initial, 4),
+    end_per_testcase(Config);
+end_per_testcase(tariff_time_change, Config) ->
     ok = meck:delete(smf_aaa_session, new_session, 1),
-    ok = meck:delete(smf_aaa_session, invoke_handler, 6),
+    ok = meck:delete(smf_aaa_charging, rf_initial, 4),
+    end_per_testcase(Config);
+end_per_testcase(gy_ccr_asr_overlap, Config) ->
+    ok = meck:delete(smf_aaa_charging, gy_ccr_terminate, 4),
     end_per_testcase(Config);
 end_per_testcase(create_session_request_pool_exhausted, Config) ->
     meck:unload(smf_local_pool),
@@ -1104,17 +1112,24 @@ end_per_testcase(gy_validity_timer_up, Config) ->
     {ok, _} = smf_test_sx_up:feature('pgw-u01', vtime, 0),
     end_per_testcase(Config);
 end_per_testcase(aa_pool_select, Config) ->
+    ok = meck:delete(smf_aaa_auth, authenticate, 4),
     ok = smf_test_sx_up:ue_ip_pools('pgw-u01', [<<"pool-A">>]),
     end_per_testcase(Config);
-end_per_testcase(TestCase, Config)
-  when TestCase == pfcp_select;
-       TestCase == aa_nat_select ->
+end_per_testcase(aa_nat_select, Config) ->
+    ok = meck:delete(smf_aaa_auth, authenticate, 4),
+    smf_test_sx_up:nat_port_blocks('pgw-u01', sgi, []),
+    smf_test_sx_up:nat_port_blocks('pgw-u01', example, []),
+    end_per_testcase(Config);
+end_per_testcase(pfcp_select, Config) ->
     smf_test_sx_up:nat_port_blocks('pgw-u01', sgi, []),
     smf_test_sx_up:nat_port_blocks('pgw-u01', example, []),
     end_per_testcase(Config);
 %% gtp inactivity_timeout reset to default 28800000ms ~8 hrs
 end_per_testcase(gtp_idle_timeout_pfcp_session_loss, Config) ->
     smf_test_lib:set_apn_key(inactivity_timeout, 28800000),
+    end_per_testcase(Config);
+end_per_testcase(aa_pool_select_fail, Config) ->
+    ok = meck:delete(smf_aaa_auth, authenticate, 4),
     end_per_testcase(Config);
 end_per_testcase(_, Config) ->
     end_per_testcase(Config).
@@ -2103,10 +2118,10 @@ modify_bearer_request_ra_update(Config) ->
 	meck:is(fun(#{gy_event := container_closure}) -> true;
 		   (_) -> false
 		end),
-    ?match(UpdateCount, meck:num_calls(smf_aaa_session, invoke_handler,
-				       ['_', '_', {rf, 'Update'}, '_', '_', ContainerClosePredicate])),
-    ?match(1, meck:num_calls(smf_aaa_session, invoke_handler,
-			     ['_', '_', {rf, 'Terminate'}, '_', '_', '_'])),
+    ?match(UpdateCount, meck:num_calls(smf_aaa_charging, rf_update,
+				       ['_', '_', '_', ContainerClosePredicate])),
+    ?match(1, meck:num_calls(smf_aaa_charging, rf_terminate,
+			     ['_', '_', '_', '_'])),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4contexts(?TIMEOUT),
@@ -2141,16 +2156,16 @@ modify_bearer_request_rat_update(Config) ->
 	meck:is(fun(#{gy_event := container_closure}) -> true;
 		   (_) -> false
 		end),
-    ?match(UpdateCount, meck:num_calls(smf_aaa_session, invoke_handler,
-				       ['_', '_', {rf, 'Update'}, '_', '_', ContainerClosePredicate])),
+    ?match(UpdateCount, meck:num_calls(smf_aaa_charging, rf_update,
+				       ['_', '_', '_', ContainerClosePredicate])),
     CDRClosePredicate =
 	meck:is(fun(#{gy_event := cdr_closure}) -> true;
 		   (_) -> false
 		end),
-    ?match(1, meck:num_calls(smf_aaa_session, invoke_handler,
-			     ['_', '_', {rf, 'Update'}, '_', '_', CDRClosePredicate])),
-    ?match(1, meck:num_calls(smf_aaa_session, invoke_handler,
-			     ['_', '_', {rf, 'Terminate'}, '_', '_', '_'])),
+    ?match(1, meck:num_calls(smf_aaa_charging, rf_update,
+			     ['_', '_', '_', CDRClosePredicate])),
+    ?match(1, meck:num_calls(smf_aaa_charging, rf_terminate,
+			     ['_', '_', '_', '_'])),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4contexts(?TIMEOUT),
@@ -2188,8 +2203,8 @@ modify_bearer_request_tei_update(Config) ->
 	meck:is(fun(#{gy_event := cdr_closure}) -> true;
 		   (_) -> false
 		end),
-    ?match(1, meck:num_calls(smf_aaa_session, invoke_handler,
-			     ['_', '_', {rf, 'Update'}, '_', '_', CDRClosePred])),
+    ?match(1, meck:num_calls(smf_aaa_charging, rf_update,
+			     ['_', '_', '_', CDRClosePred])),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4contexts(?TIMEOUT),
@@ -2638,9 +2653,7 @@ session_options(Config) ->
     {GtpC, _, _} = create_session(ipv4v6, Config),
 
     [#{'Process' := Pid}|_] = smf_api:tunnel(all),
-    #{aaa := AAA} = gtp_context:info(Pid),
-
-    Opts = smf_aaa_session:get_session(AAA),
+    #{aaa_session := Opts} = gtp_context:info(Pid),
     ct:pal("Opts: ~p", [Opts]),
 
     Expected0 =
@@ -3052,9 +3065,9 @@ pfcp_session_deleted_by_the_up_function(Config) ->
     ct:sleep(100),
     delete_session(not_found, GtpC),
 
-    ?equal(true, meck:called(smf_aaa_session, invoke_handler, ['_', '_', {gx, 'CCR-Terminate'}, '_', '_', '_'])),
-    ?equal(true, meck:called(smf_aaa_session, invoke_handler, ['_', '_', {gy, 'CCR-Terminate'}, '_', '_', '_'])),
-    ?equal(true, meck:called(smf_aaa_session, invoke_handler, ['_', '_', stop, '_', '_', '_'])),
+    ?equal(true, meck:called(smf_aaa_pcf, ccr_terminate, ['_', '_', '_', '_'])),
+    ?equal(true, meck:called(smf_aaa_charging, gy_ccr_terminate, ['_', '_', '_', '_'])),
+    ?equal(true, meck:called(smf_aaa_auth, stop, ['_', '_', '_', '_'])),
 
     ?equal([], outstanding_requests()),
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
@@ -3077,7 +3090,7 @@ gy_validity_timer_cp(Config) ->
 		    gtp_context, handle_event, [info, {timeout, '_', pfcp_timer}, '_', '_'])),
 
     CCRU = lists:filter(
-	     fun({_, {smf_aaa_session, invoke_handler, [_, _, {gy,'CCR-Update'}, S, _, _]}, _}) ->
+	     fun({_, {smf_aaa_charging, gy_ccr_update, [_, S, _, _]}, _}) ->
 		     ?match(
 			#{used_credits :=
 			      [{3000,
@@ -3085,7 +3098,7 @@ gy_validity_timer_cp(Config) ->
 				      [?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_VALIDITY_TIME']}}]}, S),
 		     true;
 		(_) -> false
-	     end, meck:history(smf_aaa_session)),
+	     end, meck:history(smf_aaa_charging)),
     ?match(Y when Y >= 3 andalso Y < 10, length(CCRU)),
 
     ?equal([], outstanding_requests()),
@@ -3137,7 +3150,7 @@ gy_validity_timer_up(Config) ->
 	}, URR),
 
     CCRU = lists:filter(
-	     fun({_, {smf_aaa_session, invoke_handler, [_, _, {gy,'CCR-Update'}, S, _, _]}, _}) ->
+	     fun({_, {smf_aaa_charging, gy_ccr_update, [_, S, _, _]}, _}) ->
 		     ?match(
 			#{used_credits :=
 			      [{3000,
@@ -3145,7 +3158,7 @@ gy_validity_timer_up(Config) ->
 				      [?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_VALIDITY_TIME']}}]}, S),
 		     true;
 		(_) -> false
-	     end, meck:history(smf_aaa_session)),
+	     end, meck:history(smf_aaa_charging)),
     ?equal(3, length(CCRU)),
 
     ?equal([], outstanding_requests()),
@@ -3163,15 +3176,13 @@ simple_aaa(Config) ->
     Interim = rand:uniform(1800) + 1800,
     AAAReply = #{'Acct-Interim-Interval' => Interim},
 
-    ok = meck:expect(smf_aaa_session, invoke_handler,
-		     fun (H, S, Procedure = authenticate, Sess, Evs, Opts) ->
-			     {_, SessIn, EvIn, _} =
-				 meck:passthrough([H, S, Procedure, Sess, Evs, Opts]),
+    ok = meck:expect(smf_aaa_auth, authenticate,
+		     fun (Ctx, Session, SOpts, Opts) ->
+			     {_, Ctx1, SessIn, EvIn} =
+				 meck:passthrough([Ctx, Session, SOpts, Opts]),
 			     {SOut, EvOut} =
 				 smf_aaa_radius:to_session(authenticate, {SessIn, EvIn}, AAAReply),
-			     {ok, SOut, EvOut, maps:get(handler_state, Opts, undefined)};
-			 (H, S, P, Sess, Evs, Opts) ->
-			     meck:passthrough([H, S, P, Sess, Evs, Opts])
+			     {ok, Ctx1, SOut, EvOut}
 		     end),
 
     {GtpC, _, _} = create_session(Config),
@@ -3214,10 +3225,10 @@ simple_aaa(Config) ->
     ct:sleep(100),
     delete_session(GtpC),
 
-    H = meck:history(smf_aaa_session),
+    H = meck:history(smf_aaa_auth),
     SInv =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, Procedure, _, _, _]}, _})
+	  fun({_, {smf_aaa_auth, Procedure, _}, _})
 		when Procedure =:= start; Procedure =:= interim; Procedure =:= stop ->
 		  true;
 	     (_) ->
@@ -3226,7 +3237,7 @@ simple_aaa(Config) ->
     ?match(X when X == 3, length(SInv)),
 
     [Start, SInterim, Stop] =
-	lists:map(fun({_, {_, _, [_, _, _, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('Acct-Session-Time', Start)),
     ?equal(false, maps:is_key('InOctets', Start)),
@@ -3260,15 +3271,13 @@ simple_ofcs(Config) ->
     Interim = rand:uniform(1800) + 1800,
     AAAReply = #{'Acct-Interim-Interval' => [Interim]},
 
-    ok = meck:expect(smf_aaa_session, invoke_handler,
-		     fun (H, S, {rf, 'Initial'} = Procedure, Sess, Evs, Opts) ->
-			     {_, SessIn, EvIn, _} =
-				 meck:passthrough([H, S, Procedure, Sess, Evs, Opts]),
+    ok = meck:expect(smf_aaa_charging, rf_initial,
+		     fun (Ctx, Session, SOpts, Opts) ->
+			     {_, Ctx1, SessIn, EvIn} =
+				 meck:passthrough([Ctx, Session, SOpts, Opts]),
 			     {SOut, EvOut} =
 				 smf_aaa_rf:to_session({rf, 'ACA'}, {SessIn, EvIn}, AAAReply),
-			     {ok, SOut, EvOut, maps:get(handler_state, Opts, undefined)};
-			 (H, S, P, Sess, Evs, Opts) ->
-			     meck:passthrough([H, S, P, Sess, Evs, Opts])
+			     {ok, Ctx1, SOut, EvOut}
 		     end),
 
     {GtpC, _, _} = create_session(Config),
@@ -3333,12 +3342,13 @@ simple_ofcs(Config) ->
     delete_session(GtpC),
     ct:sleep(10),
 
-    H = meck:history(smf_aaa_session),
+    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
     SInv =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, {rf, _}, _, _, _]}, _}) ->
+	  fun({_, {smf_aaa_charging, Fn, _}, _})
+		when Fn =:= rf_initial; Fn =:= rf_update; Fn =:= rf_terminate ->
 		  true;
-	     ({_, {smf_aaa_session, invoke_handler, [_, _, stop, _, _, _]}, _}) ->
+	     ({_, {smf_aaa_auth, stop, _}, _}) ->
 		  true;
 	     (_) ->
 		  false
@@ -3346,7 +3356,7 @@ simple_ofcs(Config) ->
     ?match(X when X == 4, length(SInv)),
 
     [Start, SInterim, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, _, _, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
     ?equal(false, maps:is_key('service_data', AcctStop)),
@@ -3407,15 +3417,13 @@ ofcs_no_interim(Config) ->
     CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
     AAAReply = #{},
 
-    ok = meck:expect(smf_aaa_session, invoke_handler,
-		     fun (H, S, {rf, 'Initial'} = Procedure, Sess, Evs, Opts) ->
-			     {_, SessIn, EvIn, _} =
-				 meck:passthrough([H, S, Procedure, Sess, Evs, Opts]),
+    ok = meck:expect(smf_aaa_charging, rf_initial,
+		     fun (Ctx, Session, SOpts, Opts) ->
+			     {_, Ctx1, SessIn, EvIn} =
+				 meck:passthrough([Ctx, Session, SOpts, Opts]),
 			     {SOut, EvOut} =
 				 smf_aaa_rf:to_session({rf, 'ACA'}, {SessIn, EvIn}, AAAReply),
-			     {ok, SOut, EvOut, maps:get(handler_state, Opts, undefined)};
-			 (H, S, P, Sess, Evs, Opts) ->
-			     meck:passthrough([H, S, P, Sess, Evs, Opts])
+			     {ok, Ctx1, SOut, EvOut}
 		     end),
 
     {GtpC, _, _} = create_session(Config),
@@ -3452,12 +3460,13 @@ ofcs_no_interim(Config) ->
     delete_session(GtpC),
     ct:sleep(10),
 
-    H = meck:history(smf_aaa_session),
+    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
     SInv =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, {rf, _}, _, _, _]}, _}) ->
+	  fun({_, {smf_aaa_charging, Fn, _}, _})
+		when Fn =:= rf_initial; Fn =:= rf_update; Fn =:= rf_terminate ->
 		  true;
-	     ({_, {smf_aaa_session, invoke_handler, [_, _, stop, _, _, _]}, _}) ->
+	     ({_, {smf_aaa_auth, stop, _}, _}) ->
 		  true;
 	     (_) ->
 		  false
@@ -3465,7 +3474,7 @@ ofcs_no_interim(Config) ->
     ?match(X when X == 3, length(SInv)),
 
     [Start, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, _, _, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
     ?equal(false, maps:is_key('service_data', AcctStop)),
@@ -3512,10 +3521,11 @@ secondary_rat_usage_data_report(Config) ->
     delete_session(secondary_rat_usage_data_report, GtpC2),
     ct:sleep(10),
 
-    H = meck:history(smf_aaa_session),
+    H = meck:history(smf_aaa_charging),
     SInv =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, {rf, _}, _, _, _]}, _}) ->
+	  fun({_, {smf_aaa_charging, Fn, _}, _})
+		when Fn =:= rf_initial; Fn =:= rf_update; Fn =:= rf_terminate ->
 		  true;
 	     (_) ->
 		  false
@@ -3523,7 +3533,7 @@ secondary_rat_usage_data_report(Config) ->
     ?match(X when X == 5, length(SInv)),
 
     [Start, SecRat1, _Interim, SecRat2, _Stop] =
-	lists:map(fun({_, {_, _, [_, _, _, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('RAN-Secondary-RAT-Usage-Report', Start)),
 
@@ -3619,20 +3629,21 @@ simple_ocs(Config) ->
     ct:sleep(100),
     delete_session(GtpC),
 
-    H = meck:history(smf_aaa_session),
+    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
     CCR =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, {gy,_}, _, _, _]}, _}) ->
+	  fun({_, {smf_aaa_charging, Fn, _}, _})
+		when Fn =:= gy_ccr_initial; Fn =:= gy_ccr_update; Fn =:= gy_ccr_terminate ->
 		  true;
-	     ({_, {smf_aaa_session, invoke_handler, [_, _, stop, _, _, _]}, _}) ->
+	     ({_, {smf_aaa_auth, stop, _}, _}) ->
 		  true;
 	     (_) ->
 		  false
 	  end, H),
     ?match(X when X == 4, length(CCR)),
 
-    {_, {_, _, [_, _, {gy,'CCR-Initial'}, _, _, _]},
-     {ok, Session, _Events, _HState}} = hd(CCR),
+    {_, {_, gy_ccr_initial, _},
+     {ok, _, Session, _}} = hd(CCR),
 
     Expected0 =
 	case ?config(client_ip, Config) of
@@ -3748,15 +3759,13 @@ split_charging1(Config) ->
     Interim = rand:uniform(1800) + 1800,
     AAAReply = #{'Acct-Interim-Interval' => [Interim]},
 
-    ok = meck:expect(smf_aaa_session, invoke_handler,
-		     fun (H, S, {rf, 'Initial'} = Procedure, Sess, Evs, Opts) ->
-			     {_, SessIn, EvIn, _} =
-				 meck:passthrough([H, S, Procedure, Sess, Evs, Opts]),
+    ok = meck:expect(smf_aaa_charging, rf_initial,
+		     fun (Ctx, Session, SOpts, Opts) ->
+			     {_, Ctx1, SessIn, EvIn} =
+				 meck:passthrough([Ctx, Session, SOpts, Opts]),
 			     {SOut, EvOut} =
 				 smf_aaa_rf:to_session({rf, 'ACA'}, {SessIn, EvIn}, AAAReply),
-			     {ok, SOut, EvOut, maps:get(handler_state, Opts, undefined)};
-			 (H, S, P, Sess, Evs, Opts) ->
-			     meck:passthrough([H, S, P, Sess, Evs, Opts])
+			     {ok, Ctx1, SOut, EvOut}
 		     end),
 
     {GtpC, _, _} = create_session(Config),
@@ -3939,12 +3948,13 @@ split_charging1(Config) ->
     delete_session(GtpC),
     ct:sleep(10),
 
-    H = meck:history(smf_aaa_session),
+    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
     SInv =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, {rf, _}, _, _, _]}, _}) ->
+	  fun({_, {smf_aaa_charging, Fn, _}, _})
+		when Fn =:= rf_initial; Fn =:= rf_update; Fn =:= rf_terminate ->
 		  true;
-	     ({_, {smf_aaa_session, invoke_handler, [_, _, stop, _, _, _]}, _}) ->
+	     ({_, {smf_aaa_auth, stop, _}, _}) ->
 		  true;
 	     (_) ->
 		  false
@@ -3952,7 +3962,7 @@ split_charging1(Config) ->
     ?match(X when X == 4, length(SInv)),
 
     [Start, SInterim, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, _, _, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
     ?equal(false, maps:is_key('service_data', AcctStop)),
@@ -4011,7 +4021,8 @@ split_charging1(Config) ->
 
     CCR =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, {gy,_}, _, _, _]}, _}) ->
+	  fun({_, {smf_aaa_charging, Fn, _}, _})
+		when Fn =:= gy_ccr_initial; Fn =:= gy_ccr_update; Fn =:= gy_ccr_terminate ->
 		  true;
 	     (_) ->
 		  false
@@ -4019,7 +4030,7 @@ split_charging1(Config) ->
     ?match(X when X == 8, length(CCR)),
 
     [GyStart, GyInterim, _, _, _, _, _, GyStop] =
-	lists:map(fun({_, {_, _, [_, _, _, SOpts, _, _]}, _}) -> SOpts end, CCR),
+	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, CCR),
 
     ?match_map(
        #{credits => #{3000 => empty}}, GyStart),
@@ -4063,15 +4074,13 @@ split_charging2(Config) ->
     Interim = rand:uniform(1800) + 1800,
     AAAReply = #{'Acct-Interim-Interval' => [Interim]},
 
-    ok = meck:expect(smf_aaa_session, invoke_handler,
-		     fun (H, S, {rf, 'Initial'} = Procedure, Sess, Evs, Opts) ->
-			     {_, SessIn, EvIn, _} =
-				 meck:passthrough([H, S, Procedure, Sess, Evs, Opts]),
+    ok = meck:expect(smf_aaa_charging, rf_initial,
+		     fun (Ctx, Session, SOpts, Opts) ->
+			     {_, Ctx1, SessIn, EvIn} =
+				 meck:passthrough([Ctx, Session, SOpts, Opts]),
 			     {SOut, EvOut} =
 				 smf_aaa_rf:to_session({rf, 'ACA'}, {SessIn, EvIn}, AAAReply),
-			     {ok, SOut, EvOut, maps:get(handler_state, Opts, undefined)};
-			 (H, S, P, Sess, Evs, Opts) ->
-			     meck:passthrough([H, S, P, Sess, Evs, Opts])
+			     {ok, Ctx1, SOut, EvOut}
 		     end),
 
     {GtpC, _, _} = create_session(Config),
@@ -4265,12 +4274,13 @@ split_charging2(Config) ->
     delete_session(GtpC),
     ct:sleep(10),
 
-    H = meck:history(smf_aaa_session),
+    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
     SInv =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, {rf, _}, _, _, _]}, _}) ->
+	  fun({_, {smf_aaa_charging, Fn, _}, _})
+		when Fn =:= rf_initial; Fn =:= rf_update; Fn =:= rf_terminate ->
 		  true;
-	     ({_, {smf_aaa_session, invoke_handler, [_, _, stop, _, _, _]}, _}) ->
+	     ({_, {smf_aaa_auth, stop, _}, _}) ->
 		  true;
 	     (_) ->
 		  false
@@ -4278,7 +4288,7 @@ split_charging2(Config) ->
     ?match(X when X == 4, length(SInv)),
 
     [Start, SInterim, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, _, _, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
     ?equal(false, maps:is_key('service_data', AcctStop)),
@@ -4355,7 +4365,8 @@ split_charging2(Config) ->
 
     CCR =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, {gy,_}, _, _, _]}, _}) ->
+	  fun({_, {smf_aaa_charging, Fn, _}, _})
+		when Fn =:= gy_ccr_initial; Fn =:= gy_ccr_update; Fn =:= gy_ccr_terminate ->
 		  true;
 	     (_) ->
 		  false
@@ -4363,7 +4374,7 @@ split_charging2(Config) ->
     ?match(X when X == 8, length(CCR)),
 
     [GyStart, GyInterim, _, _, _, _, _, GyStop] =
-	lists:map(fun({_, {_, _, [_, _, _, SOpts, _, _]}, _}) -> SOpts end, CCR),
+	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, CCR),
 
     ?match_map(
        #{credits => #{3000 => empty}}, GyStart),
@@ -4432,14 +4443,12 @@ aa_pool_select(Config) ->
     AAAReply = #{'Framed-Pool'      => <<"pool-B">>,
 		 'Framed-IPv6-Pool' => <<"pool-B">>},
 
-    ok = meck:expect(smf_aaa_session, invoke_handler,
-		     fun (H, S, Procedure = authenticate, Sess, Evs, Opts) ->
-			     {_, SessIn, Ev, _} =
-				 meck:passthrough([H, S, Procedure, Sess, Evs, Opts]),
+    ok = meck:expect(smf_aaa_auth, authenticate,
+		     fun (Ctx, Session, SOpts, Opts) ->
+			     {_, Ctx1, SessIn, EvIn} =
+				 meck:passthrough([Ctx, Session, SOpts, Opts]),
 			     SOut = maps:merge(SessIn, AAAReply),
-			     {ok, SOut, Ev, maps:get(handler_state, Opts, undefined)};
-			 (H, S, P, Sess, Evs, Opts) ->
-			     meck:passthrough([H, S, P, Sess, Evs, Opts])
+			     {ok, Ctx1, SOut, EvIn}
 		     end),
 
     {GtpC, _, _} = create_session(Config),
@@ -4458,23 +4467,21 @@ aa_nat_select() ->
     [{doc, "Select IP-NAT through AAA"}].
 aa_nat_select(Config) ->
     AAAReply = #{'NAT-Pool-Id' => <<"nat-E">>},
-    ok = meck:expect(smf_aaa_session, invoke_handler,
-		     fun (H, S, Procedure = authenticate, Sess, Evs, Opts) ->
-			     {_, SessIn, Ev, _} =
-				 meck:passthrough([H, S, Procedure, Sess, Evs, Opts]),
+    ok = meck:expect(smf_aaa_auth, authenticate,
+		     fun (Ctx, Session, SOpts, Opts) ->
+			     {_, Ctx1, SessIn, EvIn} =
+				 meck:passthrough([Ctx, Session, SOpts, Opts]),
 			     SOut = maps:merge(SessIn, AAAReply),
-			     {ok, SOut, Ev, maps:get(handler_state, Opts, undefined)};
-			 (H, S, P, Sess, Evs, Opts) ->
-			     meck:passthrough([H, S, P, Sess, Evs, Opts])
+			     {ok, Ctx1, SOut, EvIn}
 		     end),
 
     {GtpC, _, _} = create_session(Config),
     delete_session(GtpC),
 
-    H = meck:history(smf_aaa_session),
+    H = meck:history(smf_aaa_auth),
     [SInv|_] =
 	lists:foldr(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, start, _, _, _]}, {ok, Session_S, _, _}}, Acc) ->
+	  fun({_, {smf_aaa_auth, start, [_, _, _, _]}, {ok, _Ctx, Session_S, _}}, Acc) ->
 		  [Session_S|Acc];
 	     (_, Acc) ->
 		  Acc
@@ -4498,14 +4505,12 @@ aa_pool_select_fail(Config) ->
     AAAReply = #{'Framed-Pool'      => <<"pool-C">>,
 		 'Framed-IPv6-Pool' => <<"pool-C">>},
 
-    ok = meck:expect(smf_aaa_session, invoke_handler,
-		     fun (H, S, Procedure = authenticate, Sess, Evs, Opts) ->
-			     {_, SessIn, Ev, _} =
-				 meck:passthrough([H, S, Procedure, Sess, Evs, Opts]),
+    ok = meck:expect(smf_aaa_auth, authenticate,
+		     fun (Ctx, Session, SOpts, Opts) ->
+			     {_, Ctx1, SessIn, EvIn} =
+				 meck:passthrough([Ctx, Session, SOpts, Opts]),
 			     SOut = maps:merge(SessIn, AAAReply),
-			     {ok, SOut, Ev, maps:get(handler_state, Opts, undefined)};
-			 (H, S, P, Sess, Evs, Opts) ->
-			     meck:passthrough([H, S, P, Sess, Evs, Opts])
+			     {ok, Ctx1, SOut, EvIn}
 		     end),
 
     create_session(no_resources_available, Config),
@@ -4535,15 +4540,13 @@ tariff_time_change(Config) ->
 			     SOpts = SOpts0#{'Offline-Charging-Profile' => OPC},
 			     meck:passthrough([SOpts])
 		     end),
-    ok = meck:expect(smf_aaa_session, invoke_handler,
-		     fun (H, S, {rf, 'Initial'} = Procedure, Sess, Evs, Opts) ->
-			     {_, SessIn, EvIn, _} =
-				 meck:passthrough([H, S, Procedure, Sess, Evs, Opts]),
+    ok = meck:expect(smf_aaa_charging, rf_initial,
+		     fun (Ctx, Session, SOpts, Opts) ->
+			     {_, Ctx1, SessIn, EvIn} =
+				 meck:passthrough([Ctx, Session, SOpts, Opts]),
 			     {SOut, EvOut} =
 				 smf_aaa_rf:to_session({rf, 'ACA'}, {SessIn, EvIn}, AAAReply),
-			     {ok, SOut, EvOut, maps:get(handler_state, Opts, undefined)};
-			 (H, S, P, Sess, Evs, Opts) ->
-			     meck:passthrough([H, S, P, Sess, Evs, Opts])
+			     {ok, Ctx1, SOut, EvOut}
 		     end),
 
     {GtpC, _, _} = create_session(Config),
@@ -4652,10 +4655,11 @@ tariff_time_change(Config) ->
     ct:sleep(100),
     delete_session(GtpC),
 
-    H = meck:history(smf_aaa_session),
+    H = meck:history(smf_aaa_charging),
     RfInv =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, {rf, _}, _, _, _]}, _}) ->
+	  fun({_, {smf_aaa_charging, Fn, _}, _})
+		when Fn =:= rf_initial; Fn =:= rf_update; Fn =:= rf_terminate ->
 		  true;
 	     (_) ->
 		  false
@@ -4663,7 +4667,7 @@ tariff_time_change(Config) ->
     ?match(X when X == 3, length(RfInv)),
 
     [RfStart, RfInterim, RfStop] =
-	lists:map(fun({_, {_, _, [_, _, _, SOpts, _, _]}, _}) -> SOpts end, RfInv),
+	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, RfInv),
 
     ?equal(false, maps:is_key('service_data', RfStart)),
 
@@ -4699,7 +4703,8 @@ tariff_time_change(Config) ->
 
     GyInv =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, {gy,_}, _, _, _]}, _}) ->
+	  fun({_, {smf_aaa_charging, Fn, _}, _})
+		when Fn =:= gy_ccr_initial; Fn =:= gy_ccr_update; Fn =:= gy_ccr_terminate ->
 		  true;
 	     (_) ->
 		  false
@@ -4707,7 +4712,7 @@ tariff_time_change(Config) ->
     ?match(X when X == 3, length(GyInv)),
 
     [GyStart, GyInterim, GyStop] =
-	lists:map(fun({_, {_, _, [_, _, _, SOpts, _, _]}, _}) -> SOpts end, GyInv),
+	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, GyInv),
 
     ?match_map(
        #{credits => #{3000 => empty}}, GyStart),
@@ -4759,8 +4764,7 @@ gy_ccr_asr_overlap(Config) ->
     {GtpC, _, _} = create_session(Config),
 
     ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
-    #{aaa := AAA} = smf_context:test_cmd(gtp, CtxKey, info),
-    SessionOpts = smf_aaa_session:get_session(AAA),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
 
     Self = self(),
     ResponseFun =
@@ -4769,13 +4773,11 @@ gy_ccr_asr_overlap(Config) ->
     AAAReq = #aaa_request{from = ResponseFun, procedure = {gy, 'ASR'},
 			  session = SessionOpts, events = []},
 
-    ok = meck:expect(smf_aaa_session, invoke_handler,
-		     fun(H, S, {gy, 'CCR-Terminate'} = Procedure, Sess, Evs, Opts) ->
+    ok = meck:expect(smf_aaa_charging, gy_ccr_terminate,
+		     fun(Ctx, Session, SOpts, Opts) ->
 			     ct:pal("AAAReq: ~p", [AAAReq]),
 			     self() ! AAAReq,
-			     meck:passthrough([H, S, Procedure, Sess, Evs, Opts]);
-			(H, S, P, Sess, Evs, Opts) ->
-			     meck:passthrough([H, S, P, Sess, Evs, Opts])
+			     meck:passthrough([Ctx, Session, SOpts, Opts])
 		     end),
 
     ct:sleep({seconds, 1}),
@@ -4789,10 +4791,11 @@ gy_ccr_asr_overlap(Config) ->
 	end,
     ?equal(ok, Resp0),
 
-    H = meck:history(smf_aaa_session),
+    H = meck:history(smf_aaa_charging),
     CCR =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, {gy,_}, _, _, _]}, _}) ->
+	  fun({_, {smf_aaa_charging, F, _}, _})
+		when F == gy_ccr_initial; F == gy_ccr_update; F == gy_ccr_terminate ->
 		  true;
 	     (_) ->
 		  false
@@ -4844,12 +4847,11 @@ volume_threshold(Config) ->
 		      update_pdr, update_far, update_urr,
 		      remove_pdr, remove_far, remove_urr]]),
 
-    H = meck:history(smf_aaa_session),
+    H = meck:history(smf_aaa_charging),
     CCRUvolth =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler,
-		   [_, _,
-		    {gy,'CCR-Update'},
+	  fun({_, {smf_aaa_charging, gy_ccr_update,
+		   [_,
 		    #{used_credits :=
 			  [{3000,
 			    #{'Reporting-Reason' :=
@@ -4863,9 +4865,8 @@ volume_threshold(Config) ->
 
     CCRUvolqu =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler,
-		   [_, _,
-		    {gy,'CCR-Update'},
+	  fun({_, {smf_aaa_charging, gy_ccr_update,
+		   [_,
 		    #{used_credits :=
 			  [{3000,
 			    #{'Reporting-Reason' :=
@@ -4895,8 +4896,7 @@ gx_rar_gy_interaction(Config) ->
 
     ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
     {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
-    {ok, AAA} = smf_context:test_cmd(gtp, CtxKey, session),
-    SessionOpts = smf_aaa_session:get_session(AAA),
+    {ok, SessionOpts} = smf_context:test_cmd(gtp, CtxKey, session),
 
     {ok, #pfcp_ctx{timers = T1}} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
     ?equal(1, maps:size(T1)),
@@ -4921,7 +4921,7 @@ gx_rar_gy_interaction(Config) ->
     {ok, #pfcp_ctx{timers = T2}} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
     ?equal(2, maps:size(T2)),
 
-    SOpts1 = smf_aaa_session:get_session(AAA),
+    {ok, SOpts1} = smf_context:test_cmd(gtp, CtxKey, session),
     RemoveCR =
 	[{pcc, remove, [#{'Charging-Rule-Name' => [<<"r-0002">>]}]}],
     Server ! AAAReq#aaa_request{session = SOpts1, events = RemoveCR},
@@ -5076,8 +5076,7 @@ gx_rar(Config) ->
 
     ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
     {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
-    #{aaa := AAA} = smf_context:test_cmd(gtp, CtxKey, info),
-    SessionOpts = smf_aaa_session:get_session(AAA),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
 
     Self = self(),
     ResponseFun =
@@ -5173,13 +5172,13 @@ gx_rar(Config) ->
 		      remove_pdr, remove_far, remove_urr]]),
 
     %% TBD, should be 5
-    %% ?match(2, meck:num_calls(smf_aaa_session, invoke_handler,
-    %% 			     ['_', '_', {gy, 'CCR-Update'}, '_', '_', '_'])),
+    %% ?match(2, meck:num_calls(smf_aaa_charging, gy_ccr_update,
+    %% 			     ['_', '_', '_', '_'])),
 
-    Hs = meck:history(smf_aaa_session),
+    Hs = meck:history(smf_aaa_charging),
     CCR =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, {gy,'CCR-Update'}, _, _, _]}, _}) ->
+	  fun({_, {smf_aaa_charging, gy_ccr_update, [_, _, _, _]}, _}) ->
 		  true;
 	     (_) ->
 		  false
@@ -5362,15 +5361,15 @@ gx_invalid_charging_rulebase(Config) ->
 
     CCRU =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler,
-		   [_, _, {gx,'CCR-Update'}, R, _, _]}, _}) ->
+	  fun({_, {smf_aaa_pcf, ccr_update,
+		   [_, R, _, _]}, _}) ->
 		  ?match(
 		     #{'Charging-Rule-Report' :=
 			   [#{'Charging-Rule-Base-Name' := [_]}]}, R),
 		  true;
 	     (_) ->
 		  false
-	  end, meck:history(smf_aaa_session)),
+	  end, meck:history(smf_aaa_pcf)),
     ?match(X when X == 1, length(CCRU)),
 
     delete_session(GtpC),
@@ -5396,15 +5395,15 @@ gx_invalid_charging_rule(Config) ->
 
     CCRU =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler,
-		   [_, _, {gx,'CCR-Update'}, R, _, _]}, _}) ->
+	  fun({_, {smf_aaa_pcf, ccr_update,
+		   [_, R, _, _]}, _}) ->
 		  ?match(
 		     #{'Charging-Rule-Report' :=
 			   [#{'Charging-Rule-Name' := [_]}]}, R),
 		  true;
 	     (_) ->
 		  false
-	  end, meck:history(smf_aaa_session)),
+	  end, meck:history(smf_aaa_pcf)),
     ?match(X when X == 1, length(CCRU)),
 
     delete_session(GtpC),
@@ -5462,16 +5461,14 @@ up_inactivity_timer(Config) ->
     AAAReply = #{'Idle-Timeout' => 1800, 'Acct-Interim-Interval' => Interim},
 
     ok = meck:expect(
-	   smf_aaa_session, invoke_handler,
-	   fun (H, S, Procedure = authenticate, Sess, Evs, Opts) ->
-		   {_, SessIn, EvIn, _} =
-		       meck:passthrough([H, S, Procedure, Sess, Evs, Opts]),
+	   smf_aaa_auth, authenticate,
+	   fun (Ctx, Sess, SOpts, Opts) ->
+		   {_, CtxIn, SessIn, EvIn} =
+		       meck:passthrough([Ctx, Sess, SOpts, Opts]),
 		   {SOut, EvOut} =
 		       smf_aaa_radius:to_session(authenticate, {SessIn, EvIn},
 						  AAAReply),
-		   {ok, SOut, EvOut, maps:get(handler_state, Opts, undefined)};
-	       (H, S, P, Sess, Evs, Opts) ->
-		   meck:passthrough([H, S, P, Sess, Evs, Opts])
+		   {ok, CtxIn, SOut, EvOut}
 	   end),
 
     {GtpC, _, _} = create_session(Config),
