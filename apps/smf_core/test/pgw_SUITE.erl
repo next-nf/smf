@@ -3237,7 +3237,7 @@ simple_aaa(Config) ->
     ?match(X when X == 3, length(SInv)),
 
     [Start, SInterim, Stop] =
-	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('Acct-Session-Time', Start)),
     ?equal(false, maps:is_key('InOctets', Start)),
@@ -3356,7 +3356,7 @@ simple_ofcs(Config) ->
     ?match(X when X == 4, length(SInv)),
 
     [Start, SInterim, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
     ?equal(false, maps:is_key('service_data', AcctStop)),
@@ -3474,7 +3474,7 @@ ofcs_no_interim(Config) ->
     ?match(X when X == 3, length(SInv)),
 
     [Start, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
     ?equal(false, maps:is_key('service_data', AcctStop)),
@@ -3533,7 +3533,7 @@ secondary_rat_usage_data_report(Config) ->
     ?match(X when X == 5, length(SInv)),
 
     [Start, SecRat1, _Interim, SecRat2, _Stop] =
-	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('RAN-Secondary-RAT-Usage-Report', Start)),
 
@@ -3962,7 +3962,7 @@ split_charging1(Config) ->
     ?match(X when X == 4, length(SInv)),
 
     [Start, SInterim, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
     ?equal(false, maps:is_key('service_data', AcctStop)),
@@ -4030,7 +4030,7 @@ split_charging1(Config) ->
     ?match(X when X == 8, length(CCR)),
 
     [GyStart, GyInterim, _, _, _, _, _, GyStop] =
-	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, CCR),
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, CCR),
 
     ?match_map(
        #{credits => #{3000 => empty}}, GyStart),
@@ -4288,7 +4288,7 @@ split_charging2(Config) ->
     ?match(X when X == 4, length(SInv)),
 
     [Start, SInterim, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
     ?equal(false, maps:is_key('service_data', AcctStop)),
@@ -4374,7 +4374,7 @@ split_charging2(Config) ->
     ?match(X when X == 8, length(CCR)),
 
     [GyStart, GyInterim, _, _, _, _, _, GyStop] =
-	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, CCR),
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, CCR),
 
     ?match_map(
        #{credits => #{3000 => empty}}, GyStart),
@@ -4667,7 +4667,7 @@ tariff_time_change(Config) ->
     ?match(X when X == 3, length(RfInv)),
 
     [RfStart, RfInterim, RfStop] =
-	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, RfInv),
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, RfInv),
 
     ?equal(false, maps:is_key('service_data', RfStart)),
 
@@ -4712,7 +4712,7 @@ tariff_time_change(Config) ->
     ?match(X when X == 3, length(GyInv)),
 
     [GyStart, GyInterim, GyStop] =
-	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, GyInv),
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, GyInv),
 
     ?match_map(
        #{credits => #{3000 => empty}}, GyStart),

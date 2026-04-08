@@ -1858,7 +1858,7 @@ simple_aaa(Config) ->
     ?match(X when X == 3, length(SInv)),
 
     [Start, SInterim, Stop] =
-	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('Acct-Session-Time', Start)),
     ?equal(false, maps:is_key('InOctets', Start)),
@@ -1978,7 +1978,7 @@ simple_ofcs(Config) ->
     ?match(X when X == 4, length(SInv)),
 
     [Start, SInterim, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
     ?equal(false, maps:is_key('service_data', AcctStop)),
