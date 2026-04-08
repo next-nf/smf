@@ -79,6 +79,9 @@ init_per_suite(Config0) ->
     Config = smc_test_lib:group_config(ipv4, Config2),
 
     [application:load(App) || App <- [cowboy, smf_core, smf_aaa]],
+    smc_test_lib:clear_app_env(),
+    catch prometheus_gauge:deregister(smf_local_pool_free),
+    catch prometheus_gauge:deregister(smf_local_pool_used),
     smc_test_lib:meck_init(Config),
 
     Dir  = ?config(data_dir, Config),
