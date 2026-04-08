@@ -474,14 +474,9 @@ handle_3xxx_error_async(Config) ->
 	  '3GPP-MSISDN' => <<"FAIL-RC-3002">>
 	 },
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, _} =
-	   smf_aaa_session:invoke(SId, GxOpts, {gx, 'CCR-Initial'}, #{async => true}),
-    Events1 =
-	receive
-	    {update_session, _, Ev1} -> Ev1
-	after 100 -> ct:fail(timeout)
-	end,
+    AAA0 = smf_aaa_session:new(Session),
+    {{fail, 3002}, _AAA1, Events1} =
+	smf_aaa_session:call(AAA0, GxOpts, {gx, 'CCR-Initial'}, #{}),
     ?equal([{stop,{gx,peer_reject}}], Events1),
 
     %% make sure nothing crashed

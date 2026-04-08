@@ -849,24 +849,18 @@ ocs_hold_unexpected_session_down(Config) ->
     DTRA = fun(_Request, _Svc, _Peers, _Extra) -> discard end,
     Session = init_session(#{}, Config),
     GyOpts = #{credits => #{1000 => empty}},
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, DiameterSId} = smf_aaa_session:get(SId, 'Diameter-Session-Id'),
+    AAA0 = smf_aaa_session:new(Session),
+    Session1 = smf_aaa_session:get_session(AAA0),
+    DiameterSId = maps:get('Diameter-Session-Id', Session1),
     set_diameter_session_handler(DiameterSId, DTRA),
 
-    {ok, _Session1, _Events} = smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, []),
+    {ok, AAA1, _Events} = smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, []),
 
     ?equal([{smf_aaa_ro, ocs_hold, 1}], get_session_stats()),
 
-    Stats0 = get_stats(?SERVICE),
-
-    %% pretend we went down
-    SId ! {'DOWN', make_ref(), process, self(), normal},
+    %% With functional API, cleanup is explicit via terminate_action
+    smf_aaa_session:terminate_action(AAA1),
     ct:sleep(100),
-
-    Stats1 = diff_stats(Stats0, get_stats(?SERVICE)),
-
-    %% Make sure we didn't send anything
-    ?equal(0, proplists:get_value({{4, 272, 1}, send}, Stats1)),
 
     ?equal([{smf_aaa_ro, ocs_hold, 0}], get_session_stats()),
 

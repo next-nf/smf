@@ -684,14 +684,14 @@ terminate(Config) ->
     Stats0 = get_stats(?SERVICE),
 
     SOpts = #{now => erlang:monotonic_time()},
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, _Session1, _} =
-	smf_aaa_session:invoke(SId, #{}, start, SOpts),
-    smf_aaa_session:invoke(SId, #{}, {rf, 'Initial'}, SOpts),
+    AAA0 = smf_aaa_session:new(Session),
+    {ok, AAA1, _} =
+	smf_aaa_session:call(AAA0, #{}, start, SOpts),
+    {_, AAA2, _} = smf_aaa_session:call(AAA1, #{}, {rf, 'Initial'}, SOpts),
 
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
-    ?match(ok, smf_aaa_session:terminate(SId)),
+    smf_aaa_session:terminate_action(AAA2),
     wait_for_session(smf_aaa_rf, started, 0, 10),
 
     Stats1 = diff_stats(Stats0, get_stats(?SERVICE)),
