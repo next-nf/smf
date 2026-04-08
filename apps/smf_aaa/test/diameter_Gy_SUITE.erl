@@ -409,11 +409,12 @@ abort_session_request(Config) ->
     Stats0 = get_stats(?SERVICE),
     StatsTestSrv0 = get_stats(diameter_test_server),
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
 
-    {ok, Session1, Events1} =
-	smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, []),
+    {ok, AAA1, Events1} =
+	smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, []),
     ?match([{update_credits,[_,_,_]}], Events1),
+    Session1 = smf_aaa_session:get_session(AAA1),
     ?equal(false, maps:is_key('Multiple-Services-Credit-Control', Session1)),
 
     ?equal([{smf_aaa_ro, started, 1}], get_session_stats()),
@@ -422,8 +423,8 @@ abort_session_request(Config) ->
     ?equal(ok, diameter_test_server:abort_session_request(gy, SessionId, ?'Origin-Host', ?'Origin-Realm')),
 
     receive
-	#aaa_request{procedure = {?API, 'ASR'}} = Request ->
-	    smf_aaa_session:response(Request, ok, #{}, #{})
+	#aaa_request{from = {Pid, Ref}, procedure = {?API, 'ASR'}} ->
+	    Pid ! {Ref, {ok, #{}}}
     after 1000 ->
 	    ct:fail("no ASR")
     end,
@@ -447,12 +448,13 @@ abort_session_request(Config) ->
 	 },
     GyTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       used_credits => maps:to_list(UsedCredits)},
-    {ok, Session2, Events2} =
-	smf_aaa_session:invoke(SId, GyTerm, {gy, 'CCR-Terminate'}, []),
+    {ok, AAA2, Events2} =
+	smf_aaa_session:call(AAA1, GyTerm, {gy, 'CCR-Terminate'}, []),
 
     ?equal([{smf_aaa_ro, started, 0}], get_session_stats()),
 
     ?match([{update_credits,[_,_,_]}], Events2),
+    Session2 = smf_aaa_session:get_session(AAA2),
     ?equal(false, maps:is_key('Multiple-Services-Credit-Control', Session2)),
 
     Stats1 = diff_stats(Stats0, get_stats(?SERVICE)),
@@ -1006,12 +1008,12 @@ terminate(Config) ->
 
     Stats0 = get_stats(?SERVICE),
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
 
-    {ok, _, _} = smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, []),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, []),
     ?equal([{smf_aaa_ro, started, 1}], get_session_stats()),
 
-    ?match(ok, smf_aaa_session:terminate(SId)),
+    smf_aaa_session:terminate_action(AAA1),
     wait_for_session(smf_aaa_ro, started, 0, 10),
 
     Stats1 = diff_stats(Stats0, get_stats(?SERVICE)),

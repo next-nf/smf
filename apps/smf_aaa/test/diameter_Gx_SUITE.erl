@@ -247,30 +247,31 @@ abort_session_request(Config) ->
     Stats0 = get_stats(?SERVICE),
     StatsTestSrv0 = get_stats(diameter_test_server),
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
 
-    {ok, Session1, Events1} =
-	smf_aaa_session:invoke(SId, GxOpts, {gx, 'CCR-Initial'}, []),
+    {ok, AAA1, Events1} =
+	smf_aaa_session:call(AAA0, GxOpts, {gx, 'CCR-Initial'}, []),
 
     ?equal([{smf_aaa_gx, started, 1}], get_session_stats()),
 
     ?match([{pcc, install, [_|_]}], Events1),
 
+    Session1 = smf_aaa_session:get_session(AAA1),
     SessionId = maps:get('Diameter-Session-Id', Session1),
     ?equal(ok, diameter_test_server:abort_session_request(gx, SessionId, ?'Origin-Host', ?'Origin-Realm')),
 
     ?equal([{smf_aaa_gx, started, 1}], get_session_stats()),
 
     receive
-	#aaa_request{procedure = {?API, 'ASR'}} = Request ->
-	    smf_aaa_session:response(Request, ok, #{}, #{})
+	#aaa_request{from = {Pid, Ref}, procedure = {?API, 'ASR'}} ->
+	    Pid ! {Ref, {ok, #{}}}
     after 1000 ->
 	    ct:fail("no ASR")
     end,
 
     GxTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT'},
-    {ok, _Session2, _Events2} =
-	smf_aaa_session:invoke(SId, GxTerm, {gx, 'CCR-Terminate'}, []),
+    {ok, _AAA2, _Events2} =
+	smf_aaa_session:call(AAA1, GxTerm, {gx, 'CCR-Terminate'}, []),
 
     ?equal([{smf_aaa_gx, started, 0}], get_session_stats()),
 
@@ -346,10 +347,10 @@ re_auth_request(Config) ->
     Stats0 = get_stats(?SERVICE),
     StatsTestSrv0 = get_stats(diameter_test_server),
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
 
-    {ok, Session1, Events1} =
-	smf_aaa_session:invoke(SId, GxOpts, {gx, 'CCR-Initial'}, []),
+    {ok, AAA1, Events1} =
+	smf_aaa_session:call(AAA0, GxOpts, {gx, 'CCR-Initial'}, []),
     ?match([{pcc, install, [_|_]}], Events1),
 
     ?equal([{smf_aaa_gx, started, 1}], get_session_stats()),
@@ -358,16 +359,19 @@ re_auth_request(Config) ->
 	#{'Charging-Rule-Remove' => [],
 	  'Charging-Rule-Install' => []},
 
+    Session1 = smf_aaa_session:get_session(AAA1),
     SessionId = maps:get('Diameter-Session-Id', Session1),
     ?equal(ok, diameter_test_server:re_auth_request(gx, SessionId,
 						    ?'Origin-Host', ?'Origin-Realm',
 						    RAROpts)),
 
     receive
-	#aaa_request{procedure = {?API, 'RAR'}, events = Events} = Request ->
+	#aaa_request{from = {Pid1, Ref1}, procedure = {?API, 'RAR'} = Proc1,
+		     handler = Handler1, session = Avps1} ->
+	    {_, Events} = Handler1:to_session(Proc1, {Session1, []}, Avps1),
 	    ?match([{pcc, install, [#{'Charging-Rule-Name' := [<<"service01">>]}]}],
 		   Events),
-	    smf_aaa_session:response(Request, ok, #{}, #{})
+	    Pid1 ! {Ref1, {ok, #{}}}
     after 1000 ->
 	    ct:fail("no RAR")
     end,
@@ -377,34 +381,35 @@ re_auth_request(Config) ->
     ?equal(ok, diameter_test_server:re_auth_request(gx, SessionId,
 						    ?'Origin-Host', ?'Origin-Realm',
 						    RAROpts)),
-    receive
-	#aaa_request{procedure = {?API, 'RAR'}, events = Evs2} = Req2 ->
-	    ?match([{pcc, install, [#{'Charging-Rule-Name' := [<<"service01">>]}]}],
-		   Evs2),
-	    %% check that the session is not blocked for other DIAMETER Apps
-	    ?match({ok, _}, smf_aaa_session:start(SId, #{}, #{async => true})),
+    AAA2 =
+	receive
+	    #aaa_request{from = {Pid2, Ref2}, procedure = {?API, 'RAR'} = Proc2,
+			 handler = Handler2, session = Avps2} ->
+		{_, Evs2} = Handler2:to_session(Proc2, {Session1, []}, Avps2),
+		?match([{pcc, install, [#{'Charging-Rule-Name' := [<<"service01">>]}]}],
+		       Evs2),
+		%% check that the session is not blocked for other DIAMETER Apps
+		{ok, AAA1a, _} = smf_aaa_session:call(AAA1, #{}, start, []),
 
-	    ?equal([{smf_aaa_gx, started, 1}, {smf_aaa_nasreq, started, 1}], get_session_stats()),
+		?equal([{smf_aaa_gx, started, 1}, {smf_aaa_nasreq, started, 1}], get_session_stats()),
 
-	    ?match({ok, _}, smf_aaa_session:interim(SId, #{}, #{async => true})),
+		{ok, AAA1b, _} = smf_aaa_session:call(AAA1a, #{}, interim, []),
 
-	    ?equal([{smf_aaa_gx, started, 1}, {smf_aaa_nasreq, started, 1}], get_session_stats()),
+		?equal([{smf_aaa_gx, started, 1}, {smf_aaa_nasreq, started, 1}], get_session_stats()),
 
-	    ?match({ok, _}, smf_aaa_session:stop(SId, #{}, #{async => true})),
+		{ok, AAA1c, _} = smf_aaa_session:call(AAA1b, #{}, stop, []),
 
-	    ?equal([{smf_aaa_gx, started, 1}, {smf_aaa_nasreq, started, 0}], get_session_stats()),
+		?equal([{smf_aaa_gx, started, 1}, {smf_aaa_nasreq, started, 0}], get_session_stats()),
 
-	    smf_aaa_session:response(Req2, ok, #{}, #{})
-    after 1000 ->
+		Pid2 ! {Ref2, {ok, #{}}},
+		AAA1c
+	after 1000 ->
 	    ct:fail("no RAR")
     end,
 
     GxTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT'},
-    {ok, _Session2, _Events2} =
-	smf_aaa_session:invoke(SId, GxTerm, {gx, 'CCR-Terminate'}, []),
-
-    %% make sure all async requests are finished
-    ct:sleep(100),
+    {ok, _AAA3, _Events2} =
+	smf_aaa_session:call(AAA2, GxTerm, {gx, 'CCR-Terminate'}, []),
 
     ?equal([{smf_aaa_gx, started, 0}, {smf_aaa_nasreq, started, 0}], get_session_stats()),
 
@@ -438,14 +443,14 @@ terminate(Config) ->
 
     Stats0 = get_stats(?SERVICE),
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
 
     ?equal([], get_session_stats()),
 
-    {ok, _, _} = smf_aaa_session:invoke(SId, GxOpts, {gx, 'CCR-Initial'}, []),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, GxOpts, {gx, 'CCR-Initial'}, []),
     ?equal([{smf_aaa_gx, started, 1}], get_session_stats()),
 
-    ?match(ok, smf_aaa_session:terminate(SId)),
+    smf_aaa_session:terminate_action(AAA1),
     wait_for_session(smf_aaa_gx, started, 0, 10),
 
     Statistics = diff_stats(Stats0, get_stats(?SERVICE)),

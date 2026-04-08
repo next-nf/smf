@@ -151,13 +151,11 @@ compat() ->
 compat(Config) ->
     Stats0 = get_stats(?SERVICE),
 
-    {ok, Session} = smf_aaa_session_sup:new_session(self(),
-						     #{'Framed-IP-Address' => {10,10,10,10}}),
-    ?equal(success, smf_aaa_session:authenticate(Session, #{})),
-    ?equal(ok, smf_aaa_session:start(Session, #{})),
-    ?equal(ok, smf_aaa_session:interim(Session, #{})),
-    ?equal(ok, smf_aaa_session:stop(Session, #{})),
-    ct:sleep(100),
+    AAA0 = smf_aaa_session:new(#{'Framed-IP-Address' => {10,10,10,10}}),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, start, []),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, #{}, interim, []),
+    {ok, _AAA4, _} = smf_aaa_session:call(AAA3, #{}, stop, []),
 
     Statistics = diff_stats(Stats0, get_stats(?SERVICE)),
 
@@ -454,24 +452,25 @@ simple_tdf_userid(Config, TermOpts) ->
 abort_session_request() ->
     [{doc, "Stop NASREQ session with ASR"}].
 abort_session_request(Config) ->
-    {ok, Session} = smf_aaa_session_sup:new_session(self(), #{'Framed-IP-Address' => {10,10,10,10}}),
-    ?equal(success, smf_aaa_session:authenticate(Session, #{})),
-    {ok, SessionOpts, _} = smf_aaa_session:start(Session, #{}, []),
-    ?equal(ok, smf_aaa_session:interim(Session, #{})),
+    AAA0 = smf_aaa_session:new(#{'Framed-IP-Address' => {10,10,10,10}}),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, start, []),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, #{}, interim, []),
 
     ?equal([{smf_aaa_nasreq, started, 1}], get_session_stats()),
 
+    SessionOpts = smf_aaa_session:get_session(AAA3),
     SessionId = maps:get('Diameter-Session-Id', SessionOpts),
     ?equal(ok, diameter_test_server:abort_session_request(nasreq, SessionId, ?'Origin-Host', ?'Origin-Realm')),
 
     receive
-	#aaa_request{procedure = {?API, 'ASR'}} = Request ->
-	    smf_aaa_session:response(Request, ok, #{}, #{})
+	#aaa_request{from = {Pid, Ref}, procedure = {?API, 'ASR'}} ->
+	    Pid ! {Ref, {ok, #{}}}
     after 1000 ->
 	    ct:fail("no ASR")
     end,
 
-    ?match({ok, _, _}, smf_aaa_session:stop(Session, #{}, [])),
+    {ok, _AAA4, _} = smf_aaa_session:call(AAA3, #{}, stop, []),
     ?equal([{smf_aaa_nasreq, started, 0}], get_session_stats()),
 
     %% make sure nothing crashed
@@ -484,19 +483,18 @@ terminate() ->
 terminate(Config) ->
    Stats0 = get_stats(?SERVICE),
 
-    {ok, Session} = smf_aaa_session_sup:new_session(
-		      self(),
-		      #{'Framed-IP-Address' => {10,10,10,10},
-			'Framed-IPv6-Prefix' => {{16#fe80,0,0,0,0,0,0,0}, 64},
-			'Framed-Pool' => <<"pool-A">>,
-			'Framed-IPv6-Pool' => <<"pool-A">>}),
+    AAA0 = smf_aaa_session:new(
+	      #{'Framed-IP-Address' => {10,10,10,10},
+		'Framed-IPv6-Prefix' => {{16#fe80,0,0,0,0,0,0,0}, 64},
+		'Framed-Pool' => <<"pool-A">>,
+		'Framed-IPv6-Pool' => <<"pool-A">>}),
 
-    {ok, _, _} = smf_aaa_session:invoke(Session, #{}, authenticate, []),
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, authorize, [])),
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, start, [])),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, authorize, []),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, #{}, start, []),
     ?equal([{smf_aaa_nasreq, started, 1}], get_session_stats()),
 
-    ?match(ok, smf_aaa_session:terminate(Session)),
+    smf_aaa_session:terminate_action(AAA3),
     wait_for_session(smf_aaa_nasreq, started, 0, 10),
 
 

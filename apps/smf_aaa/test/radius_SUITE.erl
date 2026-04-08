@@ -139,12 +139,11 @@ compat() ->
     [{doc, "Check that the old API is still working"}].
 compat(Config) ->
 
-    {ok, Session} = smf_aaa_session_sup:new_session(self(),
-						     #{'Framed-IP-Address' => {10,10,10,10}}),
-    ?equal(success, smf_aaa_session:authenticate(Session, #{})),
-    ?equal(ok, smf_aaa_session:start(Session, #{})),
-    ?equal(ok, smf_aaa_session:interim(Session, #{})),
-    ?equal(ok, smf_aaa_session:stop(Session, #{})),
+    AAA0 = smf_aaa_session:new(#{'Framed-IP-Address' => {10,10,10,10}}),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, start, []),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, #{}, interim, []),
+    {ok, _AAA4, _} = smf_aaa_session:call(AAA3, #{}, stop, []),
 
     %% make sure nothing crashed
     meck_validate(Config),
@@ -166,23 +165,23 @@ disconnect_request() ->
 	[{doc, "Check if we can terminate a session with a disconnect request"}].
 disconnect_request(Config) ->
 
-    {ok, Session} = smf_aaa_session_sup:new_session(self(),
-						     #{'Framed-IP-Address' => {10,10,10,10}}),
+    AAA0 = smf_aaa_session:new(#{'Framed-IP-Address' => {10,10,10,10}}),
 
-    ?equal(success, smf_aaa_session:authenticate(Session, #{})),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
 
     ?equal(0, get_session_stats(smf_aaa_radius, started)),
 
-    ?match({ok, _, _}, smf_aaa_session:start(Session, #{}, [])),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, start, []),
 
     ?equal(1, get_session_stats(smf_aaa_radius, started)),
 
-    DiscPid = send_async_disconnect(Session),
+    SessionOpts = smf_aaa_session:get_session(AAA2),
+    DiscPid = send_async_disconnect(SessionOpts),
 
     %% simulate handling of ASR in smf context
     receive
-        #aaa_request{procedure = {_, 'ASR'}} = Request ->
-        smf_aaa_session:response(Request, ok, #{}, #{})
+        #aaa_request{from = {Pid, Ref}, procedure = {_, 'ASR'}} ->
+        Pid ! {Ref, {ok, #{}}}
     after
         1000 ->
             ct:fail("no disconnect")
@@ -190,7 +189,7 @@ disconnect_request(Config) ->
 
     ?match(#radius_request{cmd=discack}, get_async_disconnect_response(DiscPid)),
 
-    ?match({ok, _, _}, smf_aaa_session:stop(Session, #{}, [])),
+    {ok, _AAA3, _} = smf_aaa_session:call(AAA2, #{}, stop, []),
 
     ?equal(0, get_session_stats(smf_aaa_radius, started)),
 
@@ -202,23 +201,23 @@ disconnect_request_wrong_cause() ->
 	[{doc, "Check if we can terminate a session with a disconnect request"}].
 disconnect_request_wrong_cause(Config) ->
 
-    {ok, Session} = smf_aaa_session_sup:new_session(self(),
-						     #{'Framed-IP-Address' => {10,10,10,10}}),
+    AAA0 = smf_aaa_session:new(#{'Framed-IP-Address' => {10,10,10,10}}),
 
-    ?equal(success, smf_aaa_session:authenticate(Session, #{})),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
 
     ?equal(0, get_session_stats(smf_aaa_radius, started)),
 
-    ?match({ok, _, _}, smf_aaa_session:start(Session, #{}, [])),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, start, []),
 
     ?equal(1, get_session_stats(smf_aaa_radius, started)),
 
-    DiscPid = send_async_disconnect(Session),
+    SessionOpts = smf_aaa_session:get_session(AAA2),
+    DiscPid = send_async_disconnect(SessionOpts),
 
     %% simulate handling of ASR in smf context
     receive
-        #aaa_request{procedure = {_, 'ASR'}} = Request ->
-        smf_aaa_session:response(Request, ok, #{}, #{})
+        #aaa_request{from = {Pid, Ref}, procedure = {_, 'ASR'}} ->
+        Pid ! {Ref, {ok, #{}}}
     after
         1000 ->
             ct:fail("no disconnect")
@@ -226,7 +225,8 @@ disconnect_request_wrong_cause(Config) ->
 
     ?match(#radius_request{cmd=discack}, get_async_disconnect_response(DiscPid)),
 
-    ?match({ok, #{'Termination-Cause' := 9}, _}, smf_aaa_session:stop(Session, #{'Termination-Cause' => dummy}, [])),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, #{'Termination-Cause' => dummy}, stop, []),
+    ?match(#{'Termination-Cause' := 9}, smf_aaa_session:get_session(AAA3)),
 
     ?equal(0, get_session_stats(smf_aaa_radius, started)),
 
@@ -238,23 +238,23 @@ disconnect_request_timeout() ->
 	[{doc, "Check if we can terminate a session with a disconnect request"}].
 disconnect_request_timeout(Config) ->
 
-    {ok, Session} = smf_aaa_session_sup:new_session(self(),
-						     #{'Framed-IP-Address' => {10,10,10,10}}),
+    AAA0 = smf_aaa_session:new(#{'Framed-IP-Address' => {10,10,10,10}}),
 
-    ?equal(success, smf_aaa_session:authenticate(Session, #{})),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
 
     ?equal(0, get_session_stats(smf_aaa_radius, started)),
 
-    ?match({ok, _, _}, smf_aaa_session:start(Session, #{}, [])),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, start, []),
 
     ?equal(1, get_session_stats(smf_aaa_radius, started)),
 
-    DiscPid = send_async_disconnect(Session),
+    SessionOpts = smf_aaa_session:get_session(AAA2),
+    DiscPid = send_async_disconnect(SessionOpts),
 
     %% simulate handling of ASR in smf context
     receive
-        #aaa_request{procedure = {_, 'ASR'}} = Request ->
-        smf_aaa_session:response(Request, ok, #{}, #{})
+        #aaa_request{from = {Pid, Ref}, procedure = {_, 'ASR'}} ->
+        Pid ! {Ref, {ok, #{}}}
     after
         1000 ->
             ct:fail("no disconnect")
@@ -262,7 +262,8 @@ disconnect_request_timeout(Config) ->
 
     ?match(#radius_request{cmd=discack}, get_async_disconnect_response(DiscPid)),
 
-    ?match({ok, #{'Termination-Cause' := 4}, _}, smf_aaa_session:stop(Session, #{'Termination-Cause' => timeout}, [])),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, #{'Termination-Cause' => timeout}, stop, []),
+    ?match(#{'Termination-Cause' := 4}, smf_aaa_session:get_session(AAA3)),
 
     ?equal(0, get_session_stats(smf_aaa_radius, started)),
 
@@ -453,19 +454,18 @@ terminate() ->
     [{doc, "Simulate unexpected owner termiantion"}].
 terminate(Config) ->
 
-    {ok, Session} = smf_aaa_session_sup:new_session(
-		      self(),
-		      #{'Framed-IP-Address' => {10,10,10,10},
-			'Framed-IPv6-Prefix' => {{16#fe80,0,0,0,0,0,0,0}, 64},
-			'Framed-Pool' => <<"pool-A">>,
-			'Framed-IPv6-Pool' => <<"pool-A">>,
-			'Framed-Interface-Id' => {0,0,0,0,0,0,0,1}}),
+    AAA0 = smf_aaa_session:new(
+	      #{'Framed-IP-Address' => {10,10,10,10},
+		'Framed-IPv6-Prefix' => {{16#fe80,0,0,0,0,0,0,0}, 64},
+		'Framed-Pool' => <<"pool-A">>,
+		'Framed-IPv6-Pool' => <<"pool-A">>,
+		'Framed-Interface-Id' => {0,0,0,0,0,0,0,1}}),
 
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, start, [])),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, start, []),
 
     ?equal(1, get_session_stats(smf_aaa_radius, started)),
 
-    ?match(ok, smf_aaa_session:terminate(Session)),
+    smf_aaa_session:terminate_action(AAA1),
     wait_for_session(smf_aaa_radius, started, 0, 10),
 
     meck_validate(Config),
@@ -531,9 +531,9 @@ simple(Config, Opts) ->
     meck_validate(Config),
     ok.
 
-send_async_disconnect(Session) ->
+send_async_disconnect(SessionOpts) ->
+    SessionId = maps:get('Session-Id', SessionOpts),
     spawn(fun() ->
-            {ok, SessionId} = smf_aaa_session:get(Session, 'Session-Id'),
             Attrs = [{?Acct_Session_Id, io_lib:format("~40.16.0B", [SessionId])}],
             {ok, R, A} = eradius_client:send_request(
                 {{127,0,0,1}, 3799, "secret"},
