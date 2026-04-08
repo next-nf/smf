@@ -4,7 +4,7 @@
 
 -module(smf_aaa_pcf).
 
--export([new/1,
+-export([new/2,
 	 ccr_initial/4, ccr_update/4, ccr_terminate/4,
 	 terminate/3,
 	 handle_reply/4]).
@@ -15,12 +15,11 @@
 %% API
 %%===================================================================
 
-new(AppId) ->
+new(AppId, Session) ->
     Ctx = #pcf_ctx{app_id = AppId, handlers = #{}},
-    %% run init to initialize handler states
-    case invoke(Ctx, #{}, #{}, init, #{}) of
-	{ok, Ctx1, _, _} -> Ctx1;
-	{_, Ctx1, _, _} -> Ctx1
+    case invoke(Ctx, Session, #{}, init, #{}) of
+	{ok, Ctx1, Session1, _} -> {Ctx1, Session1};
+	{_, Ctx1, Session1, _} -> {Ctx1, Session1}
     end.
 
 ccr_initial(Ctx, Session, SOpts, Opts) ->

@@ -4,7 +4,7 @@
 
 -module(smf_aaa_charging).
 
--export([new/1,
+-export([new/2,
 	 gy_ccr_initial/4, gy_ccr_update/4, gy_ccr_terminate/4,
 	 rf_initial/4, rf_update/4, rf_terminate/4,
 	 terminate/3,
@@ -16,11 +16,11 @@
 %% API
 %%===================================================================
 
-new(AppId) ->
+new(AppId, Session) ->
     Ctx = #charging_ctx{app_id = AppId, handlers = #{}},
-    case invoke(Ctx, #{}, #{}, init, #{}) of
-	{ok, Ctx1, _, _} -> Ctx1;
-	{_, Ctx1, _, _} -> Ctx1
+    case invoke(Ctx, Session, #{}, init, #{}) of
+	{ok, Ctx1, Session1, _} -> {Ctx1, Session1};
+	{_, Ctx1, Session1, _} -> {Ctx1, Session1}
     end.
 
 gy_ccr_initial(Ctx, Session, SOpts, Opts) ->

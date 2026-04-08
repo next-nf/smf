@@ -95,11 +95,11 @@ validate_option(Opt, Value) ->
     gtp_context:validate_option(Opt, Value).
 
 init(_Opts, Data0) ->
-    AAASession = smf_aaa_session:new_session(to_session([])),
-    AppId = maps:get('AAA-Application-Id', AAASession, default),
-    PCF = smf_aaa_pcf:new(AppId),
-    Charging = smf_aaa_charging:new(AppId),
-    AAAAuth = smf_aaa_auth:new(AppId),
+    AAASession0 = smf_aaa_session:new_session(to_session([])),
+    AppId = maps:get('AAA-Application-Id', AAASession0, default),
+    {PCF, AAASession1} = smf_aaa_pcf:new(AppId, AAASession0),
+    {Charging, AAASession2} = smf_aaa_charging:new(AppId, AAASession1),
+    {AAAAuth, AAASession} = smf_aaa_auth:new(AppId, AAASession2),
     OCPcfg = maps:get('Offline-Charging-Profile', AAASession, #{}),
     PCC = #pcc_ctx{offline_charging_profile = OCPcfg},
     Data = Data0#{'Version' => v1, aaa_session => AAASession, pcf => PCF,

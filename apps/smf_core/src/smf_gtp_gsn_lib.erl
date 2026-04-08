@@ -97,7 +97,7 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
     GxOpts = #{'Event-Trigger' => ?'DIAMETER_GX_EVENT-TRIGGER_UE_IP_ADDRESS_ALLOCATE',
 	       'Bearer-Operation' => ?'DIAMETER_GX_BEARER-OPERATION_ESTABLISHMENT'},
 
-    {_, GxEvents, PCF1} =
+    {GxSession, GxEvents, PCF1} =
 	case smf_gtp_gsn_session:ccr_initial_gx(PCF0, Session2, GxOpts, SOpts) of
 	    {ok, Result8} -> Result8;
 	    {error, Err8} -> throw(Err8#ctx_err{context = Context, tunnel = LeftTunnel})
@@ -117,8 +117,8 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
     CreditsAdd = smf_pcc_context:pcc_ctx_to_credit_request(PCC1),
     GyReqServices = #{credits => CreditsAdd},
 
-    {_GySession, GyEvs, Charging1} =
-	case smf_gtp_gsn_session:ccr_initial_gy(Charging0, Session2, GyReqServices, SOpts) of
+    {GySession, GyEvs, Charging1} =
+	case smf_gtp_gsn_session:ccr_initial_gy(Charging0, GxSession, GyReqServices, SOpts) of
 	    {ok, Result9} -> Result9;
 	    {error, Err9} -> throw(Err9#ctx_err{context = Context, tunnel = LeftTunnel})
 	end,
@@ -126,7 +126,7 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
     ?LOG(debug, "Initial GyEvs: ~p", [GyEvs]),
 
     {ok, Charging2, Session3, RfSEvs} =
-	smf_aaa_charging:rf_initial(Charging1, Session2, #{}, SOpts),
+	smf_aaa_charging:rf_initial(Charging1, GySession, #{}, SOpts),
 
     {PCC2, PCCErrors2} = smf_pcc_context:gy_events_to_pcc_ctx(Now, GyEvs, PCC1),
     PCC3 = smf_pcc_context:session_events_to_pcc_ctx(AuthSEvs, PCC2),

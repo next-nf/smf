@@ -4,7 +4,7 @@
 
 -module(smf_aaa_auth).
 
--export([new/1,
+-export([new/2,
 	 authenticate/4, authorize/4,
 	 start/4, interim/4, stop/4,
 	 terminate/3,
@@ -16,11 +16,11 @@
 %% API
 %%===================================================================
 
-new(AppId) ->
+new(AppId, Session) ->
     Ctx = #aaa_auth_ctx{app_id = AppId, handlers = #{}},
-    case invoke(Ctx, #{}, #{}, init, #{}) of
-	{ok, Ctx1, _, _} -> Ctx1;
-	{_, Ctx1, _, _} -> Ctx1
+    case invoke(Ctx, Session, #{}, init, #{}) of
+	{ok, Ctx1, Session1, _} -> {Ctx1, Session1};
+	{_, Ctx1, Session1, _} -> {Ctx1, Session1}
     end.
 
 authenticate(Ctx, Session, SOpts, Opts) ->
