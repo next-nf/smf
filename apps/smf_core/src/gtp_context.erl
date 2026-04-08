@@ -436,8 +436,11 @@ handle_event({call, From},
     Now = erlang:monotonic_time(),
     ChargeEv = interim,
 
-    AAA1 = smf_gtp_gsn_session:usage_report_request(ChargeEv, Now, UsageReport, PCtx, PCC, AAA0),
-    {keep_state, Data#{aaa := AAA1}, [{reply, From, {ok, PCtx}}]};
+    {AAA1, GyEvs} = smf_gtp_gsn_session:usage_report_request(ChargeEv, Now, UsageReport, PCtx, PCC, AAA0),
+    Session = smf_aaa_session:get_session(AAA1),
+    Actions = [{reply, From, {ok, PCtx}} |
+	       [{next_event, internal, {session, Ev, Session}} || Ev <- GyEvs]],
+    {keep_state, Data#{aaa := AAA1}, Actions};
 
 handle_event(cast, {handle_message, Request, #gtp{} = Msg0, Resent}, State, Data) ->
     Msg = gtp_packet:decode_ies(Msg0),
@@ -556,8 +559,10 @@ handle_event(info, #aaa_request{procedure = {gy, 'RAR'},
 	    _ ->
 		undefined
 	end,
-    Data1 = smf_gtp_gsn_lib:triggered_charging_event(interim, Now, ChargingKeys, Data),
-    {keep_state, Data1};
+    {Data1, GyEvs1} = smf_gtp_gsn_lib:triggered_charging_event(interim, Now, ChargingKeys, Data),
+    Session1 = smf_aaa_session:get_session(maps:get(aaa, Data1)),
+    Actions1 = [{next_event, internal, {session, Ev, Session1}} || Ev <- GyEvs1],
+    {keep_state, Data1, Actions1};
 
 handle_event(info, #aaa_request{procedure = {_, 'RAR'}} = Request, _State, _Data) ->
     smf_aaa_session:response(Request, {error, unknown_session}, #{}, #{}),
@@ -611,8 +616,10 @@ handle_event(info, {timeout, TRef, pfcp_timer} = Info, _State, #{pfcp := PCtx0} 
     {Evs, PCtx} = smf_pfcp:timer_expired(TRef, PCtx0),
     Data = Data0#{pfcp => PCtx},
     #{validity_time := ChargingKeys} = smf_gsn_lib:pfcp_to_context_event(Evs),
-    Data1 = smf_gtp_gsn_lib:triggered_charging_event(validity_time, Now, ChargingKeys, Data),
-    {keep_state, Data1};
+    {Data1, GyEvs1} = smf_gtp_gsn_lib:triggered_charging_event(validity_time, Now, ChargingKeys, Data),
+    Session1 = smf_aaa_session:get_session(maps:get(aaa, Data1)),
+    Actions1 = [{next_event, internal, {session, Ev, Session1}} || Ev <- GyEvs1],
+    {keep_state, Data1, Actions1};
 
 handle_event({call, From}, {delete_context, Reason},  #{session := SState} = State, Data)
   when SState == connected; SState == connecting ->

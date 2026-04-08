@@ -213,12 +213,12 @@ triggered_charging_event(ChargeEv, Now, Request,
 			 #{pfcp := PCtx, aaa := AAA0, pcc := PCC} = Data) ->
     case query_usage_report(Request, PCtx) of
 	{ok, {_, UsageReport, _}} ->
-	    AAA1 = smf_gtp_gsn_session:usage_report_request(
-		     ChargeEv, Now, UsageReport, PCtx, PCC, AAA0),
-	    Data#{aaa := AAA1};
+	    {AAA1, GyEvs} = smf_gtp_gsn_session:usage_report_request(
+			      ChargeEv, Now, UsageReport, PCtx, PCC, AAA0),
+	    {Data#{aaa := AAA1}, GyEvs};
 	{error, CtxErr} ->
 	    ?LOG(error, "Triggered Charging Event failed with ~p", [CtxErr]),
-	    Data
+	    {Data, []}
     end.
 
 usage_report(URRActions, UsageReport, #{pfcp := PCtx, aaa := AAA0} = Data) ->

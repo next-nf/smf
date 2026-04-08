@@ -53,8 +53,9 @@ usage_report_request(ChargeEv, Now, UsageReport, PCtx, PCC, AAA0) ->
 	smf_pfcp_context:usage_report_to_charging_events(UsageReport, ChargeEv, PCtx),
     AAA1 = smf_gsn_lib:process_accounting_monitor_events(ChargeEv, Monitor, Now, AAA0),
     GyReqServices = smf_pcc_context:gy_credit_request(Online, PCC),
-    {AAA2, _} = smf_gsn_lib:process_online_charging_events(ChargeEv, GyReqServices, AAA1, ReqOpts),
-    smf_gsn_lib:process_offline_charging_events(ChargeEv, Offline, Now, AAA2).
+    {AAA2, GyEvs} = smf_gsn_lib:process_online_charging_events(ChargeEv, GyReqServices, AAA1, ReqOpts),
+    AAA3 = smf_gsn_lib:process_offline_charging_events(ChargeEv, Offline, Now, AAA2),
+    {AAA3, GyEvs}.
 
 usage_report(URRActions, UsageReport, PCtx, AAA0) ->
     Now = erlang:monotonic_time(),
