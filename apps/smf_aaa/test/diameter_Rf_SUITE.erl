@@ -220,10 +220,10 @@ simple_session(Config) ->
     Stats0 = get_stats(?SERVICE),
 
     SOpts = #{now => erlang:monotonic_time()},
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, _Session1, _} =
-	smf_aaa_session:invoke(SId, #{}, start, SOpts),
-    smf_aaa_session:invoke(SId, #{}, {rf, 'Initial'}, SOpts),
+    AAA0 = smf_aaa_session:new(Session),
+    {ok, AAA1, _} =
+	smf_aaa_session:call(AAA0, #{}, start, SOpts),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, {rf, 'Initial'}, SOpts),
 
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
@@ -250,9 +250,9 @@ simple_session(Config) ->
 
     RfTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       service_data => SDC},
-    smf_aaa_session:invoke(SId, #{}, stop, SOpts),
-    {ok, _Session2, _} =
-	smf_aaa_session:invoke(SId, RfTerm, {rf, 'Terminate'}, SOpts),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, #{}, stop, SOpts),
+    {ok, _AAA4, _} =
+	smf_aaa_session:call(AAA3, RfTerm, {rf, 'Terminate'}, SOpts),
 
     ?equal([{smf_aaa_rf, started, 0}], get_session_stats()),
 
@@ -272,10 +272,10 @@ multi_event_session(Config) ->
     Stats0 = get_stats(?SERVICE),
 
     SOpts = #{now => erlang:monotonic_time()},
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, _Session1, _} =
-	smf_aaa_session:invoke(SId, #{}, start, SOpts),
-    smf_aaa_session:invoke(SId, #{}, {rf, 'Initial'}, SOpts),
+    AAA0 = smf_aaa_session:new(Session),
+    {ok, AAA1, _} =
+	smf_aaa_session:call(AAA0, #{}, start, SOpts),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, {rf, 'Initial'}, SOpts),
 
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
@@ -315,30 +315,30 @@ multi_event_session(Config) ->
 
     RfUpdCont = #{service_data => SDC},
     RfUpdCDR  = #{service_data => SDC, traffic_data => TD},
-    {ok, _, _} =
-	smf_aaa_session:invoke(SId, RfUpdCont, {rf, 'Update'},
+    {ok, AAA3, _} =
+	smf_aaa_session:call(AAA2, RfUpdCont, {rf, 'Update'},
 				SOpts#{'gy_event' => container_closure}),
 
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
-    {ok, _, _} =
-	smf_aaa_session:invoke(SId, RfUpdCont, {rf, 'Update'},
+    {ok, AAA4, _} =
+	smf_aaa_session:call(AAA3, RfUpdCont, {rf, 'Update'},
 				SOpts#{'gy_event' => container_closure}),
-    {ok, _, _} =
-	smf_aaa_session:invoke(SId, RfUpdCDR, {rf, 'Update'},
+    {ok, AAA5, _} =
+	smf_aaa_session:call(AAA4, RfUpdCDR, {rf, 'Update'},
 				SOpts#{'gy_event' => cdr_closure}),
 
-    {ok, _, _} =
-	smf_aaa_session:invoke(SId, RfUpdCont, {rf, 'Update'},
+    {ok, AAA6, _} =
+	smf_aaa_session:call(AAA5, RfUpdCont, {rf, 'Update'},
 				SOpts#{'gy_event' => container_closure}),
 
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
     RfTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       service_data => SDC, traffic_data => TD},
-    smf_aaa_session:invoke(SId, #{}, stop, SOpts),
-    {ok, _Session2, _} =
-	smf_aaa_session:invoke(SId, RfTerm, {rf, 'Terminate'}, SOpts),
+    {ok, AAA7, _} = smf_aaa_session:call(AAA6, #{}, stop, SOpts),
+    {ok, _AAA8, _} =
+	smf_aaa_session:call(AAA7, RfTerm, {rf, 'Terminate'}, SOpts),
 
     ?equal([{smf_aaa_rf, started, 0}], get_session_stats()),
 
@@ -358,10 +358,10 @@ inoctets_crash(Config) ->
     Stats0 = get_stats(?SERVICE),
 
     SOpts = #{now => erlang:monotonic_time()},
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, _Session1, _} =
-	smf_aaa_session:invoke(SId, #{}, start, SOpts),
-    smf_aaa_session:invoke(SId, #{}, {rf, 'Initial'}, SOpts),
+    AAA0 = smf_aaa_session:new(Session),
+    {ok, AAA1, _} =
+	smf_aaa_session:call(AAA0, #{}, start, SOpts),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, {rf, 'Initial'}, SOpts),
 
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
@@ -390,30 +390,30 @@ inoctets_crash(Config) ->
 
     RfUpdCont = #{service_data => SDC},
     RfUpdCDR  = #{'InOctets' => 1, 'OutOctets' => 1, service_data => SDC, traffic_data => TD},
-    {ok, _, _} =
-	smf_aaa_session:invoke(SId, RfUpdCont, {rf, 'Update'},
+    {ok, AAA3, _} =
+	smf_aaa_session:call(AAA2, RfUpdCont, {rf, 'Update'},
 				SOpts#{'gy_event' => container_closure}),
 
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
-    {ok, _, _} =
-	smf_aaa_session:invoke(SId, RfUpdCont, {rf, 'Update'},
+    {ok, AAA4, _} =
+	smf_aaa_session:call(AAA3, RfUpdCont, {rf, 'Update'},
 				SOpts#{'gy_event' => container_closure}),
-    {ok, _, _} =
-	smf_aaa_session:invoke(SId, RfUpdCDR, {rf, 'Update'},
+    {ok, AAA5, _} =
+	smf_aaa_session:call(AAA4, RfUpdCDR, {rf, 'Update'},
 				SOpts#{'gy_event' => cdr_closure}),
 
-    {ok, _, _} =
-	smf_aaa_session:invoke(SId, RfUpdCont, {rf, 'Update'},
+    {ok, AAA6, _} =
+	smf_aaa_session:call(AAA5, RfUpdCont, {rf, 'Update'},
 				SOpts#{'gy_event' => container_closure}),
 
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
     RfTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       service_data => SDC, traffic_data => TD},
-    smf_aaa_session:invoke(SId, #{}, stop, SOpts),
-    {ok, _Session2, _} =
-	smf_aaa_session:invoke(SId, RfTerm, {rf, 'Terminate'}, SOpts),
+    {ok, AAA7, _} = smf_aaa_session:call(AAA6, #{}, stop, SOpts),
+    {ok, _AAA8, _} =
+	smf_aaa_session:call(AAA7, RfTerm, {rf, 'Terminate'}, SOpts),
 
     ?equal([{smf_aaa_rf, started, 0}], get_session_stats()),
 
@@ -433,11 +433,10 @@ async(Config) ->
     Stats0 = get_stats(?SERVICE),
 
     SOpts = #{now => erlang:monotonic_time()},
-    AsyncSOpts = SOpts#{async => true},
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, _Session1, _} =
-	smf_aaa_session:invoke(SId, #{}, start, SOpts),
-    smf_aaa_session:invoke(SId, #{}, {rf, 'Initial'}, SOpts),
+    AAA0 = smf_aaa_session:new(Session),
+    {ok, AAA1, _} =
+	smf_aaa_session:call(AAA0, #{}, start, SOpts),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, {rf, 'Initial'}, SOpts),
 
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
@@ -463,28 +462,27 @@ async(Config) ->
 	],
 
     RfUpd = #{service_data => SDC},
-    ?match({ok, _},
-	smf_aaa_session:invoke(SId, RfUpd, {rf, 'Update'},
-				AsyncSOpts#{'gy_event' => container_closure})),
-    ?match({ok, _},
-	smf_aaa_session:invoke(SId, RfUpd, {rf, 'Update'},
-				AsyncSOpts#{'gy_event' => container_closure})),
-    ?match({ok, _},
-	smf_aaa_session:invoke(SId, RfUpd, {rf, 'Update'},
-				AsyncSOpts#{'gy_event' => cdr_closure})),
+    {ok, AAA3, _} =
+	smf_aaa_session:call(AAA2, RfUpd, {rf, 'Update'},
+				SOpts#{'gy_event' => container_closure}),
+    {ok, AAA4, _} =
+	smf_aaa_session:call(AAA3, RfUpd, {rf, 'Update'},
+				SOpts#{'gy_event' => container_closure}),
+    {ok, AAA5, _} =
+	smf_aaa_session:call(AAA4, RfUpd, {rf, 'Update'},
+				SOpts#{'gy_event' => cdr_closure}),
 
-    ?match({ok, _},
-	smf_aaa_session:invoke(SId, RfUpd, {rf, 'Update'},
-				AsyncSOpts#{'gy_event' => container_closure})),
+    {ok, AAA6, _} =
+	smf_aaa_session:call(AAA5, RfUpd, {rf, 'Update'},
+				SOpts#{'gy_event' => container_closure}),
 
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
     RfTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       service_data => SDC},
-    smf_aaa_session:invoke(SId, #{}, stop, AsyncSOpts),
-    {ok, _Session2} =
-	smf_aaa_session:invoke(SId, RfTerm, {rf, 'Terminate'}, AsyncSOpts),
-    ct:sleep(100),
+    {ok, AAA7, _} = smf_aaa_session:call(AAA6, #{}, stop, SOpts),
+    {ok, _AAA8, _} =
+	smf_aaa_session:call(AAA7, RfTerm, {rf, 'Terminate'}, SOpts),
 
     ?equal([{smf_aaa_rf, started, 0}], get_session_stats()),
 
@@ -503,10 +501,10 @@ secondary_rat_usage_data_report(Config) ->
     Stats0 = get_stats(?SERVICE),
 
     SOpts = #{now => erlang:monotonic_time()},
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, _Session1, _} =
-	smf_aaa_session:invoke(SId, #{}, start, SOpts),
-    smf_aaa_session:invoke(SId, #{}, {rf, 'Initial'}, SOpts),
+    AAA0 = smf_aaa_session:new(Session),
+    {ok, AAA1, _} =
+	smf_aaa_session:call(AAA0, #{}, start, SOpts),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, {rf, 'Initial'}, SOpts),
 
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
@@ -533,7 +531,7 @@ secondary_rat_usage_data_report(Config) ->
 		 'RAN-End-Timestamp' =>   [{{2020,1,1}, {0,15,0}}],
 		 'Secondary-RAT-Type' => [<<0>>]
 		}]},
-    smf_aaa_session:invoke(SId, SecRatReport0, {rf, 'Update'}, SOpts#{async => false}),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, SecRatReport0, {rf, 'Update'}, SOpts),
 
     SecRatReport1 =
 	#{'RAN-Secondary-RAT-Usage-Report' =>
@@ -558,7 +556,7 @@ secondary_rat_usage_data_report(Config) ->
 		 'RAN-End-Timestamp' =>   [{{2020,1,1}, {0,35,0}}],
 		 'Secondary-RAT-Type' => [<<0>>]
 		}]},
-    smf_aaa_session:invoke(SId, SecRatReport1, {rf, 'Update'}, SOpts#{async => false}),
+    {ok, AAA4, _} = smf_aaa_session:call(AAA3, SecRatReport1, {rf, 'Update'}, SOpts),
 
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
@@ -585,9 +583,9 @@ secondary_rat_usage_data_report(Config) ->
 
     RfTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       service_data => SDC},
-    smf_aaa_session:invoke(SId, #{}, stop, SOpts),
-    {ok, _Session2, _} =
-	smf_aaa_session:invoke(SId, RfTerm, {rf, 'Terminate'}, SOpts),
+    {ok, AAA5, _} = smf_aaa_session:call(AAA4, #{}, stop, SOpts),
+    {ok, _AAA6, _} =
+	smf_aaa_session:call(AAA5, RfTerm, {rf, 'Terminate'}, SOpts),
 
     ?equal([{smf_aaa_rf, started, 0}], get_session_stats()),
 
@@ -642,9 +640,9 @@ handle_failure(Config) ->
 
     Stats0 = get_stats(?SERVICE),
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
     ?match({{fail, 3001}, _, _},
-	   smf_aaa_session:invoke(SId, #{}, {rf, 'Initial'}, SOpts)),
+	   smf_aaa_session:call(AAA0, #{}, {rf, 'Initial'}, SOpts)),
 
     %% a session that has been rejected can not be in a `started` state
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
@@ -668,9 +666,9 @@ handle_answer_error(Config) ->
 	  '3GPP-MSISDN' => <<"FAIL-BROKEN-ANSWER">>},
     Session = init_session(SOpts, Config),
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
     ?match({{error, 3007}, _, _},
-	   smf_aaa_session:invoke(SId, SOpts, {rf, 'Initial'}, [])),
+	   smf_aaa_session:call(AAA0, SOpts, {rf, 'Initial'}, [])),
 
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
@@ -773,10 +771,10 @@ encode_error(Config) ->
     Stats0 = get_stats(?SERVICE),
 
     SOpts = #{now => erlang:monotonic_time()},
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, _Session1, _} =
-	smf_aaa_session:invoke(SId, #{}, start, SOpts),
-    R = smf_aaa_session:invoke(SId, #{}, {rf, 'Initial'}, SOpts),
+    AAA0 = smf_aaa_session:new(Session),
+    {ok, AAA1, _} =
+	smf_aaa_session:call(AAA0, #{}, start, SOpts),
+    R = smf_aaa_session:call(AAA1, #{}, {rf, 'Initial'}, SOpts),
     ct:pal("R: ~p", [R]),
 
     Stats1 = diff_stats(Stats0, get_stats(?SERVICE)),
@@ -797,10 +795,10 @@ plmn_change(Config) ->
     Stats0 = get_stats(?SERVICE),
 
     SOpts = #{now => erlang:monotonic_time()},
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, _Session1, _} =
-	smf_aaa_session:invoke(SId, #{}, start, SOpts),
-    smf_aaa_session:invoke(SId, #{}, {rf, 'Initial'}, SOpts),
+    AAA0 = smf_aaa_session:new(Session),
+    {ok, AAA1, _} =
+	smf_aaa_session:call(AAA0, #{}, start, SOpts),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, {rf, 'Initial'}, SOpts),
 
     ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
@@ -851,18 +849,18 @@ plmn_change(Config) ->
 		    #tai{plmn_id = {<<"001">>, <<"01">>},
 			 tac = rand:uniform(16#ffff)}}
 	  },
-    smf_aaa_session:set(SId, SessionUpdate),
+    AAA3 = smf_aaa_session:set_session(SessionUpdate, AAA2),
 
     RfUpdCDR  = #{service_data => SDC, traffic_data => TD},
-    {ok, _, _} =
-	smf_aaa_session:invoke(SId, RfUpdCDR, {rf, 'Update'},
+    {ok, AAA4, _} =
+	smf_aaa_session:call(AAA3, RfUpdCDR, {rf, 'Update'},
 				SOpts#{'gy_event' => cdr_closure}),
 
     RfTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       service_data => SDC, traffic_data => TD},
-    smf_aaa_session:invoke(SId, #{}, stop, SOpts),
-    {ok, _Session2, _} =
-	smf_aaa_session:invoke(SId, RfTerm, {rf, 'Terminate'}, SOpts),
+    {ok, AAA5, _} = smf_aaa_session:call(AAA4, #{}, stop, SOpts),
+    {ok, _AAA6, _} =
+	smf_aaa_session:call(AAA5, RfTerm, {rf, 'Terminate'}, SOpts),
 
     ?equal([{smf_aaa_rf, started, 0}], get_session_stats()),
 
@@ -918,11 +916,11 @@ async_session(Owner, Ref) ->
 async_session(Owner, Ref, Delay) ->
     SOpts = #{now => erlang:monotonic_time()},
     Session = init_session(#{}, []),
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
 
-    {ok, _Session1, _} =
-	smf_aaa_session:invoke(SId, #{}, start, SOpts),
-    IResult = smf_aaa_session:invoke(SId, #{}, {rf, 'Initial'}, SOpts),
+    {ok, AAA1, _} =
+	smf_aaa_session:call(AAA0, #{}, start, SOpts),
+    {_IRes, AAA2, _} = IResult = smf_aaa_session:call(AAA1, #{}, {rf, 'Initial'}, SOpts),
     Owner ! {Ref, 'Initial', IResult},
 
     timer:sleep(Delay),
@@ -950,8 +948,8 @@ async_session(Owner, Ref, Delay) ->
 
     RfTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       service_data => SDC},
-    smf_aaa_session:invoke(SId, #{}, stop, SOpts),
-    TResult = smf_aaa_session:invoke(SId, RfTerm, {rf, 'Terminate'}, SOpts),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, #{}, stop, SOpts),
+    TResult = smf_aaa_session:call(AAA3, RfTerm, {rf, 'Terminate'}, SOpts),
     Owner ! {Ref, 'Terminate', TResult},
 
     ok.

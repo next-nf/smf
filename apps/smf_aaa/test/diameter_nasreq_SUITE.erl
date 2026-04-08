@@ -193,18 +193,17 @@ accounting() ->
 accounting(Config) ->
     Stats0 = get_stats(?SERVICE),
 
-    {ok, Session} = smf_aaa_session_sup:new_session(self(),
-						     #{'Framed-IP-Address' => {10,10,10,10}}),
-    ?equal(success, smf_aaa_session:authenticate(Session, #{})),
-    ?match({ok, _, _}, smf_aaa_session:start(Session, #{}, [])),
+    AAA0 = smf_aaa_session:new(#{'Framed-IP-Address' => {10,10,10,10}}),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, start, []),
 
     ?equal([{smf_aaa_nasreq, started, 1}], get_session_stats()),
 
-    ?match({ok, _, _}, smf_aaa_session:interim(Session, #{}, [])),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, #{}, interim, []),
 
     ?equal([{smf_aaa_nasreq, started, 1}], get_session_stats()),
 
-    ?match({ok, _, _}, smf_aaa_session:stop(Session, #{}, [])),
+    {ok, _AAA4, _} = smf_aaa_session:call(AAA3, #{}, stop, []),
 
     ?equal([{smf_aaa_nasreq, started, 0}], get_session_stats()),
 
@@ -225,14 +224,13 @@ acct_interim_interval() ->
       "by data from ACA Acct-Interim-Interval"}].
 acct_interim_interval(Config) ->
     Fun = fun(_, S) -> S end,
-    {ok, Session} = smf_aaa_session_sup:new_session(self(), #{'Accouting-Update-Fun' => Fun}),
-    ?equal(success, smf_aaa_session:authenticate(Session, #{})),
-    StartRes = smf_aaa_session:start(Session, #{}, []),
-    ?match({ok, _, _}, StartRes),
+    AAA0 = smf_aaa_session:new(#{'Accouting-Update-Fun' => Fun}),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
+    {ok, AAA2, Ev} = smf_aaa_session:call(AAA1, #{}, start, []),
 
     ?equal([{smf_aaa_nasreq, started, 1}], get_session_stats()),
 
-    {_, SessionOpts, Ev} = StartRes,
+    SessionOpts = smf_aaa_session:get_session(AAA2),
     ?match(#{'Session-Id' := _,
 	     'Diameter-Session-Id' := _,
 	     'Service-Type' := 'Framed-User',
@@ -285,12 +283,13 @@ attrs_3gpp(Config) ->
 
     Stats0 = get_stats(?SERVICE),
 
-    {ok, Session} = smf_aaa_session_sup:new_session(self(), Attrs),
-    {ok, SessionAfterAuth, _} = smf_aaa_session:invoke(Session, #{}, authenticate, [inc_session_id]),
+    AAA0 = smf_aaa_session:new(Attrs),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, [inc_session_id]),
+    SessionAfterAuth = smf_aaa_session:get_session(AAA1),
     ?match(#{'MS-Primary-DNS-Server' := {1,2,3,4}, 'MS-Secondary-DNS-Server' := {5,6,7,8}}, SessionAfterAuth),
     ?match(#{'Framed-MTU' := 1500}, SessionAfterAuth),
 
-    ?match({ok, _, _}, smf_aaa_session:start(Session, #{}, [])),
+    ?match({ok, _, _}, smf_aaa_session:call(AAA1, #{}, start, [])),
 
     ?equal([{smf_aaa_nasreq, started, 1}], get_session_stats()),
 
@@ -305,14 +304,14 @@ attrs_3gpp(Config) ->
 handle_failure(Config) ->
     SOpts = #{'Called-Station-Id' => <<"FAIL-RC-3007">>,
 	      'Framed-IP-Address' => {10,10,10,10}},
-    {ok, Session} = smf_aaa_session_sup:new_session(self(), SOpts),
+    AAA0 = smf_aaa_session:new(SOpts),
 
-    ?match({{fail, 3007}, _, _}, smf_aaa_session:start(Session, #{}, [])),
+    {{fail, 3007}, AAA1, _} = smf_aaa_session:call(AAA0, #{}, start, []),
 
     %% a accounting error is not treated as session stop
     ?equal([{smf_aaa_nasreq, started, 1}], get_session_stats()),
 
-    ?match({{fail, 3007}, _, _}, smf_aaa_session:stop(Session, #{}, [])),
+    ?match({{fail, 3007}, _, _}, smf_aaa_session:call(AAA1, #{}, stop, [])),
 
     ?equal([{smf_aaa_nasreq, started, 0}], get_session_stats()),
 
@@ -324,14 +323,14 @@ handle_failure(Config) ->
 handle_answer_error(Config) ->
     SOpts = #{'Called-Station-Id' => <<"FAIL-BROKEN-ANSWER">>,
 	      'Framed-IP-Address' => {10,10,10,10}},
-    {ok, Session} = smf_aaa_session_sup:new_session(self(), SOpts),
+    AAA0 = smf_aaa_session:new(SOpts),
 
-    ?match({{error, 3007}, _, _}, smf_aaa_session:start(Session, #{}, [])),
+    {{error, 3007}, AAA1, _} = smf_aaa_session:call(AAA0, #{}, start, []),
 
     %% a accounting error is not treated as session stop
     ?equal([{smf_aaa_nasreq, started, 1}], get_session_stats()),
 
-    ?match({{error, 3007}, _, _}, smf_aaa_session:stop(Session, #{}, [])),
+    ?match({{error, 3007}, _, _}, smf_aaa_session:call(AAA1, #{}, stop, [])),
 
     ?equal([{smf_aaa_nasreq, started, 0}], get_session_stats()),
 
@@ -372,25 +371,24 @@ stats({'ACA', RC}, Config, Stats) ->
 simple(Config, TermOpts) ->
     Stats0 = get_stats(?SERVICE),
 
-    {ok, Session} = smf_aaa_session_sup:new_session(
-		      self(),
-		      #{'Framed-IP-Address' => {10,10,10,10},
-			'Framed-IPv6-Prefix' => {{16#fe80,0,0,0,0,0,0,0}, 64},
-			'Framed-Pool' => <<"pool-A">>,
-			'Framed-IPv6-Pool' => <<"pool-A">>,
-			'NAT-Pool-Id' => <<"nat-A">>}),
+    AAA0 = smf_aaa_session:new(
+	     #{'Framed-IP-Address' => {10,10,10,10},
+	       'Framed-IPv6-Prefix' => {{16#fe80,0,0,0,0,0,0,0}, 64},
+	       'Framed-Pool' => <<"pool-A">>,
+	       'Framed-IPv6-Pool' => <<"pool-A">>,
+	       'NAT-Pool-Id' => <<"nat-A">>}),
 
-    {ok, _, Events} = smf_aaa_session:invoke(Session, #{}, authenticate, []),
+    {ok, AAA1, Events} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
     ?match([{set, {{accounting, 'IP-CAN', periodic}, {periodic, 'IP-CAN', 1800, []}}}],
 	   Events),
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, authorize, [])),
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, start, [])),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, authorize, []),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, #{}, start, []),
 
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, interim, [])),
+    {ok, AAA4, _} = smf_aaa_session:call(AAA3, #{}, interim, []),
 
     ?equal([{smf_aaa_nasreq, started, 1}], get_session_stats()),
 
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, TermOpts, stop, [])),
+    {ok, _AAA5, _} = smf_aaa_session:call(AAA4, TermOpts, stop, []),
 
     ?equal([{smf_aaa_nasreq, started, 0}], get_session_stats()),
 
@@ -412,31 +410,31 @@ simple_tdf_userid(Config, TermOpts) ->
     Msisdn = ?MSISDN_FOR_IMEI_SV,
     Imsi = <<"250071234567890">>,
     Imei = <<82,21,50,96,32,80,30,0>>,
-    {ok, Session} = smf_aaa_session_sup:new_session(
-		      self(),
-		      #{'Framed-IP-Address' => {10,10,10,10},
-			'Framed-IPv6-Prefix' => {{16#fe80,0,0,0,0,0,0,0}, 64},
-			'Framed-Pool' => <<"pool-A">>,
-			'Framed-IPv6-Pool' => <<"pool-A">>,
-      'Calling-Station-Id' => Msisdn,
-      '3GPP-IMSI' => Imsi,
-      '3GPP-IMEISV' => Imei,
-			'NAT-Pool-Id' => <<"nat-A">>}),
+    AAA0 = smf_aaa_session:new(
+	     #{'Framed-IP-Address' => {10,10,10,10},
+	       'Framed-IPv6-Prefix' => {{16#fe80,0,0,0,0,0,0,0}, 64},
+	       'Framed-Pool' => <<"pool-A">>,
+	       'Framed-IPv6-Pool' => <<"pool-A">>,
+	       'Calling-Station-Id' => Msisdn,
+	       '3GPP-IMSI' => Imsi,
+	       '3GPP-IMEISV' => Imei,
+	       'NAT-Pool-Id' => <<"nat-A">>}),
 
-    {ok, SessionUpdates, Events} = smf_aaa_session:invoke(Session, #{}, authenticate, []),
+    {ok, AAA1, Events} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
+    SessionUpdates = smf_aaa_session:get_session(AAA1),
     ?match(#{'3GPP-IMSI' := Imsi}, SessionUpdates),
     ?match(#{'3GPP-IMEISV' := Imei}, SessionUpdates),
     ?match(#{'Calling-Station-Id' := Msisdn}, SessionUpdates),
     ?match([{set, {{accounting, 'IP-CAN', periodic}, {periodic, 'IP-CAN', 1800, []}}}],
 	   Events),
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, authorize, [])),
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, start, [])),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, authorize, []),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, #{}, start, []),
 
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, interim, [])),
+    {ok, AAA4, _} = smf_aaa_session:call(AAA3, #{}, interim, []),
 
     ?equal([{smf_aaa_nasreq, started, 1}], get_session_stats()),
 
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, TermOpts, stop, [])),
+    {ok, _AAA5, _} = smf_aaa_session:call(AAA4, TermOpts, stop, []),
 
     ?equal([{smf_aaa_nasreq, started, 0}], get_session_stats()),
 

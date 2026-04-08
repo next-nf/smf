@@ -227,14 +227,15 @@ radius_rf_tdv_crash(Config) ->
     Stats0 = get_stats(?SERVICE),
 
     SOpts = #{now => erlang:monotonic_time()},
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, _Session1, _} =
-	smf_aaa_session:invoke(SId, #{}, start, SOpts),
-    smf_aaa_session:invoke(SId, #{}, {rf, 'Initial'}, SOpts),
+    AAA0 = smf_aaa_session:new(Session),
+    {ok, AAA1, _} =
+	smf_aaa_session:call(AAA0, #{}, start, SOpts),
+    {_, AAA2, _} = smf_aaa_session:call(AAA1, #{}, {rf, 'Initial'}, SOpts),
 
     %% ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
-    {ok, SOut, Events} = smf_aaa_session:invoke(SId, #{}, authenticate, []),
+    {ok, AAA3, Events} = smf_aaa_session:call(AAA2, #{}, authenticate, []),
+    SOut = smf_aaa_session:get_session(AAA3),
     ?match(#{'MS-Primary-DNS-Server' := {8,8,8,8}}, SOut),
     ?match(#{'Framed-MTU' := 1500}, SOut),
 
@@ -242,8 +243,8 @@ radius_rf_tdv_crash(Config) ->
 
     ?match([{set, {{accounting, 'IP-CAN', periodic}, {periodic, 'IP-CAN', 1800, []}}}],
 	   Events),
-    ?match({ok, _, _}, smf_aaa_session:invoke(SId, #{}, authorize, [])),
-    ?match({ok, _, _}, smf_aaa_session:invoke(SId, #{}, start, [])),
+    {ok, AAA4, _} = smf_aaa_session:call(AAA3, #{}, authorize, []),
+    {ok, AAA5, _} = smf_aaa_session:call(AAA4, #{}, start, []),
 
     ?equal(1, get_session_stats(smf_aaa_radius, started)),
 
@@ -320,44 +321,40 @@ radius_rf_tdv_crash(Config) ->
     %% RfUpdCDR1  = #{service_data => SDC1, traffic_data => TD1},
     RfUpdCont2 = #{service_data => SDC2, traffic_data => TD2},
     %% The diameter server discards any request with this IMSI
-    {_, _, _} =
-	smf_aaa_session:invoke(SId, RfUpdCont1, {rf, 'Update'},
+    {_, AAA6, _} =
+	smf_aaa_session:call(AAA5, RfUpdCont1, {rf, 'Update'},
 				SOpts#{'gy_event' => container_closure}),
-    ct:pal("Rf state (after container closure): ~p", [sys:get_state(SId)]),
     %% ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
     %% The diameter server discards any request with this IMSI
-    {_, _, _} =
-	smf_aaa_session:invoke(SId, RfUpdCont2, {rf, 'Update'},
+    {_, AAA7, _} =
+	smf_aaa_session:call(AAA6, RfUpdCont2, {rf, 'Update'},
 				SOpts#{'gy_event' => container_closure}),
-    ct:pal("Rf state (after container closure): ~p", [sys:get_state(SId)]),
 
     %% We ensure the session has several TDVs so the In/OutOctets from_session clause crashes
 %%     {_, _, _} =
-%% 	smf_aaa_session:invoke(SId, RfUpdCDR1, {rf, 'Update'},
+%% 	smf_aaa_session:call(AAA7, RfUpdCDR1, {rf, 'Update'},
 %% 				SOpts#{'gy_event' => cdr_closure}),
-%%     ct:pal("Rf state (after cdr closure): ~p", [sys:get_state(SId)]),
 
     InterimData = #{
 	'InPackets' => 10,
 	'OutPackets' => 20,
 	'InOctets' => 100,
 	'OutOctets' => 200},
-    ?match({ok, _, _}, smf_aaa_session:invoke(SId, InterimData, interim, [])),
+    {ok, AAA8, _} = smf_aaa_session:call(AAA7, InterimData, interim, []),
 
     %% ?equal([{smf_aaa_rf, started, 1}], get_session_stats()),
 
     %% The diameter server discards any request with this IMSI
-    {_, _, _} =
-	smf_aaa_session:invoke(SId, RfUpdCont2, {rf, 'Update'},
+    {_, AAA9, _} =
+	smf_aaa_session:call(AAA8, RfUpdCont2, {rf, 'Update'},
 				SOpts#{'gy_event' => container_closure}),
-    ct:pal("Rf state (after container closure): ~p", [sys:get_state(SId)]),
 
     RfTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       service_data => SDC2, traffic_data => TD2},
-    smf_aaa_session:invoke(SId, #{}, stop, SOpts),
-    {_, _Session2, _} =
-	smf_aaa_session:invoke(SId, RfTerm, {rf, 'Terminate'}, SOpts),
+    {_, AAA10, _} = smf_aaa_session:call(AAA9, #{}, stop, SOpts),
+    {_, AAA11, _} =
+	smf_aaa_session:call(AAA10, RfTerm, {rf, 'Terminate'}, SOpts),
 
     %% ?equal([{smf_aaa_rf, started, 0}], get_session_stats()),
 
@@ -366,7 +363,7 @@ radius_rf_tdv_crash(Config) ->
     %% ?equal(4, proplists:get_value({{3, 271, 0}, recv, {'Result-Code',2001}}, Stats1)),
 
     TermOpts = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT'},
-    ?match({ok, _, _}, smf_aaa_session:invoke(SId, TermOpts, stop, [])),
+    {ok, _AAA12, _} = smf_aaa_session:call(AAA11, TermOpts, stop, []),
 
     ?equal(0, get_session_stats(smf_aaa_radius, started)),
 

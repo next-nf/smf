@@ -274,21 +274,20 @@ accounting() ->
     [{doc, "Check that we can successfully send ACR's and get ACA's"}].
 accounting(Config) ->
 
-    {ok, Session} = smf_aaa_session_sup:new_session(self(),
-						     #{'Framed-IP-Address' => {10,10,10,10}}),
-    ?equal(success, smf_aaa_session:authenticate(Session, #{})),
+    AAA0 = smf_aaa_session:new(#{'Framed-IP-Address' => {10,10,10,10}}),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
 
     ?equal(0, get_session_stats(smf_aaa_radius, started)),
 
-    ?match({ok, _, _}, smf_aaa_session:start(Session, #{}, [])),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, start, []),
 
     ?equal(1, get_session_stats(smf_aaa_radius, started)),
 
-    ?match({ok, _, _}, smf_aaa_session:interim(Session, #{}, [])),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, #{}, interim, []),
 
     ?equal(1, get_session_stats(smf_aaa_radius, started)),
 
-    ?match({ok, _, _}, smf_aaa_session:stop(Session, #{}, [])),
+    {ok, _AAA4, _} = smf_aaa_session:call(AAA3, #{}, stop, []),
 
     ?equal(0, get_session_stats(smf_aaa_radius, started)),
 
@@ -301,21 +300,20 @@ accounting_async() ->
 accounting_async(Config) ->
     OrigApps = set_service_pars([{async, true}, {retries, 1}, {timeout, 1000}]),
 
-    {ok, Session} = smf_aaa_session_sup:new_session(self(),
-						     #{'Framed-IP-Address' => {10,10,10,10}}),
-    ?equal(success, smf_aaa_session:authenticate(Session, #{})),
+    AAA0 = smf_aaa_session:new(#{'Framed-IP-Address' => {10,10,10,10}}),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
 
     ?equal(0, get_session_stats(smf_aaa_radius, started)),
 
-    ?match({ok, _, _}, smf_aaa_session:start(Session, #{}, [])),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, start, []),
 
     ?equal(1, get_session_stats(smf_aaa_radius, started)),
 
-    ?match({ok, _, _}, smf_aaa_session:interim(Session, #{}, [])),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, #{}, interim, []),
 
     ?equal(1, get_session_stats(smf_aaa_radius, started)),
 
-    ?match({ok, _, _}, smf_aaa_session:stop(Session, #{}, [])),
+    {ok, _AAA4, _} = smf_aaa_session:call(AAA3, #{}, stop, []),
 
     ?equal(0, get_session_stats(smf_aaa_radius, started)),
 
@@ -375,13 +373,13 @@ attrs_3gpp(Config) ->
 	      'Username'                => <<"smf">>
 	     },
 
-    {ok, Session} = smf_aaa_session_sup:new_session(self(), Attrs),
-    ?equal(success, smf_aaa_session:authenticate(Session, #{})),
-    ?match({ok, _, _}, smf_aaa_session:start(Session, #{}, [])),
+    AAA0 = smf_aaa_session:new(Attrs),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, start, []),
 
     ?equal(1, get_session_stats(smf_aaa_radius, started)),
 
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, stop, [])),
+    {ok, _AAA3, _} = smf_aaa_session:call(AAA2, #{}, stop, []),
 
     %% make sure nothing crashed
     meck_validate(Config),
@@ -396,16 +394,15 @@ avp_filter(Config) ->
 					      [{avp_filter, [?Framed_IPv6_Pool ]}], #{}),
     OrigApps = set_service_pars(Opts),
 
-    {ok, Session} = smf_aaa_session_sup:new_session(
-		      self(),
-		      #{'Username' => <<"AVP-Filter">>,
-			'Framed-IP-Address' => {10,10,10,10},
-			'Framed-IPv6-Prefix' => {{16#fe80,0,0,0,0,0,0,0}, 64},
-			'Framed-Pool' => <<"pool-A">>,
-			'Framed-IPv6-Pool' => <<"pool-A">>}),
+    AAA0 = smf_aaa_session:new(
+	     #{'Username' => <<"AVP-Filter">>,
+	       'Framed-IP-Address' => {10,10,10,10},
+	       'Framed-IPv6-Prefix' => {{16#fe80,0,0,0,0,0,0,0}, 64},
+	       'Framed-Pool' => <<"pool-A">>,
+	       'Framed-IPv6-Pool' => <<"pool-A">>}),
 
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, authenticate, [])),
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, stop, [])),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
+    {ok, _AAA2, _} = smf_aaa_session:call(AAA1, #{}, stop, []),
 
     meck_validate(Config),
     application:set_env(smf_aaa, apps, OrigApps),
@@ -420,34 +417,33 @@ vendor_dicts(Config) ->
 					      [{vendor_dicts, [?'Ituma']}], #{}),
     OrigApps = set_service_pars(Opts),
 
-    {ok, Session} = smf_aaa_session_sup:new_session(
-		      self(),
-		      #{'Username' => <<"Vendor-Dicts">>,
-			'BSSID' => "08-08-08-08-08-08",
-			'CAPWAP-GPS-Altitude' => "62.4",
-			'CAPWAP-GPS-Hdop' => "0.7",
-			'CAPWAP-GPS-Latitude' => "5207.6688N",
-			'CAPWAP-GPS-Longitude' => "01137.8028E",
-			'CAPWAP-GPS-Timestamp' => "2014-09-03T15:47:50.000Z",
-			'CAPWAP-Session-Id' =>
-			    <<143,196,99,94,218,207,226,25,122,187,116,116,38,124,132,10>>,
-			'Calling-Station-Id' => "01-02-03-04-05-06",
-			'Framed-Protocol' => 'TP-CAPWAP',
-			'Location-Id' => <<"654321">>,
-			'MAC' => <<1,2,3,4,5,6>>,
-			'SSID' => <<"DEV CAPWAP WIFI">>,
-			'Service-Type' => 'TP-CAPWAP-STA',
-			'Tunnel-Client-Endpoint' => <<"127.0.0.1">>,
-			'Tunnel-Medium-Type' => 'IPv4',
-			'Tunnel-Type' => 'CAPWAP',
-			'WLAN-AKM-Suite' => 'PSK',
-			'WLAN-Authentication-Mode' => secured,
-			'WLAN-Group-Cipher' => 'CCMP',
-			'WLAN-Group-Mgmt-Cipher' => undefined,
-			'WLAN-Pairwise-Cipher' => 'CCMP'}),
+    AAA0 = smf_aaa_session:new(
+	     #{'Username' => <<"Vendor-Dicts">>,
+	       'BSSID' => "08-08-08-08-08-08",
+	       'CAPWAP-GPS-Altitude' => "62.4",
+	       'CAPWAP-GPS-Hdop' => "0.7",
+	       'CAPWAP-GPS-Latitude' => "5207.6688N",
+	       'CAPWAP-GPS-Longitude' => "01137.8028E",
+	       'CAPWAP-GPS-Timestamp' => "2014-09-03T15:47:50.000Z",
+	       'CAPWAP-Session-Id' =>
+		   <<143,196,99,94,218,207,226,25,122,187,116,116,38,124,132,10>>,
+	       'Calling-Station-Id' => "01-02-03-04-05-06",
+	       'Framed-Protocol' => 'TP-CAPWAP',
+	       'Location-Id' => <<"654321">>,
+	       'MAC' => <<1,2,3,4,5,6>>,
+	       'SSID' => <<"DEV CAPWAP WIFI">>,
+	       'Service-Type' => 'TP-CAPWAP-STA',
+	       'Tunnel-Client-Endpoint' => <<"127.0.0.1">>,
+	       'Tunnel-Medium-Type' => 'IPv4',
+	       'Tunnel-Type' => 'CAPWAP',
+	       'WLAN-AKM-Suite' => 'PSK',
+	       'WLAN-Authentication-Mode' => secured,
+	       'WLAN-Group-Cipher' => 'CCMP',
+	       'WLAN-Group-Mgmt-Cipher' => undefined,
+	       'WLAN-Pairwise-Cipher' => 'CCMP'}),
 
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, authenticate, [])),
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, stop, [])),
+    {ok, AAA1, _} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
+    {ok, _AAA2, _} = smf_aaa_session:call(AAA1, #{}, stop, []),
 
     meck_validate(Config),
     application:set_env(smf_aaa, apps, OrigApps),
@@ -505,15 +501,15 @@ add_opts(Map, [{Par, Val}| T]) ->
 
 simple(Config, Opts) ->
 
-    {ok, Session} = smf_aaa_session_sup:new_session(
-		      self(),
-		      #{'Framed-IP-Address' => {10,10,10,10},
-			'Framed-IPv6-Prefix' => {{16#fe80,0,0,0,0,0,0,0}, 64},
-			'Framed-Pool' => <<"pool-A">>,
-			'Framed-IPv6-Pool' => <<"pool-A">>,
-			'Framed-Interface-Id' => {0,0,0,0,0,0,0,1}}),
+    AAA0 = smf_aaa_session:new(
+	     #{'Framed-IP-Address' => {10,10,10,10},
+	       'Framed-IPv6-Prefix' => {{16#fe80,0,0,0,0,0,0,0}, 64},
+	       'Framed-Pool' => <<"pool-A">>,
+	       'Framed-IPv6-Pool' => <<"pool-A">>,
+	       'Framed-Interface-Id' => {0,0,0,0,0,0,0,1}}),
 
-    {ok, SOut, Events} = smf_aaa_session:invoke(Session, #{}, authenticate, []),
+    {ok, AAA1, Events} = smf_aaa_session:call(AAA0, #{}, authenticate, []),
+    SOut = smf_aaa_session:get_session(AAA1),
     ?match(#{'MS-Primary-DNS-Server' := {8,8,8,8}}, SOut),
     ?match(#{'Framed-MTU' := 1500}, SOut),
 
@@ -521,14 +517,14 @@ simple(Config, Opts) ->
 
     ?match([{set, {{accounting, 'IP-CAN', periodic}, {periodic, 'IP-CAN', 1800, []}}}],
 	   Events),
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, authorize, [])),
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, start, [])),
+    {ok, AAA2, _} = smf_aaa_session:call(AAA1, #{}, authorize, []),
+    {ok, AAA3, _} = smf_aaa_session:call(AAA2, #{}, start, []),
 
     ?equal(1, get_session_stats(smf_aaa_radius, started)),
 
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, #{}, interim, [])),
+    {ok, AAA4, _} = smf_aaa_session:call(AAA3, #{}, interim, []),
     TermOpts = #{'Termination-Cause' => maps:get(reason, Opts, ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT')},
-    ?match({ok, _, _}, smf_aaa_session:invoke(Session, TermOpts, stop, [])),
+    {ok, _AAA5, _} = smf_aaa_session:call(AAA4, TermOpts, stop, []),
 
     ?equal(0, get_session_stats(smf_aaa_radius, started)),
 

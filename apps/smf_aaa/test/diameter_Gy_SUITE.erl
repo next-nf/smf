@@ -286,14 +286,15 @@ simple_session(Config) ->
 
     Stats0 = get_stats(?SERVICE),
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
 
-    {ok, Session1, Events1} =
-	smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, []),
+    {ok, AAA1, Events1} =
+	smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, []),
 
     ?equal([{smf_aaa_ro, started, 1}], get_session_stats()),
 
     ?match([{update_credits,[_,_,_]}], Events1),
+    Session1 = smf_aaa_session:get_session(AAA1),
     ?equal(false, maps:is_key('Multiple-Services-Credit-Control', Session1)),
 
     UsedCredits =
@@ -315,10 +316,11 @@ simple_session(Config) ->
 	 },
     GyTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       used_credits => maps:to_list(UsedCredits)},
-    {ok, Session2, Events2} =
-	smf_aaa_session:invoke(SId, GyTerm, {gy, 'CCR-Terminate'}, []),
+    {ok, AAA2, Events2} =
+	smf_aaa_session:call(AAA1, GyTerm, {gy, 'CCR-Terminate'}, []),
 
     ?match([{update_credits,[_,_,_]}], Events2),
+    Session2 = smf_aaa_session:get_session(AAA2),
     ?equal(false, maps:is_key('Multiple-Services-Credit-Control', Session2)),
 
     Stats1 = diff_stats(Stats0, get_stats(?SERVICE)),
@@ -335,7 +337,6 @@ simple_session_async() ->
     [{doc, "Simple Gy session"}].
 simple_session_async(Config) ->
     Session = init_session(#{}, Config),
-    SOpts = #{async => true},
     GyOpts =
 	#{credits =>
 	      #{1000 => empty,
@@ -346,19 +347,15 @@ simple_session_async(Config) ->
 
     Stats0 = get_stats(?SERVICE),
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
 
-    {ok, Session1} =
-	smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, SOpts),
+    {ok, AAA1, Events1} =
+	smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, []),
 
     ?equal([{smf_aaa_ro, started, 1}], get_session_stats()),
 
-    Events1 =
-	receive
-	    {update_session, _, Ev1} -> Ev1
-	after 100 -> ct:fail(timeout)
-	end,
     ?match([{update_credits,[_,_,_]}], Events1),
+    Session1 = smf_aaa_session:get_session(AAA1),
     ?equal(false, maps:is_key('Multiple-Services-Credit-Control', Session1)),
 
     UsedCredits =
@@ -380,17 +377,13 @@ simple_session_async(Config) ->
 	 },
     GyTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       used_credits => maps:to_list(UsedCredits)},
-    {ok, Session2} =
-	smf_aaa_session:invoke(SId, GyTerm, {gy, 'CCR-Terminate'}, SOpts),
+    {ok, AAA2, Events2} =
+	smf_aaa_session:call(AAA1, GyTerm, {gy, 'CCR-Terminate'}, []),
 
     ?equal([{smf_aaa_ro, started, 0}], get_session_stats()),
 
-    Events2 =
-	receive
-	    {update_session, _, Ev2} -> Ev2
-	after 100 -> ct:fail(timeout)
-	end,
     ?match([{update_credits,[_,_,_]}], Events2),
+    Session2 = smf_aaa_session:get_session(AAA2),
     ?equal(false, maps:is_key('Multiple-Services-Credit-Control', Session2)),
 
     Stats1 = diff_stats(Stats0, get_stats(?SERVICE)),
@@ -487,14 +480,15 @@ tarif_time_change(Config) ->
 
     Stats0 = get_stats(?SERVICE),
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
 
-    {ok, Session1, Events1} =
-	smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, []),
+    {ok, AAA1, Events1} =
+	smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, []),
 
     ?equal([{smf_aaa_ro, started, 1}], get_session_stats()),
 
     ?match([{update_credits,[_]}], Events1),
+    Session1 = smf_aaa_session:get_session(AAA1),
     ?equal(false, maps:is_key('Multiple-Services-Credit-Control', Session1)),
 
     UsedCredits =
@@ -514,19 +508,20 @@ tarif_time_change(Config) ->
 		  'Reporting-Reason' => [?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_FINAL']}}
 	],
     GyUpdate = #{used_credits => UsedCredits},
-    {ok, _, _} =
-	smf_aaa_session:invoke(SId, GyUpdate, {gy, 'CCR-Update'}, []),
+    {ok, AAA2, _} =
+	smf_aaa_session:call(AAA1, GyUpdate, {gy, 'CCR-Update'}, []),
 
     ?equal([{smf_aaa_ro, started, 1}], get_session_stats()),
 
     GyTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       used_credits => UsedCredits},
-    {ok, Session2, Events2} =
-	smf_aaa_session:invoke(SId, GyTerm, {gy, 'CCR-Terminate'}, []),
+    {ok, AAA3, Events2} =
+	smf_aaa_session:call(AAA2, GyTerm, {gy, 'CCR-Terminate'}, []),
 
     ?equal([{smf_aaa_ro, started, 0}], get_session_stats()),
 
     ?match([{update_credits,[_]}], Events2),
+    Session2 = smf_aaa_session:get_session(AAA3),
     ?equal(false, maps:is_key('Multiple-Services-Credit-Control', Session2)),
 
     Stats1 = diff_stats(Stats0, get_stats(?SERVICE)),
@@ -559,11 +554,11 @@ ccr_retry(Config) ->
     Session = init_session(#{}, Config),
     GyOpts = #{credits => #{1000 => empty}},
     Stats0 = get_stats(?SERVICE),
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, DiameterSId} = smf_aaa_session:get(SId, 'Diameter-Session-Id'),
+    AAA0 = smf_aaa_session:new(Session),
+    DiameterSId = maps:get('Diameter-Session-Id', smf_aaa_session:get_session(AAA0)),
     set_diameter_session_handler(DiameterSId, DTRA),
 
-    {ok, _Session1, _Events1} = smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, []),
+    {ok, AAA1, _Events1} = smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, []),
 
     ?equal([{smf_aaa_ro, started, 1}], get_session_stats()),
 
@@ -591,7 +586,7 @@ ccr_retry(Config) ->
     ?CLEAR_TC_INFO(),
 
     ets:delete_all_objects(?MODULE),
-    ?match(ok, smf_aaa_session:terminate(SId)),
+    smf_aaa_session:terminate_action(AAA1),
     wait_for_session(smf_aaa_ro, started, 0, 10),
     ok.
 
@@ -676,11 +671,11 @@ ocs_hold_initial_timeout(Config) ->
     DTRA = fun(_Request, _Svc, _Peers, _Extra) -> discard end,
     Session = init_session(#{}, Config),
     GyOpts = #{credits => #{1000 => empty}},
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, DiameterSId} = smf_aaa_session:get(SId, 'Diameter-Session-Id'),
+    AAA0 = smf_aaa_session:new(Session),
+    DiameterSId = maps:get('Diameter-Session-Id', smf_aaa_session:get_session(AAA0)),
     set_diameter_session_handler(DiameterSId, DTRA),
 
-    {ok, _Session1, Events} = smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, []),
+    {ok, AAA1, Events} = smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, []),
 
     ?equal([{smf_aaa_ro, ocs_hold, 1}], get_session_stats()),
 
@@ -698,8 +693,8 @@ ocs_hold_initial_timeout(Config) ->
 		    'Reporting-Reason' => [?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_VALIDITY_TIME']}
 	 },
     GyTerm = #{used_credits => maps:to_list(UsedCredits)},
-    ?match({{error, ocs_hold_end}, _Session2, [{stop, {?API, ocs_hold_end}}]},
-	   smf_aaa_session:invoke(SId, GyTerm, {gy, 'CCR-Update'}, [])),
+    ?match({{error, ocs_hold_end}, _AAA2, [{stop, {?API, ocs_hold_end}}]},
+	   smf_aaa_session:call(AAA1, GyTerm, {gy, 'CCR-Update'}, [])),
 
     Stats1 = diff_stats(Stats0, get_stats(?SERVICE)),
 
@@ -726,14 +721,14 @@ ocs_hold_update_timeout(Config) ->
 
     Session = init_session(#{}, Config),
     GyOpts = #{credits => #{1000 => empty}},
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, DiameterSId} = smf_aaa_session:get(SId, 'Diameter-Session-Id'),
+    AAA0 = smf_aaa_session:new(Session),
+    DiameterSId = maps:get('Diameter-Session-Id', smf_aaa_session:get_session(AAA0)),
     set_diameter_session_handler(DiameterSId, DTRA),
 
     %% Send CCR-I
     Stats0 = get_stats(?SERVICE),
 
-    {ok, _Session1, Events} = smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, []),
+    {ok, AAA1, Events} = smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, []),
 
     ?equal([{smf_aaa_ro, started, 1}], get_session_stats()),
 
@@ -751,7 +746,7 @@ ocs_hold_update_timeout(Config) ->
 		    'Reporting-Reason' => [?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_VALIDITY_TIME']}
 	 },
     GyUpdate = #{used_credits => maps:to_list(UsedCredits)},
-    {ok, _Session2, Events2} = smf_aaa_session:invoke(SId, GyUpdate, {gy, 'CCR-Update'}, []),
+    {ok, AAA2, Events2} = smf_aaa_session:call(AAA1, GyUpdate, {gy, 'CCR-Update'}, []),
     ?match([{update_credits,
 	     [#{'Granted-Service-Unit' := [#{'CC-Time' := [Time]}]}]}
 	   ] when Time > 1800 andalso Time =< 1900, Events2),
@@ -763,7 +758,7 @@ ocs_hold_update_timeout(Config) ->
 
     GyTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       used_credits => UsedCredits},
-    {{error, ocs_hold_end}, _Session3, [{stop, {?API, ocs_hold_end}}]} = smf_aaa_session:invoke(SId, GyTerm, {gy, 'CCR-Terminate'}, []),
+    {{error, ocs_hold_end}, _AAA3, [{stop, {?API, ocs_hold_end}}]} = smf_aaa_session:call(AAA2, GyTerm, {gy, 'CCR-Terminate'}, []),
 
     ?equal([{smf_aaa_ro, ocs_hold, 0}, {smf_aaa_ro, started, 0}], get_session_stats()),
 
@@ -792,14 +787,14 @@ ocs_hold_update_timeout_async(Config) ->
 
     Session = init_session(#{}, Config),
     GyOpts = #{credits => #{1000 => empty}},
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, DiameterSId} = smf_aaa_session:get(SId, 'Diameter-Session-Id'),
+    AAA0 = smf_aaa_session:new(Session),
+    DiameterSId = maps:get('Diameter-Session-Id', smf_aaa_session:get_session(AAA0)),
     set_diameter_session_handler(DiameterSId, DTRA),
 
     %% Send CCR-I
     Stats0 = get_stats(?SERVICE),
 
-    {ok, _Session1, Events} = smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, []),
+    {ok, AAA1, Events} = smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, []),
 
     ?equal([{smf_aaa_ro, started, 1}], get_session_stats()),
 
@@ -817,12 +812,7 @@ ocs_hold_update_timeout_async(Config) ->
 		    'Reporting-Reason' => [?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_VALIDITY_TIME']}
 	 },
     GyUpdate = #{used_credits => maps:to_list(UsedCredits)},
-    {ok, _Session2} = smf_aaa_session:invoke(SId, GyUpdate, {gy, 'CCR-Update'}, #{async => true}),
-    Events2 =
-	receive
-	    {update_session, _, Ev1} -> Ev1
-	after 5000 -> ct:fail(timeout)
-	end,
+    {ok, AAA2, Events2} = smf_aaa_session:call(AAA1, GyUpdate, {gy, 'CCR-Update'}, []),
 
     ?match([{update_credits,
 	     [#{'Granted-Service-Unit' := [#{'CC-Time' := [Time]}]}]}
@@ -835,7 +825,7 @@ ocs_hold_update_timeout_async(Config) ->
 
     GyTerm = #{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       used_credits => UsedCredits},
-    {{error, ocs_hold_end}, _Session3, [{stop, {?API, ocs_hold_end}}]} = smf_aaa_session:invoke(SId, GyTerm, {gy, 'CCR-Terminate'}, []),
+    {{error, ocs_hold_end}, _AAA3, [{stop, {?API, ocs_hold_end}}]} = smf_aaa_session:call(AAA2, GyTerm, {gy, 'CCR-Terminate'}, []),
 
     ?equal([{smf_aaa_ro, ocs_hold, 0}, {smf_aaa_ro, started, 0}], get_session_stats()),
 
@@ -898,10 +888,10 @@ handle_failure(Config) ->
 
     Stats0 = get_stats(?SERVICE),
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
     %% the retry logic causes this to be reported as error instead of fail
     ?match({{error, 3001}, _, _},
-	   smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, [])),
+	   smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, [])),
 
     ?equal([], get_session_stats()),
 
@@ -929,9 +919,9 @@ handle_answer_error(Config) ->
 	       }
 	 },
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
     ?match({{error, 3007}, _, _},
-	   smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, [])),
+	   smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, [])),
 
     %% make sure nothing crashed
     ?match(0, outstanding_reqs()),
@@ -950,14 +940,9 @@ handle_3xxx_error_async(Config) ->
 	       }
 	 },
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
-    {ok, _} =
-	   smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, #{async => true}),
-    Events1 =
-	receive
-	    {update_session, _, Ev1} -> Ev1
-	after 100 -> ct:fail(timeout)
-	end,
+    AAA0 = smf_aaa_session:new(Session),
+    {{error, 3002}, _AAA1, Events1} =
+	   smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, []),
     ?equal([{stop,{gy,peer_reject}}], Events1),
 
     %% make sure nothing crashed
@@ -981,9 +966,9 @@ handle_authorization_rejected(Config) ->
 
     Stats0 = get_stats(?SERVICE),
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
     ?match({{fail, 5003}, _, _},
-	   smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, [])),
+	   smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, [])),
 
     Stats1 = diff_stats(Stats0, get_stats(?SERVICE)),
 
@@ -1045,11 +1030,11 @@ basic_session() ->
     basic_session(1100).
 basic_session(CCR_I_T_Delay) ->
     Session = init_session(#{}, []),
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
     GyOpts = #{credits => #{1000 => empty}},
     Result =
-	case smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, []) of
-	    {ok, _, _} ->
+	case smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, []) of
+	    {ok, AAA1, _} ->
 		timer:sleep(CCR_I_T_Delay),
 
 		UsedCredits =
@@ -1063,7 +1048,7 @@ basic_session(CCR_I_T_Delay) ->
 		GyTerm = #{'Termination-Cause' =>
 			       ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 			   used_credits => UsedCredits},
-		case smf_aaa_session:invoke(SId, GyTerm, {gy, 'CCR-Terminate'}, []) of
+		case smf_aaa_session:call(AAA1, GyTerm, {gy, 'CCR-Terminate'}, []) of
 		    {ok, _, _} -> ok;
 		    {{error, rate_limit},_ ,_} -> rate_limit;
 		    {Err, _, _} -> {'CCR-I', Err}
@@ -1071,16 +1056,16 @@ basic_session(CCR_I_T_Delay) ->
 	    {{error, rate_limit},_ ,_} -> rate_limit;
 	    {Err, _, _} -> {'CCR-T', Err}
 	end,
-    set_test_info(ccr_t_rate_limit, {session, SId}, Result).
+    set_test_info(ccr_t_rate_limit, {session, self()}, Result).
 
 async_session(Owner, Ref) ->
     async_session(Owner, Ref, 1100).
 
 async_session(Owner, Ref, Delay) ->
     Session = init_session(#{}, []),
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
     GyOpts = #{credits => #{1000 => empty}},
-    IResult = smf_aaa_session:invoke(SId, GyOpts, {gy, 'CCR-Initial'}, []),
+    {_IRes, AAA1, _} = IResult = smf_aaa_session:call(AAA0, GyOpts, {gy, 'CCR-Initial'}, []),
     Owner ! {Ref, 'CCR-Initial', IResult},
 
     timer:sleep(Delay),
@@ -1095,7 +1080,7 @@ async_session(Owner, Ref, Delay) ->
     GyTerm = #{'Termination-Cause' =>
 		   ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT',
 	       used_credits => UsedCredits},
-    TResult = smf_aaa_session:invoke(SId, GyTerm, {gy, 'CCR-Terminate'}, []),
+    TResult = smf_aaa_session:call(AAA1, GyTerm, {gy, 'CCR-Terminate'}, []),
     Owner ! {Ref, 'CCR-Terminate', TResult},
 
     ok.

@@ -207,12 +207,12 @@ simple_session(Config) ->
 
     Stats0 = get_stats(?SERVICE),
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
 
     ?equal([], get_session_stats()),
 
-    {ok, _Session1, Events1} =
-	smf_aaa_session:invoke(SId, GxOpts, {gx, 'CCR-Initial'}, []),
+    {ok, AAA1, Events1} =
+	smf_aaa_session:call(AAA0, GxOpts, {gx, 'CCR-Initial'}, []),
 
     ?equal([{smf_aaa_gx, started, 1}], get_session_stats()),
 
@@ -220,8 +220,8 @@ simple_session(Config) ->
 
     GxTerm =
 	#{'Termination-Cause' => ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT'},
-    {ok, _Session2, _Events2} =
-	smf_aaa_session:invoke(SId, GxTerm, {gx, 'CCR-Terminate'}, []),
+    {ok, _AAA2, _Events2} =
+	smf_aaa_session:call(AAA1, GxTerm, {gx, 'CCR-Terminate'}, []),
 
     ?equal([{smf_aaa_gx, started, 0}], get_session_stats()),
 
@@ -300,10 +300,10 @@ handle_failure(Config) ->
 
     Stats0 = get_stats(?SERVICE),
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
 
     ?match({{fail, 3001}, _, _},
-	   smf_aaa_session:invoke(SId, GxOpts, {gx, 'CCR-Initial'}, [])),
+	   smf_aaa_session:call(AAA0, GxOpts, {gx, 'CCR-Initial'}, [])),
 
     ?equal([], get_session_stats()),
 
@@ -325,9 +325,9 @@ handle_answer_error(Config) ->
 	#{'3GPP-IMSI' => <<"FAIL-BROKEN-ANSWER">>,
 	  '3GPP-MSISDN' => <<"FAIL-BROKEN-ANSWER">>},
 
-    {ok, SId} = smf_aaa_session_sup:new_session(self(), Session),
+    AAA0 = smf_aaa_session:new(Session),
     ?match({{error, 3007}, _, _},
-	   smf_aaa_session:invoke(SId, GxOpts, {gx, 'CCR-Initial'}, [])),
+	   smf_aaa_session:call(AAA0, GxOpts, {gx, 'CCR-Initial'}, [])),
 
     ?equal([], get_session_stats()),
 
