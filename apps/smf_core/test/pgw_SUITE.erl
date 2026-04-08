@@ -3632,7 +3632,8 @@ simple_ocs(Config) ->
     ?match(X when X == 4, length(CCR)),
 
     {_, {_, _, [_, _, {gy,'CCR-Initial'}, _]},
-     {ok, Session, _Events}} = hd(CCR),
+     {ok, AAA_CCR, _Events}} = hd(CCR),
+    Session = smf_aaa_session:get_session(AAA_CCR),
 
     Expected0 =
 	case ?config(client_ip, Config) of
@@ -4474,8 +4475,8 @@ aa_nat_select(Config) ->
     H = meck:history(smf_aaa_session),
     [SInv|_] =
 	lists:foldr(
-	  fun({_, {smf_aaa_session, call, [_, _, start, _]}, {ok, Opts}}, Acc) ->
-		  [Opts|Acc];
+	  fun({_, {smf_aaa_session, call, [_, _, start, _]}, {ok, AAA_S, _}}, Acc) ->
+		  [smf_aaa_session:get_session(AAA_S)|Acc];
 	     (_, Acc) ->
 		  Acc
 	  end, [], H),

@@ -2103,7 +2103,8 @@ simple_ocs(Config) ->
     ?match(X when X == 4, length(CCR)),
 
     {_, {_, _, [_, _, {gy,'CCR-Initial'}, _]},
-     {ok, Session, _Events}} = hd(CCR),
+     {ok, AAA_CCR, _Events}} = hd(CCR),
+    Session = smf_aaa_session:get_session(AAA_CCR),
 
     Expected0 =
 	case ?config(client_ip, Config) of
