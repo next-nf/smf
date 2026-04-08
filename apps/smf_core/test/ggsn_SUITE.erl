@@ -1331,10 +1331,10 @@ update_pdp_context_request_ra_update(Config) ->
 	meck:is(fun(#{gy_event := container_closure}) -> true;
 		   (_) -> false
 		end),
-    ?match(UpdateCount, meck:num_calls(smf_aaa_session, invoke_handler,
-				       ['_', '_', {rf, 'Update'}, '_', '_', ContainerClosePredicate])),
-    ?match(1, meck:num_calls(smf_aaa_session, invoke_handler,
-			     ['_', '_', {rf, 'Terminate'}, '_', '_', '_'])),
+    ?match(UpdateCount, meck:num_calls(smf_aaa_charging, rf_update,
+				       ['_', '_', '_', ContainerClosePredicate])),
+    ?match(1, meck:num_calls(smf_aaa_charging, rf_terminate,
+			     ['_', '_', '_', '_'])),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4contexts(?TIMEOUT),
@@ -1369,16 +1369,16 @@ update_pdp_context_request_rat_update(Config) ->
 	meck:is(fun(#{gy_event := container_closure}) -> true;
 		   (_) -> false
 		end),
-    ?match(UpdateCount, meck:num_calls(smf_aaa_session, invoke_handler,
-				       ['_', '_', {rf, 'Update'}, '_', '_', ContainerClosePredicate])),
+    ?match(UpdateCount, meck:num_calls(smf_aaa_charging, rf_update,
+				       ['_', '_', '_', ContainerClosePredicate])),
     CDRClosePredicate =
 	meck:is(fun(#{gy_event := cdr_closure}) -> true;
 		   (_) -> false
 		end),
-    ?match(1, meck:num_calls(smf_aaa_session, invoke_handler,
-			     ['_', '_', {rf, 'Update'}, '_', '_', CDRClosePredicate])),
-    ?match(1, meck:num_calls(smf_aaa_session, invoke_handler,
-			     ['_', '_', {rf, 'Terminate'}, '_', '_', '_'])),
+    ?match(1, meck:num_calls(smf_aaa_charging, rf_update,
+			     ['_', '_', '_', CDRClosePredicate])),
+    ?match(1, meck:num_calls(smf_aaa_charging, rf_terminate,
+			     ['_', '_', '_', '_'])),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4contexts(?TIMEOUT),
@@ -1417,8 +1417,8 @@ update_pdp_context_request_tei_update(Config) ->
 	meck:is(fun(#{gy_event := cdr_closure}) -> true;
 		   (_) -> false
 		end),
-    ?match(1, meck:num_calls(smf_aaa_session, invoke_handler,
-			     ['_', '_', {rf, 'Update'}, '_', '_', CDRClosePred])),
+    ?match(1, meck:num_calls(smf_aaa_charging, rf_update,
+			     ['_', '_', '_', CDRClosePred])),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4contexts(?TIMEOUT),
@@ -1774,7 +1774,7 @@ gy_validity_timer(Config) ->
 		    gtp_context, handle_event, [info, {timeout, '_', pfcp_timer}, '_', '_'])),
 
     CCRU = lists:filter(
-	     fun({_, {smf_aaa_session, invoke_handler, [_, _, {gy,'CCR-Update'}, S, _, _]}, _}) ->
+	     fun({_, {smf_aaa_charging, gy_ccr_update, [_, S, _, _]}, _}) ->
 		     ?match(
 			#{used_credits :=
 			      [{3000,
@@ -1782,7 +1782,7 @@ gy_validity_timer(Config) ->
 				      [?'DIAMETER_3GPP_CHARGING_REPORTING-REASON_VALIDITY_TIME']}}]}, S),
 		     true;
 		(_) -> false
-	     end, meck:history(smf_aaa_session)),
+	     end, meck:history(smf_aaa_charging)),
     ?match(Y when Y >= 3 andalso Y < 10, length(CCRU)),
 
     ?equal([], outstanding_requests()),
@@ -1848,10 +1848,10 @@ simple_aaa(Config) ->
     ct:sleep(100),
     delete_pdp_context(GtpC),
 
-    H = meck:history(smf_aaa_session),
+    H = meck:history(smf_aaa_auth),
     SInv =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, Procedure, _, _, _]}, _})
+	  fun({_, {smf_aaa_auth, Procedure, _}, _})
 		when Procedure =:= start; Procedure =:= interim; Procedure =:= stop ->
 		  true;
 	     (_) ->
@@ -1860,7 +1860,7 @@ simple_aaa(Config) ->
     ?match(X when X == 3, length(SInv)),
 
     [Start, SInterim, Stop] =
-	lists:map(fun({_, {_, _, [_, _, _, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('Acct-Session-Time', Start)),
     ?equal(false, maps:is_key('InOctets', Start)),
@@ -1966,12 +1966,13 @@ simple_ofcs(Config) ->
     ct:sleep(100),
     delete_pdp_context(GtpC),
 
-    H = meck:history(smf_aaa_session),
+    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
     SInv =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, {rf, _}, _, _, _]}, _}) ->
+	  fun({_, {smf_aaa_charging, Fn, _}, _})
+		when Fn =:= rf_initial; Fn =:= rf_update; Fn =:= rf_terminate ->
 		  true;
-	     ({_, {smf_aaa_session, invoke_handler, [_, _, stop, _, _, _]}, _}) ->
+	     ({_, {smf_aaa_auth, stop, _}, _}) ->
 		  true;
 	     (_) ->
 		  false
@@ -1979,7 +1980,7 @@ simple_ofcs(Config) ->
     ?match(X when X == 4, length(SInv)),
 
     [Start, SInterim, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, _, _, SOpts, _, _]}, _}) -> SOpts end, SInv),
+	lists:map(fun({_, {_, _, [_, SOpts, _, _]}, _}) -> SOpts end, SInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
     ?equal(false, maps:is_key('service_data', AcctStop)),
@@ -2089,20 +2090,21 @@ simple_ocs(Config) ->
     ct:sleep(100),
     delete_pdp_context(GtpC),
 
-    H = meck:history(smf_aaa_session),
+    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
     CCR =
 	lists:filter(
-	  fun({_, {smf_aaa_session, invoke_handler, [_, _, {gy,_}, _, _, _]}, _}) ->
+	  fun({_, {smf_aaa_charging, Fn, _}, _})
+		when Fn =:= gy_ccr_initial; Fn =:= gy_ccr_update; Fn =:= gy_ccr_terminate ->
 		  true;
-	     ({_, {smf_aaa_session, invoke_handler, [_, _, stop, _, _, _]}, _}) ->
+	     ({_, {smf_aaa_auth, stop, _}, _}) ->
 		  true;
 	     (_) ->
 		  false
 	  end, H),
     ?match(X when X == 4, length(CCR)),
 
-    {_, {_, _, [_, _, {gy,'CCR-Initial'}, _, _, _]},
-     {ok, Session, _Events, _HState}} = hd(CCR),
+    {_, {_, gy_ccr_initial, _},
+     {ok, _, Session, _}} = hd(CCR),
 
     Expected0 =
 	case ?config(client_ip, Config) of
