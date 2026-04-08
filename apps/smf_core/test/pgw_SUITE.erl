@@ -3090,7 +3090,7 @@ gy_validity_timer_cp(Config) ->
 		    gtp_context, handle_event, [info, {timeout, '_', pfcp_timer}, '_', '_'])),
 
     CCRU = lists:filter(
-	     fun({_, {smf_aaa_charging, gy_ccr_update, [_, S, _, _]}, _}) ->
+	     fun({_, {smf_aaa_charging, gy_ccr_update, [_, _, S, _]}, _}) ->
 		     ?match(
 			#{used_credits :=
 			      [{3000,
@@ -3150,7 +3150,7 @@ gy_validity_timer_up(Config) ->
 	}, URR),
 
     CCRU = lists:filter(
-	     fun({_, {smf_aaa_charging, gy_ccr_update, [_, S, _, _]}, _}) ->
+	     fun({_, {smf_aaa_charging, gy_ccr_update, [_, _, S, _]}, _}) ->
 		     ?match(
 			#{used_credits :=
 			      [{3000,
@@ -5346,7 +5346,7 @@ gx_invalid_charging_rulebase(Config) ->
     CCRU =
 	lists:filter(
 	  fun({_, {smf_aaa_pcf, ccr_update,
-		   [_, R, _, _]}, _}) ->
+		   [_, _, R, _]}, _}) ->
 		  ?match(
 		     #{'Charging-Rule-Report' :=
 			   [#{'Charging-Rule-Base-Name' := [_]}]}, R),
@@ -5380,7 +5380,7 @@ gx_invalid_charging_rule(Config) ->
     CCRU =
 	lists:filter(
 	  fun({_, {smf_aaa_pcf, ccr_update,
-		   [_, R, _, _]}, _}) ->
+		   [_, _, R, _]}, _}) ->
 		  ?match(
 		     #{'Charging-Rule-Report' :=
 			   [#{'Charging-Rule-Name' := [_]}]}, R),
