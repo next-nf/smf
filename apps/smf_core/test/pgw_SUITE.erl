@@ -3165,11 +3165,11 @@ simple_aaa(Config) ->
 
     ok = meck:expect(smf_aaa_session, call,
 		     fun (Session, SessionOpts, Procedure = authenticate, Opts) ->
-			     {_, SIn, EvIn} =
+			     {_, AAAIn, EvIn} =
 				 meck:passthrough([Session, SessionOpts, Procedure, Opts]),
 			     {SOut, EvOut} =
-				 smf_aaa_radius:to_session(authenticate, {SIn, EvIn}, AAAReply),
-			     {ok, SOut, EvOut};
+				 smf_aaa_radius:to_session(authenticate, {smf_aaa_session:get_session(AAAIn), EvIn}, AAAReply),
+			     {ok, smf_aaa_session:set_session(SOut, AAAIn), EvOut};
 			 (Session, SessionOpts, Procedure, Opts) ->
 			     meck:passthrough([Session, SessionOpts, Procedure, Opts])
 		     end),
@@ -3262,11 +3262,11 @@ simple_ofcs(Config) ->
 
     ok = meck:expect(smf_aaa_session, call,
 		     fun (Session, SessionOpts, {rf, 'Initial'} = Procedure, Opts) ->
-			     {_, SIn, EvIn} =
+			     {_, AAAIn, EvIn} =
 				 meck:passthrough([Session, SessionOpts, Procedure, Opts]),
 			     {SOut, EvOut} =
-				 smf_aaa_rf:to_session({rf, 'ACA'}, {SIn, EvIn}, AAAReply),
-			     {ok, SOut, EvOut};
+				 smf_aaa_rf:to_session({rf, 'ACA'}, {smf_aaa_session:get_session(AAAIn), EvIn}, AAAReply),
+			     {ok, smf_aaa_session:set_session(SOut, AAAIn), EvOut};
 			 (Session, SessionOpts, Procedure, Opts) ->
 			     meck:passthrough([Session, SessionOpts, Procedure, Opts])
 		     end),
@@ -3409,11 +3409,11 @@ ofcs_no_interim(Config) ->
 
     ok = meck:expect(smf_aaa_session, call,
 		     fun (Session, SessionOpts, {rf, 'Initial'} = Procedure, Opts) ->
-			     {_, SIn, EvIn} =
+			     {_, AAAIn, EvIn} =
 				 meck:passthrough([Session, SessionOpts, Procedure, Opts]),
 			     {SOut, EvOut} =
-				 smf_aaa_rf:to_session({rf, 'ACA'}, {SIn, EvIn}, AAAReply),
-			     {ok, SOut, EvOut};
+				 smf_aaa_rf:to_session({rf, 'ACA'}, {smf_aaa_session:get_session(AAAIn), EvIn}, AAAReply),
+			     {ok, smf_aaa_session:set_session(SOut, AAAIn), EvOut};
 			 (Session, SessionOpts, Procedure, Opts) ->
 			     meck:passthrough([Session, SessionOpts, Procedure, Opts])
 		     end),
@@ -3751,11 +3751,11 @@ split_charging1(Config) ->
 
     ok = meck:expect(smf_aaa_session, call,
 		     fun (Session, SessionOpts, {rf, 'Initial'} = Procedure, Opts) ->
-			     {_, SIn, EvIn} =
+			     {_, AAAIn, EvIn} =
 				 meck:passthrough([Session, SessionOpts, Procedure, Opts]),
 			     {SOut, EvOut} =
-				 smf_aaa_rf:to_session({rf, 'ACA'}, {SIn, EvIn}, AAAReply),
-			     {ok, SOut, EvOut};
+				 smf_aaa_rf:to_session({rf, 'ACA'}, {smf_aaa_session:get_session(AAAIn), EvIn}, AAAReply),
+			     {ok, smf_aaa_session:set_session(SOut, AAAIn), EvOut};
 			 (Session, SessionOpts, Procedure, Opts) ->
 			     meck:passthrough([Session, SessionOpts, Procedure, Opts])
 		     end),
@@ -4066,11 +4066,11 @@ split_charging2(Config) ->
 
     ok = meck:expect(smf_aaa_session, call,
 		     fun (Session, SessionOpts, {rf, 'Initial'} = Procedure, Opts) ->
-			     {_, SIn, EvIn} =
+			     {_, AAAIn, EvIn} =
 				 meck:passthrough([Session, SessionOpts, Procedure, Opts]),
 			     {SOut, EvOut} =
-				 smf_aaa_rf:to_session({rf, 'ACA'}, {SIn, EvIn}, AAAReply),
-			     {ok, SOut, EvOut};
+				 smf_aaa_rf:to_session({rf, 'ACA'}, {smf_aaa_session:get_session(AAAIn), EvIn}, AAAReply),
+			     {ok, smf_aaa_session:set_session(SOut, AAAIn), EvOut};
 			 (Session, SessionOpts, Procedure, Opts) ->
 			     meck:passthrough([Session, SessionOpts, Procedure, Opts])
 		     end),
@@ -4538,11 +4538,11 @@ tariff_time_change(Config) ->
 		     end),
     ok = meck:expect(smf_aaa_session, call,
 		     fun (Session, SessionOpts, {rf, 'Initial'} = Procedure, Opts) ->
-			     {_, SIn, EvIn} =
+			     {_, AAAIn, EvIn} =
 				 meck:passthrough([Session, SessionOpts, Procedure, Opts]),
 			     {SOut, EvOut} =
-				 smf_aaa_rf:to_session({rf, 'ACA'}, {SIn, EvIn}, AAAReply),
-			     {ok, SOut, EvOut};
+				 smf_aaa_rf:to_session({rf, 'ACA'}, {smf_aaa_session:get_session(AAAIn), EvIn}, AAAReply),
+			     {ok, smf_aaa_session:set_session(SOut, AAAIn), EvOut};
 			 (Session, SessionOpts, Procedure, Opts) ->
 			     meck:passthrough([Session, SessionOpts, Procedure, Opts])
 		     end),
@@ -5463,12 +5463,12 @@ up_inactivity_timer(Config) ->
     ok = meck:expect(
 	   smf_aaa_session, call,
 	   fun (Session, SessionOpts, Procedure = authenticate, Opts) ->
-		   {_, SIn, EvIn} =
+		   {_, AAAIn, EvIn} =
 		       meck:passthrough([Session, SessionOpts, Procedure, Opts]),
 		   {SOut, EvOut} =
-		       smf_aaa_radius:to_session(authenticate, {SIn, EvIn},
+		       smf_aaa_radius:to_session(authenticate, {smf_aaa_session:get_session(AAAIn), EvIn},
 						  AAAReply),
-		   {ok, SOut, EvOut};
+		   {ok, smf_aaa_session:set_session(SOut, AAAIn), EvOut};
 	       (Session, SessionOpts, Procedure, Opts) ->
 		   meck:passthrough([Session, SessionOpts, Procedure, Opts])
 	   end),
