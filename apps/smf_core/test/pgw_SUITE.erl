@@ -3342,28 +3342,22 @@ simple_ofcs(Config) ->
     delete_session(GtpC),
     ct:sleep(10),
 
-    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
-    SInv =
+    RfInv =
 	lists:filter(
 	  fun({_, {smf_aaa_charging, Fn, _}, _})
 		when Fn =:= rf_initial; Fn =:= rf_update; Fn =:= rf_terminate ->
 		  true;
-	     ({_, {smf_aaa_auth, stop, _}, _}) ->
-		  true;
-	     (_) ->
-		  false
-	  end, H),
-    ?match(X when X == 4, length(SInv)),
+	     (_) -> false
+	  end, meck:history(smf_aaa_charging)),
+    ?match(X when X == 3, length(RfInv)),
 
-    [Start, SInterim, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, SInv),
+    [Start, SInterim, Stop] =
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, RfInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
-    ?equal(false, maps:is_key('service_data', AcctStop)),
     ?equal(true, maps:is_key('service_data', Stop)),
 
     ?equal(false, maps:is_key('traffic_data', Start)),
-    ?equal(false, maps:is_key('traffic_data', AcctStop)),
     ?equal(true, maps:is_key('traffic_data', Stop)),
 
     SInterimSD = maps:get(service_data, SInterim),
@@ -3401,6 +3395,9 @@ simple_ofcs(Config) ->
 	 'Accounting-Output-Octets' => ['_'],
 	 'Change-Condition' => [0]
 	}, hd(StopTD)),
+
+    %% check accounting stop was called
+    ?match(1, meck:num_calls(smf_aaa_auth, stop, ['_', '_', '_', '_'])),
 
     ?equal([], outstanding_requests()),
 
@@ -3460,28 +3457,22 @@ ofcs_no_interim(Config) ->
     delete_session(GtpC),
     ct:sleep(10),
 
-    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
-    SInv =
+    RfInv =
 	lists:filter(
 	  fun({_, {smf_aaa_charging, Fn, _}, _})
 		when Fn =:= rf_initial; Fn =:= rf_update; Fn =:= rf_terminate ->
 		  true;
-	     ({_, {smf_aaa_auth, stop, _}, _}) ->
-		  true;
-	     (_) ->
-		  false
-	  end, H),
-    ?match(X when X == 3, length(SInv)),
+	     (_) -> false
+	  end, meck:history(smf_aaa_charging)),
+    ?match(X when X == 2, length(RfInv)),
 
-    [Start, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, SInv),
+    [Start, Stop] =
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, RfInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
-    ?equal(false, maps:is_key('service_data', AcctStop)),
     ?equal(true, maps:is_key('service_data', Stop)),
 
     ?equal(false, maps:is_key('traffic_data', Start)),
-    ?equal(false, maps:is_key('traffic_data', AcctStop)),
     ?equal(true, maps:is_key('traffic_data', Stop)),
 
     StopSD = maps:get(service_data, Stop),
@@ -3499,6 +3490,9 @@ ofcs_no_interim(Config) ->
 	 'Accounting-Output-Octets' => ['_'],
 	 'Change-Condition' => [0]
 	}, hd(StopTD)),
+
+    %% check accounting stop was called
+    ?match(1, meck:num_calls(smf_aaa_auth, stop, ['_', '_', '_', '_'])),
 
     ?equal([], outstanding_requests()),
 
@@ -3629,18 +3623,14 @@ simple_ocs(Config) ->
     ct:sleep(100),
     delete_session(GtpC),
 
-    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
     CCR =
 	lists:filter(
 	  fun({_, {smf_aaa_charging, Fn, _}, _})
 		when Fn =:= gy_ccr_initial; Fn =:= gy_ccr_update; Fn =:= gy_ccr_terminate ->
 		  true;
-	     ({_, {smf_aaa_auth, stop, _}, _}) ->
-		  true;
-	     (_) ->
-		  false
-	  end, H),
-    ?match(X when X == 4, length(CCR)),
+	     (_) -> false
+	  end, meck:history(smf_aaa_charging)),
+    ?match(X when X == 3, length(CCR)),
 
     {_, {_, gy_ccr_initial, _},
      {ok, _, Session, _}} = hd(CCR),
@@ -3711,11 +3701,8 @@ simple_ocs(Config) ->
 	 },
     ?match_map(Expected, Session),
 
-    [Start, SInterim, AcctStop, Stop] =
+    [Start, SInterim, Stop] =
 	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, CCR),
-
-    ?equal(false, maps:is_key('credits', AcctStop)),
-    ?equal(false, maps:is_key('used_credits', AcctStop)),
 
     ?match_map(
        #{credits => #{3000 => empty}}, Start),
@@ -3741,6 +3728,9 @@ simple_ocs(Config) ->
 		 'Reporting-Reason' => [2]}}]
 	}, Stop),
     ?equal(false, maps:is_key('credits', Stop)),
+
+    %% check accounting stop was called
+    ?match(1, meck:num_calls(smf_aaa_auth, stop, ['_', '_', '_', '_'])),
 
     ?equal([], outstanding_requests()),
 
@@ -3948,28 +3938,23 @@ split_charging1(Config) ->
     delete_session(GtpC),
     ct:sleep(10),
 
-    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
-    SInv =
+    ChargingH = meck:history(smf_aaa_charging),
+    RfInv =
 	lists:filter(
 	  fun({_, {smf_aaa_charging, Fn, _}, _})
 		when Fn =:= rf_initial; Fn =:= rf_update; Fn =:= rf_terminate ->
 		  true;
-	     ({_, {smf_aaa_auth, stop, _}, _}) ->
-		  true;
-	     (_) ->
-		  false
-	  end, H),
-    ?match(X when X == 4, length(SInv)),
+	     (_) -> false
+	  end, ChargingH),
+    ?match(X when X == 3, length(RfInv)),
 
-    [Start, SInterim, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, SInv),
+    [Start, SInterim, Stop] =
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, RfInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
-    ?equal(false, maps:is_key('service_data', AcctStop)),
     ?equal(true, maps:is_key('service_data', Stop)),
 
     ?equal(false, maps:is_key('traffic_data', Start)),
-    ?equal(false, maps:is_key('traffic_data', AcctStop)),
     ?equal(true, maps:is_key('traffic_data', Stop)),
 
     SInterimSD = lists:sort(maps:get(service_data, SInterim)),
@@ -4024,9 +4009,8 @@ split_charging1(Config) ->
 	  fun({_, {smf_aaa_charging, Fn, _}, _})
 		when Fn =:= gy_ccr_initial; Fn =:= gy_ccr_update; Fn =:= gy_ccr_terminate ->
 		  true;
-	     (_) ->
-		  false
-	  end, H),
+	     (_) -> false
+	  end, ChargingH),
     ?match(X when X == 8, length(CCR)),
 
     [GyStart, GyInterim, _, _, _, _, _, GyStop] =
@@ -4056,6 +4040,9 @@ split_charging1(Config) ->
 		 'Reporting-Reason' => [2]}}]
 	}, GyStop),
     ?equal(false, maps:is_key('credits', GyStop)),
+
+    %% check accounting stop was called
+    ?match(1, meck:num_calls(smf_aaa_auth, stop, ['_', '_', '_', '_'])),
 
     ?equal([], outstanding_requests()),
 
@@ -4274,28 +4261,23 @@ split_charging2(Config) ->
     delete_session(GtpC),
     ct:sleep(10),
 
-    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
-    SInv =
+    ChargingH = meck:history(smf_aaa_charging),
+    RfInv =
 	lists:filter(
 	  fun({_, {smf_aaa_charging, Fn, _}, _})
 		when Fn =:= rf_initial; Fn =:= rf_update; Fn =:= rf_terminate ->
 		  true;
-	     ({_, {smf_aaa_auth, stop, _}, _}) ->
-		  true;
-	     (_) ->
-		  false
-	  end, H),
-    ?match(X when X == 4, length(SInv)),
+	     (_) -> false
+	  end, ChargingH),
+    ?match(X when X == 3, length(RfInv)),
 
-    [Start, SInterim, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, SInv),
+    [Start, SInterim, Stop] =
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, RfInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
-    ?equal(false, maps:is_key('service_data', AcctStop)),
     ?equal(true, maps:is_key('service_data', Stop)),
 
     ?equal(false, maps:is_key('traffic_data', Start)),
-    ?equal(false, maps:is_key('traffic_data', AcctStop)),
     ?equal(true, maps:is_key('traffic_data', Stop)),
 
     SInterimSD = lists:sort(maps:get(service_data, SInterim)),
@@ -4332,7 +4314,7 @@ split_charging2(Config) ->
 
     StopSD = lists:sort(maps:get(service_data, Stop)),
     ct:pal("StopSD: ~p", [StopSD]),
-   ?equal(3, length(StopSD)),
+    ?equal(3, length(StopSD)),
     [SSD1, SSD2, SSD3] = StopSD,
     ?match_map(
        #{'Rating-Group' => [3000],
@@ -4368,9 +4350,8 @@ split_charging2(Config) ->
 	  fun({_, {smf_aaa_charging, Fn, _}, _})
 		when Fn =:= gy_ccr_initial; Fn =:= gy_ccr_update; Fn =:= gy_ccr_terminate ->
 		  true;
-	     (_) ->
-		  false
-	  end, H),
+	     (_) -> false
+	  end, ChargingH),
     ?match(X when X == 8, length(CCR)),
 
     [GyStart, GyInterim, _, _, _, _, _, GyStop] =
@@ -4400,6 +4381,9 @@ split_charging2(Config) ->
 		 'Reporting-Reason' => [2]}}]
 	}, GyStop),
     ?equal(false, maps:is_key('credits', GyStop)),
+
+    %% check accounting stop was called
+    ?match(1, meck:num_calls(smf_aaa_auth, stop, ['_', '_', '_', '_'])),
 
     ?equal([], outstanding_requests()),
 

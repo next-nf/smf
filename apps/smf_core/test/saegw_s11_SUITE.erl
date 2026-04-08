@@ -1464,28 +1464,22 @@ simple_ofcs(Config) ->
     ct:sleep(100),
     delete_session(GtpC),
 
-    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
-    SInv =
+    RfInv =
 	lists:filter(
 	  fun({_, {smf_aaa_charging, Fn, _}, _})
 		when Fn =:= rf_initial; Fn =:= rf_update; Fn =:= rf_terminate ->
 		  true;
-	     ({_, {smf_aaa_auth, stop, _}, _}) ->
-		  true;
-	     (_) ->
-		  false
-	  end, H),
-    ?match(X when X == 4, length(SInv)),
+	     (_) -> false
+	  end, meck:history(smf_aaa_charging)),
+    ?match(X when X == 3, length(RfInv)),
 
-    [Start, SInterim, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, SInv),
+    [Start, SInterim, Stop] =
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, RfInv),
 
     ?equal(false, maps:is_key('service_data', Start)),
-    ?equal(false, maps:is_key('service_data', AcctStop)),
     ?equal(true, maps:is_key('service_data', Stop)),
 
     ?equal(false, maps:is_key('traffic_data', Start)),
-    ?equal(false, maps:is_key('traffic_data', AcctStop)),
     ?equal(true, maps:is_key('traffic_data', Stop)),
 
     SInterimSD = maps:get(service_data, SInterim),
@@ -1523,6 +1517,9 @@ simple_ofcs(Config) ->
 	 'Accounting-Output-Octets' => ['_'],
 	 'Change-Condition' => [0]
 	}, hd(StopTD)),
+
+    %% check accounting stop was called
+    ?match(1, meck:num_calls(smf_aaa_auth, stop, ['_', '_', '_', '_'])),
 
     ?equal([], outstanding_requests()),
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
@@ -1588,18 +1585,14 @@ simple_ocs(Config) ->
     ct:sleep(100),
     delete_session(GtpC),
 
-    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
     CCR =
 	lists:filter(
 	  fun({_, {smf_aaa_charging, Fn, _}, _})
 		when Fn =:= gy_ccr_initial; Fn =:= gy_ccr_update; Fn =:= gy_ccr_terminate ->
 		  true;
-	     ({_, {smf_aaa_auth, stop, _}, _}) ->
-		  true;
-	     (_) ->
-		  false
-	  end, H),
-    ?match(X when X == 4, length(CCR)),
+	     (_) -> false
+	  end, meck:history(smf_aaa_charging)),
+    ?match(X when X == 3, length(CCR)),
 
     {_, {_, gy_ccr_initial, _},
      {ok, _, Session, _}} = hd(CCR),
@@ -1670,11 +1663,8 @@ simple_ocs(Config) ->
 	 },
     ?match_map(Expected, Session),
 
-    [Start, SInterim, AcctStop, Stop] =
+    [Start, SInterim, Stop] =
 	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, CCR),
-
-    ?equal(false, maps:is_key('credits', AcctStop)),
-    ?equal(false, maps:is_key('used_credits', AcctStop)),
 
     ?match_map(
        #{credits => #{3000 => empty}}, Start),
@@ -1700,6 +1690,9 @@ simple_ocs(Config) ->
 		 'Reporting-Reason' => [2]}}]
 	}, Stop),
     ?equal(false, maps:is_key('credits', Stop)),
+
+    %% check accounting stop was called
+    ?match(1, meck:num_calls(smf_aaa_auth, stop, ['_', '_', '_', '_'])),
 
     ?equal([], outstanding_requests()),
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
