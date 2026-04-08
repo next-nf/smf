@@ -611,8 +611,8 @@ handle_event(info, {timeout, TRef, pfcp_timer} = Info, _State, #{pfcp := PCtx0} 
     {Evs, PCtx} = smf_pfcp:timer_expired(TRef, PCtx0),
     Data = Data0#{pfcp => PCtx},
     #{validity_time := ChargingKeys} = smf_gsn_lib:pfcp_to_context_event(Evs),
-    smf_gtp_gsn_lib:triggered_charging_event(validity_time, Now, ChargingKeys, Data),
-    {keep_state, Data};
+    Data1 = smf_gtp_gsn_lib:triggered_charging_event(validity_time, Now, ChargingKeys, Data),
+    {keep_state, Data1};
 
 handle_event({call, From}, {delete_context, Reason},  #{session := SState} = State, Data)
   when SState == connected; SState == connecting ->
@@ -643,8 +643,8 @@ handle_event({call, From}, {peer_down, _Path, _Notify}, _State, _Data) ->
     {keep_state_and_data, [{reply, From, ok}]};
 
 handle_event(cast, {usage_report, URRActions, UsageReport}, _State, Data) ->
-    smf_gtp_gsn_lib:usage_report(URRActions, UsageReport, Data),
-    keep_state_and_data;
+    Data1 = smf_gtp_gsn_lib:usage_report(URRActions, UsageReport, Data),
+    {keep_state, Data1};
 
 handle_event(cast, {delete_context, Reason}, State, Data) ->
     delete_context(undefined, Reason, State, Data);
