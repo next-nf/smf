@@ -34,8 +34,7 @@ start_link() ->
 init([]) ->
     {ok, {{one_for_one, 30, 60}, [?CHILD(smf_aaa_diameter_srv, worker),
 				  ?CHILD(smf_aaa_session_seq, worker),
-				  ?CHILD(smf_aaa_session_reg, worker),
-				  ?CHILD(smf_aaa_session_sup, supervisor)]}}.
+				  ?CHILD(smf_aaa_session_reg, worker)]}}.
 
 start_childs(ProviderSupSpecs) ->
     [{ok, _} = supervisor:start_child(?SERVER, X) || X <- remove_dups(ProviderSupSpecs)].
