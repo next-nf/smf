@@ -2085,18 +2085,15 @@ simple_ocs(Config) ->
     ct:sleep(100),
     delete_pdp_context(GtpC),
 
-    H = lists:keysort(1, meck:history(smf_aaa_charging) ++ meck:history(smf_aaa_auth)),
     CCR =
 	lists:filter(
 	  fun({_, {smf_aaa_charging, Fn, _}, _})
 		when Fn =:= gy_ccr_initial; Fn =:= gy_ccr_update; Fn =:= gy_ccr_terminate ->
 		  true;
-	     ({_, {smf_aaa_auth, stop, _}, _}) ->
-		  true;
 	     (_) ->
 		  false
-	  end, H),
-    ?match(X when X == 4, length(CCR)),
+	  end, meck:history(smf_aaa_charging)),
+    ?match(X when X == 3, length(CCR)),
 
     {_, {_, gy_ccr_initial, _},
      {ok, _, Session, _}} = hd(CCR),
@@ -2169,11 +2166,11 @@ simple_ocs(Config) ->
 	 },
     ?match_map(Expected, Session),
 
-    [Start, SInterim, AcctStop, Stop] =
+    [Start, SInterim, Stop] =
 	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, CCR),
 
-    ?equal(false, maps:is_key('credits', AcctStop)),
-    ?equal(false, maps:is_key('used_credits', AcctStop)),
+    %% check accounting stop was called
+    ?match(1, meck:num_calls(smf_aaa_auth, stop, ['_', '_', '_', '_'])),
 
     ?match_map(
        #{credits => #{3000 => empty}}, Start),
