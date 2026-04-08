@@ -1051,7 +1051,7 @@ end_per_testcase(TestCase, Config)
        TestCase == simple_ofcs;
        TestCase == ofcs_no_interim;
        TestCase == tariff_time_change ->
-    ok = meck:delete(smf_aaa_session, start_link, 2),
+    ok = meck:delete(smf_aaa_session, new, 1),
     ok = meck:delete(smf_aaa_session, call, 4),
     end_per_testcase(Config);
 end_per_testcase(create_session_request_pool_exhausted, Config) ->
@@ -4527,14 +4527,14 @@ tariff_time_change(Config) ->
     Interim = rand:uniform(1800) + 1800,
     AAAReply = #{'Acct-Interim-Interval' => [Interim]},
 
-    ok = meck:expect(smf_aaa_session, start_link,
-		     fun (Owner, SOpts0) ->
+    ok = meck:expect(smf_aaa_session, new,
+		     fun (SOpts0) ->
 			     OPC = #{'Default' =>
 					 #{'Tariff-Time' =>
 					       [#{'Local-Tariff-Time' => {15, 4},
 						  'Location' => <<"Etc/UTC">>}]}},
 			     SOpts = SOpts0#{'Offline-Charging-Profile' => OPC},
-			     meck:passthrough([Owner, SOpts])
+			     meck:passthrough([SOpts])
 		     end),
     ok = meck:expect(smf_aaa_session, call,
 		     fun (Session, SessionOpts, {rf, 'Initial'} = Procedure, Opts) ->
