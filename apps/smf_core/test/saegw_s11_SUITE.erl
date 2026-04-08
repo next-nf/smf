@@ -1671,7 +1671,7 @@ simple_ocs(Config) ->
     ?match_map(Expected, Session),
 
     [Start, SInterim, AcctStop, Stop] =
-	lists:map(fun({_, {_, _, [_, _, _, SOpts, _, _]}, _}) -> SOpts end, CCR),
+	lists:map(fun({_, {_, _, [_, _, SOpts, _]}, _}) -> SOpts end, CCR),
 
     ?equal(false, maps:is_key('credits', AcctStop)),
     ?equal(false, maps:is_key('used_credits', AcctStop)),
