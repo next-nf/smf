@@ -82,8 +82,8 @@ peer_down(Context, Path, Notify) ->
     Fun = fun() -> (catch gen_statem:call(Context, {peer_down, Path, Notify})) end,
     jobs:run(path_restart, Fun).
 
-remote_context_register_new(LeftTunnel, Bearer, Context) ->
-    Keys = context2keys(LeftTunnel, Bearer, Context),
+remote_context_register_new(AccessTunnel, Bearer, Context) ->
+    Keys = context2keys(AccessTunnel, Bearer, Context),
     case gtp_context_reg:register_new(Keys, ?MODULE, self()) of
 	ok ->
 	    ok;
@@ -334,7 +334,7 @@ init({[Socket, Info, Version, Interface,
     process_flag(trap_exit, true),
     proc_lib:init_ack({ok, self()}),
 
-    LeftTunnel =
+    AccessTunnel =
 	smf_gsn_lib:assign_tunnel_teid(
 	  local, Info, smf_gsn_lib:init_tunnel('Access', Info, Socket, Version)),
     Context = #context{
@@ -350,7 +350,7 @@ init({[Socket, Info, Version, Interface,
       interface      => Interface,
       node_selection => NodeSelect,
       aaa_opts       => AAAOpts,
-      tunnels        => #{'Access' => LeftTunnel},
+      tunnels        => #{'Access' => AccessTunnel},
       bearer         => Bearer},
 
     {ok, State, LoopData} = Interface:init(Opts, Data),
@@ -487,7 +487,7 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 				events = ReqEvents} = Request,
 	     #{session := connected} = _State,
 	     #{context := Context, pfcp := PCtx0,
-	       tunnels := #{'Access' := LeftTunnel}, bearer := Bearer,
+	       tunnels := #{'Access' := AccessTunnel}, bearer := Bearer,
 	       aaa_session := S0, pcf := _PCF0,
 	       charging := C0, aaa_auth := A0, pcc := PCC0} = Data) ->
     Events = case Handler of
@@ -525,7 +525,7 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
     {PCtx1, UsageReport, _} =
 	case smf_pfcp_context:modify_session(PCC1, [], #{}, Bearer, PCtx0) of
 	    {ok, Result1} -> Result1;
-	    {error, Err1} -> throw(Err1#ctx_err{context = Context, tunnel = LeftTunnel})
+	    {error, Err1} -> throw(Err1#ctx_err{context = Context, tunnel = AccessTunnel})
 	end,
 
 %%% step 4:
@@ -546,7 +546,7 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
     {PCtx, _, _} =
 	case smf_pfcp_context:modify_session(PCC4, [], #{}, Bearer, PCtx1) of
 	    {ok, Result2} -> Result2;
-	    {error, Err2} -> throw(Err2#ctx_err{context = Context, tunnel = LeftTunnel})
+	    {error, Err2} -> throw(Err2#ctx_err{context = Context, tunnel = AccessTunnel})
 	end,
 
 %%% step 7:
@@ -606,7 +606,7 @@ handle_event(info, {update_session, Session, Events}, _State, _Data) ->
 
 handle_event(internal, {session, {update_credits, _} = CreditEv, _}, _State,
 	     #{context := Context, pfcp := PCtx0,
-	       tunnels := #{'Access' := LeftTunnel}, bearer := Bearer,
+	       tunnels := #{'Access' := AccessTunnel}, bearer := Bearer,
 	       pcc := PCC0} = Data) ->
     Now = erlang:monotonic_time(),
 
@@ -614,7 +614,7 @@ handle_event(internal, {session, {update_credits, _} = CreditEv, _}, _State,
     {PCtx, _, _} =
 	case smf_pfcp_context:modify_session(PCC, [], #{}, Bearer, PCtx0) of
 	    {ok, Result1} -> Result1;
-	    {error, Err1} -> throw(Err1#ctx_err{context = Context, tunnel = LeftTunnel})
+	    {error, Err1} -> throw(Err1#ctx_err{context = Context, tunnel = AccessTunnel})
 	end,
     {keep_state, Data#{pfcp := PCtx, pcc := PCC}};
 
@@ -879,10 +879,10 @@ validate_ies(#gtp{version = Version, type = MsgType, ie = IEs}, Cause, #{interfa
 %% context registry
 %%====================================================================
 
-context2keys(#tunnel{socket = Socket} = LeftTunnel, Bearer,
+context2keys(#tunnel{socket = Socket} = AccessTunnel, Bearer,
 	     #context{apn = APN, context_id = ContextId}) ->
     ordsets:from_list(
-      tunnel2keys(LeftTunnel)
+      tunnel2keys(AccessTunnel)
       ++ [context_key(Socket, ContextId) || ContextId /= undefined]
       ++ maps:fold(bsf_keys(APN, _, _, _), [], Bearer)).
 
