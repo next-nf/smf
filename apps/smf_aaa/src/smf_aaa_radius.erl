@@ -17,6 +17,11 @@
 -export([to_session/3, from_session/2]).
 -export([get_state_atom/1]).
 -ignore_xref([from_session/2, get_state_atom/1, to_session/3]).
+%% eradius API: secret/authenticator go in the NAS tuple, not the #radius_request{}
+-dialyzer({nowarn_function, [invoke/6, accounting/6,
+			     radius_response/6, radius_reply/5,
+			     handle_eap_msg/2, process_radius_attrs/1,
+			     send_request/3]}).
 
 -include("smf_aaa_internal.hrl").
 -include("include/smf_aaa_session.hrl").
