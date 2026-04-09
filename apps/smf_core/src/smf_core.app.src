@@ -8,8 +8,7 @@
 		    prometheus, cowboy, prometheus_cowboy,
 		    prometheus_diameter_collector,
 		    compiler, os_mon, jobs, mnesia,
-		    smf_sbi_client,
-		    zoneinfo]},
+		    smf_sbi_client]},
     {mod, {smf_core_app, []}},
     {registered, []}
 ]}.

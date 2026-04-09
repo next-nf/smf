@@ -234,37 +234,27 @@ session_modification_request(PCtx, _ReqIEs) ->
 sx_rule_error(Error, #sx_upd{errors = Errors} = Update) ->
     Update#sx_upd{errors = [Error | Errors]}.
 
-apply_charging_tariff_time(#{'Local-Tariff-Time' := {H, M}, 'Location' := Location}, Now, URR)
+apply_charging_tariff_time({H, M}, Now, URR)
   when is_integer(H), H >= 0, H < 24,
        is_integer(M), M >= 0, M < 60 ->
-    {LocalDate, _} = LocalNow =
-	localtime:to_local_time(
-	  localtime:from_universal_time(Now, Location)),
-    TT0 = {LocalDate, {H, M, 0}},
+    {NowDate, _} = Now,
+    TT0 = {NowDate, {H, M, 0}},
     TT =
-	if TT0 < LocalNow ->
+	if TT0 =< Now ->
 		calendar:gregorian_seconds_to_datetime(
 		  calendar:datetime_to_gregorian_seconds(TT0) + ?SECONDS_PER_DAY);
 	   true ->
 		TT0
 	end,
-    case localtime:from_local_time(TT, Location) of
-	[] ->
-	    ?LOG(error, "can't calculate UTC from Tariff-Time \"~p\" at location ~s",
-		 [TT, Location]),
+    TCTime = smf_gsn_lib:gregorian_seconds_to_sntp_time(
+	       calendar:datetime_to_gregorian_seconds(TT)),
+    case URR of
+	#{monitoring_time := #monitoring_time{time = OldTCTime}}
+	  when TCTime > OldTCTime ->
+	    %% don't update URR when new time is after existing time
 	    URR;
-	TTList ->
-	    UniTT = localtime:to_universal_time(hd(TTList)),
-	    TCTime = smf_gsn_lib:gregorian_seconds_to_sntp_time(
-		       calendar:datetime_to_gregorian_seconds(UniTT)),
-	    case URR of
-		#{monitoring_time := #monitoring_time{time = OldTCTime}}
-		  when TCTime > OldTCTime ->
-		    %% don't update URR when new time is after existing time
-		    URR;
-		_ ->
-		    URR#{monitoring_time => #monitoring_time{time = TCTime}}
-	    end
+	_ ->
+	    URR#{monitoring_time => #monitoring_time{time = TCTime}}
     end;
 apply_charging_tariff_time(Time, _Now, URR) ->
     ?LOG(error, "Invalid Tariff-Time \"~p\"", [Time]),

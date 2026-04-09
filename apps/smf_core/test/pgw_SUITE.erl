@@ -4518,9 +4518,7 @@ tariff_time_change(Config) ->
     ok = meck:expect(smf_aaa_session, new_session,
 		     fun (SOpts0) ->
 			     OPC = #{'Default' =>
-					 #{'Tariff-Time' =>
-					       [#{'Local-Tariff-Time' => {15, 4},
-						  'Location' => <<"Etc/UTC">>}]}},
+					 #{'Tariff-Time' => [{15, 4}]}},
 			     SOpts = SOpts0#{'Offline-Charging-Profile' => OPC},
 			     meck:passthrough([SOpts])
 		     end),

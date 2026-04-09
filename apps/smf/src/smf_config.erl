@@ -1022,8 +1022,7 @@ to_aaa_avp('Tariff-Time-Change', V) when is_binary(V) ->
     Time = calendar:rfc3339_to_system_time(binary_to_list(V)),
     calendar:system_time_to_universal_time(Time, second);
 to_aaa_avp(K, V)
-  when is_binary(V) andalso
-       (K =:= 'Tariff-Time' orelse K =:= 'Local-Tariff-Time') ->
+  when is_binary(V) andalso K =:= 'Tariff-Time' ->
     {ok, [Hour, Minute], _} = io_lib:fread("~d:~d", binary_to_list(V)),
     {Hour, Minute};
 to_aaa_avp(K, V) when is_list(V) ->
@@ -1256,8 +1255,7 @@ from_aaa_avp(_K, {{Year, Month, Day}, {Hour, Minute, Second}}) ->
       io_lib:format("~w-~2..0w-~2..0wT~2..0w:~2..0w:~2..0wZ",
 		    [Year, Month, Day, Hour, Minute, Second]));
 from_aaa_avp(K, Time)
-  when K =:= 'Tariff-Time';
-       K =:= 'Local-Tariff-Time' ->
+  when K =:= 'Tariff-Time' ->
     from_time(Time);
 from_aaa_avp(_K, Value) when is_list(Value) ->
     iolist_to_binary(Value);
