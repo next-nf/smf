@@ -35,58 +35,58 @@ connect_upf_candidates(APN, Services, NodeSelect, PeerUpNode) ->
     {ok, {Candidates, SxConnectId}}.
 
 create_session(APN, PAA, DAF, UPSelInfo, Session, PCF, Charging, Auth,
-	       SessionOpts, Context, LeftTunnel, LeftBearer, PCC) ->
+	       SessionOpts, Context, AccessTunnel, LeftBearer, PCC) ->
     try
 	{ok, create_session_fun(APN, PAA, DAF, UPSelInfo, Session, PCF, Charging, Auth,
-				SessionOpts, Context, LeftTunnel, LeftBearer, PCC)}
+				SessionOpts, Context, AccessTunnel, LeftBearer, PCC)}
     catch
 	throw:Error ->
 	    {error, Error}
     end.
 
 create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Charging0, Auth0,
-		   SessionOpts0, Context0, LeftTunnel, LeftBearer, PCC0) ->
+		   SessionOpts0, Context0, AccessTunnel, LeftBearer, PCC0) ->
 
     smf_sx_node:wait_connect(SxConnectId),
 
     APNOpts =
 	case smf_apn:get(APN) of
 	    {ok, Result2} -> Result2;
-	    {error, Err2} -> throw(Err2#ctx_err{context = Context0, tunnel = LeftTunnel})
+	    {error, Err2} -> throw(Err2#ctx_err{context = Context0, tunnel = AccessTunnel})
 	end,
 
     {UPinfo, SessionOpts1} =
 	case smf_pfcp_context:select_upf(Candidates, SessionOpts0, APNOpts) of
 	    {ok, Result3} -> Result3;
-	    {error, Err3} -> throw(Err3#ctx_err{context = Context0, tunnel = LeftTunnel})
+	    {error, Err3} -> throw(Err3#ctx_err{context = Context0, tunnel = AccessTunnel})
 	end,
 
     {Session1, AuthSEvs, Auth1} =
 	case smf_gtp_gsn_session:authenticate(Auth0, Session0, SessionOpts1) of
 	    {ok, Result4} -> Result4;
-	    {error, Err4} -> throw(Err4#ctx_err{context = Context0, tunnel = LeftTunnel})
+	    {error, Err4} -> throw(Err4#ctx_err{context = Context0, tunnel = AccessTunnel})
 	end,
 
     {PCtx0, NodeCaps, RightBearer0} =
 	case smf_pfcp_context:reselect_upf(Candidates, Session1, APNOpts, UPinfo) of
 	    {ok, Result5} -> Result5;
-	    {error, Err5} -> throw(Err5#ctx_err{context = Context0, tunnel = LeftTunnel})
+	    {error, Err5} -> throw(Err5#ctx_err{context = Context0, tunnel = AccessTunnel})
 	end,
 
     {Result6, {Cause, SessionOpts3, RightBearer, Context1}} =
-	smf_gsn_lib:allocate_ips(PAA, APNOpts, Session1, DAF, LeftTunnel, RightBearer0, Context0),
+	smf_gsn_lib:allocate_ips(PAA, APNOpts, Session1, DAF, AccessTunnel, RightBearer0, Context0),
     case Result6 of
 	ok -> ok;
-	{error, Err6} -> throw(Err6#ctx_err{context = Context1, tunnel = LeftTunnel})
+	{error, Err6} -> throw(Err6#ctx_err{context = Context1, tunnel = AccessTunnel})
     end,
 
     Context = add_apn_timeout(APNOpts, SessionOpts3, Context1),
 
     Bearer0 = #{left => LeftBearer, right => RightBearer},
     Bearer1 =
-	case smf_gsn_lib:assign_local_data_teid(left, PCtx0, NodeCaps, LeftTunnel, Bearer0) of
+	case smf_gsn_lib:assign_local_data_teid(left, PCtx0, NodeCaps, AccessTunnel, Bearer0) of
 	    {ok, Result7} -> Result7;
-	    {error, Err7} -> throw(Err7#ctx_err{context = Context, tunnel = LeftTunnel})
+	    {error, Err7} -> throw(Err7#ctx_err{context = Context, tunnel = AccessTunnel})
 	end,
 
     Session2 = maps:merge(Session1, SessionOpts3),
@@ -100,7 +100,7 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
     {GxSession, GxEvents, PCF1} =
 	case smf_gtp_gsn_session:ccr_initial_gx(PCF0, Session2, GxOpts, SOpts) of
 	    {ok, Result8} -> Result8;
-	    {error, Err8} -> throw(Err8#ctx_err{context = Context, tunnel = LeftTunnel})
+	    {error, Err8} -> throw(Err8#ctx_err{context = Context, tunnel = AccessTunnel})
 	end,
 
     RuleBase = smf_charging:rulebase(),
@@ -110,7 +110,7 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
 	    ok;
 	_ ->
 	    throw(#ctx_err{level = ?FATAL, reply = user_authentication_failed,
-			   tunnel = LeftTunnel, where = {?FILE, ?LINE}})
+			   tunnel = AccessTunnel, where = {?FILE, ?LINE}})
     end,
 
     %% TBD............
@@ -120,7 +120,7 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
     {GySession, GyEvs, Charging1} =
 	case smf_gtp_gsn_session:ccr_initial_gy(Charging0, GxSession, GyReqServices, SOpts) of
 	    {ok, Result9} -> Result9;
-	    {error, Err9} -> throw(Err9#ctx_err{context = Context, tunnel = LeftTunnel})
+	    {error, Err9} -> throw(Err9#ctx_err{context = Context, tunnel = AccessTunnel})
 	end,
 
     ?LOG(debug, "Initial GyEvs: ~p", [GyEvs]),
@@ -135,7 +135,7 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
     {PCtx, Bearer, SessionInfo} =
 	case smf_pfcp_context:create_session(gtp_context, PCC4, PCtx0, Bearer1, Context) of
 	       {ok, Result10} -> Result10;
-	       {error, Err10} -> throw(Err10#ctx_err{context = Context, tunnel = LeftTunnel})
+	       {error, Err10} -> throw(Err10#ctx_err{context = Context, tunnel = AccessTunnel})
 	   end,
 
     SessionOpts = maps:merge(SessionOpts3, SessionInfo),
@@ -152,7 +152,7 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
 	       {PCF1, Session5}
 	end,
 
-    case gtp_context:remote_context_register_new(LeftTunnel, Bearer, Context) of
+    case gtp_context:remote_context_register_new(AccessTunnel, Bearer, Context) of
 	ok ->
 	    {ok, Cause, SessionOpts, Context, Bearer, PCC4, PCtx,
 	     Session6, PCF2, Charging2, Auth2};
