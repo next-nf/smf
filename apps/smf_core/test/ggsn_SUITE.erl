@@ -1070,7 +1070,7 @@ path_failure(Config) ->
 			     meck:passthrough([Socket, Src, IP, Port, T3, N3, Msg, CbInfo])
 		     end),
 
-    #{left_tunnel := #tunnel{socket = CSocket}} = smf_context:test_cmd(gtp, CtxKey, info),
+    #{tunnels := #{'Access' := #tunnel{socket = CSocket}}} = smf_context:test_cmd(gtp, CtxKey, info),
     gtp_path:ping(CSocket, v1, ClientIP),
 
     %% wait for session cleanup

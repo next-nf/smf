@@ -147,7 +147,7 @@ handle_request(ReqKey,
 			   ?'Access Point Name' := #access_point_name{apn = APN}
 			  } = IEs} = Request, _Resent, #{session := init} = State,
 	       #{context := Context0, aaa_opts := AAAopts, node_selection := NodeSelect,
-		 left_tunnel := LeftTunnel0, bearer := #{left := LeftBearer0},
+		 tunnels := #{'Access' := LeftTunnel0}, bearer := #{left := LeftBearer0},
 		 aaa_session := S0, pcf := PCF0, charging := C0, aaa_auth := A0,
 		 pcc := PCC0} = Data) ->
     Services = [{'x-3gpp-upf', 'x-sxb'}],
@@ -194,7 +194,7 @@ handle_request(ReqKey,
     FinalData =
 	Data#{context => Context, pfcp => PCtx, pcc => PCC4,
 	      aaa_session => S1, pcf => PCF1, charging => C1, aaa_auth => A1,
-	      left_tunnel => LeftTunnel, bearer => Bearer},
+	      tunnels => (maps:get(tunnels, Data))#{'Access' => LeftTunnel}, bearer => Bearer},
 
     ResponseIEs = create_pdp_context_response(Cause, SessionOpts, Request, LeftTunnel, Bearer, Context),
     Response = response(create_pdp_context_response, LeftTunnel, ResponseIEs, Request),
@@ -213,7 +213,7 @@ handle_request(ReqKey,
 		    ie = #{?'Quality of Service Profile' := ReqQoSProfile} = IEs} = Request,
 	       _Resent, #{session := connected} = _State,
 	       #{context := Context, pfcp := PCtx0,
-		 left_tunnel := LeftTunnelOld,
+		 tunnels := #{'Access' := LeftTunnelOld},
 		 bearer := #{left := LeftBearerOld} = Bearer0,
 		 aaa_session := S0, pcc := PCC} = Data) ->
     {LeftTunnel0, LeftBearer} =
@@ -247,14 +247,14 @@ handle_request(ReqKey,
     Response = response(update_pdp_context_response, LeftTunnel, ResponseIEs, Request),
     gtp_context:send_response(ReqKey, Request, Response),
 
-    DataNew = Data#{pfcp => PCtx, left_tunnel => LeftTunnel, bearer => Bearer, aaa_session => S2},
+    DataNew = Data#{pfcp => PCtx, tunnels => (maps:get(tunnels, Data))#{'Access' => LeftTunnel}, bearer => Bearer, aaa_session => S2},
     Actions = context_idle_action([], Context),
     {keep_state, DataNew, Actions};
 
 handle_request(ReqKey,
 	       #gtp{type = ms_info_change_notification_request, ie = IEs} = Request,
 	       _Resent, #{session := connected} = _State,
-	       #{context := Context, pfcp := PCtx, left_tunnel := LeftTunnel,
+	       #{context := Context, pfcp := PCtx, tunnels := #{'Access' := LeftTunnel},
 		 bearer := #{left := LeftBearer}, aaa_session := S0} = Data) ->
     {URRActions, S1} = update_session_from_gtp_req(IEs, S0, LeftTunnel, LeftBearer),
     gtp_context:trigger_usage_report(self(), URRActions, PCtx),
@@ -270,7 +270,7 @@ handle_request(ReqKey,
 handle_request(ReqKey,
 	       #gtp{type = delete_pdp_context_request, ie = _IEs} = Request,
 	       _Resent, #{session := connected} = State,
-	       #{left_tunnel := LeftTunnel} = Data0) ->
+	       #{tunnels := #{'Access' := LeftTunnel}} = Data0) ->
     Data = smf_gtp_gsn_lib:close_context(?API, normal, Data0),
     Response = response(delete_pdp_context_response, LeftTunnel, request_accepted),
     gtp_context:send_response(ReqKey, Request, Response),
@@ -310,10 +310,8 @@ handle_response({From, TermCause},
 		#gtp{type = delete_pdp_context_response,
 		     ie = #{?'Cause' := #cause{value = Cause}}},
 		_Request, State,
-		#{left_tunnel := LeftTunnel} = Data0) ->
-    Data1 = Data0#{left_tunnel := LeftTunnel},
-
-    Data = smf_gtp_gsn_lib:close_context(?API, TermCause, Data1),
+		Data0) ->
+    Data = smf_gtp_gsn_lib:close_context(?API, TermCause, Data0),
     if is_tuple(From) -> gen_statem:reply(From, {ok, Cause});
        true -> ok
     end,
@@ -847,7 +845,7 @@ send_request(Tunnel, T3, N3, Type, RequestIEs, ReqInfo) ->
 %%      may happen when the PDP context is dangling at the GGSN). Also, the "Quality of service profile" IE and the
 %%      "End user Address" IE shall not be included in this case;
 %%
-send_context_alive_request(#{left_tunnel := Tunnel, context :=
+send_context_alive_request(#{tunnels := #{'Access' := Tunnel}, context :=
 				 #context{default_bearer_id = NSAPI, imsi = IMSI}}) ->
     Type = update_pdp_context_request,
     RequestIEs0 = [#nsapi{nsapi = NSAPI} |
@@ -863,7 +861,7 @@ map_term_cause(_TermCause) ->
     reactivation_requested.
 
 delete_context(From, TermCause, #{session := connected} = State,
-	       #{left_tunnel := Tunnel, context :=
+	       #{tunnels := #{'Access' := Tunnel}, context :=
 		     #context{default_bearer_id = NSAPI}} = Data) ->
     Type = delete_pdp_context_request,
     RequestIEs0 =

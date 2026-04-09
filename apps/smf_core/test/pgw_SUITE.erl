@@ -1427,7 +1427,7 @@ path_failure(Config) ->
 			     meck:passthrough([Socket, Src, IP, Port, T3, N3, Msg, CbInfo])
 		     end),
 
-    #{left_tunnel := #tunnel{socket = CSocket}} = smf_context:test_cmd(gtp, CtxKey, info),
+    #{tunnels := #{'Access' := #tunnel{socket = CSocket}}} = smf_context:test_cmd(gtp, CtxKey, info),
     gtp_path:ping(CSocket, v2, ClientIP),
 
     %% wait for session cleanup
@@ -1476,7 +1476,7 @@ path_failure_suspect_timeout(Config) ->
 
     {GtpC, _, _} = create_session(Config),
 
-    #{left_tunnel := #tunnel{socket = CSocket}} = smf_context:test_cmd(gtp, CtxKey, info),
+    #{tunnels := #{'Access' := #tunnel{socket = CSocket}}} = smf_context:test_cmd(gtp, CtxKey, info),
 
     ClientIP = proplists:get_value(client_ip, Config),
     ok = meck:expect(smf_gtp_c_socket, send_request,
@@ -1536,7 +1536,7 @@ path_failure_suspect_echo_backoff(Config) ->
 
     {GtpC, _, _} = create_session(Config),
 
-    #{left_tunnel := #tunnel{socket = CSocket}} = smf_context:test_cmd(gtp, CtxKey, info),
+    #{tunnels := #{'Access' := #tunnel{socket = CSocket}}} = smf_context:test_cmd(gtp, CtxKey, info),
 
     ClientIP = proplists:get_value(client_ip, Config),
     ok = meck:expect(smf_gtp_c_socket, send_request,

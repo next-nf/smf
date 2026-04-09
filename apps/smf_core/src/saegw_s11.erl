@@ -153,7 +153,7 @@ handle_request(ReqKey,
 			  } = IEs} = Request,
 	       _Resent, State,
 	       #{context := Context0, aaa_opts := AAAopts, node_selection := NodeSelect,
-		  left_tunnel := LeftTunnel0, bearer := #{left := LeftBearer0},
+		  tunnels := #{'Access' := LeftTunnel0}, bearer := #{left := LeftBearer0},
 		 aaa_session := S0, pcf := PCF0, charging := C0, aaa_auth := A0,
 		 pcc := PCC0} = Data) ->
 
@@ -196,7 +196,7 @@ handle_request(ReqKey,
 
     FinalData =
 	Data#{context => Context, pfcp => PCtx, pcc => PCC4,
-	      left_tunnel => LeftTunnel, bearer => Bearer,
+	      tunnels => (maps:get(tunnels, Data))#{'Access' => LeftTunnel}, bearer => Bearer,
 	      aaa_session => S1, pcf => PCF1, charging => C1, aaa_auth => A1},
 
     ResponseIEs = create_session_response(Cause, SessionOpts, IEs, EBI, LeftTunnel, Bearer, Context),
@@ -218,7 +218,7 @@ handle_request(ReqKey,
 			  } = IEs} = Request,
 	       _Resent, #{session := connected} = _State,
 	       #{context := Context, pfcp := PCtx0,
-		 left_tunnel := LeftTunnelOld,
+		 tunnels := #{'Access' := LeftTunnelOld},
 		 bearer := #{left := LeftBearerOld} = Bearer0,
 		 aaa_session := S0, pcc := PCC} = Data) ->
     {LeftTunnel0, LeftBearer} =
@@ -251,7 +251,7 @@ handle_request(ReqKey,
     Response = response(modify_bearer_response, LeftTunnel, ResponseIEs, Request),
     gtp_context:send_response(ReqKey, Request, Response),
 
-    DataNew = Data#{pfcp => PCtx, left_tunnel => LeftTunnel, bearer => Bearer, aaa_session => S2},
+    DataNew = Data#{pfcp => PCtx, tunnels => (maps:get(tunnels, Data))#{'Access' => LeftTunnel}, bearer => Bearer, aaa_session => S2},
     Actions = context_idle_action([], Context),
     {keep_state, DataNew, Actions};
 
@@ -259,7 +259,7 @@ handle_request(ReqKey,
 	       #gtp{type = modify_bearer_request, ie = IEs} = Request,
 	       _Resent, #{session := connected} = _State,
 	       #{context := Context, pfcp := PCtx,
-		 left_tunnel := LeftTunnelOld, bearer := #{left := LeftBearerOld},
+		 tunnels := #{'Access' := LeftTunnelOld}, bearer := #{left := LeftBearerOld},
 		 aaa_session := S0} = Data)
   when not is_map_key(?'Bearer Contexts to be modified', IEs) ->
     {LeftTunnel0, LeftBearer} =
@@ -274,7 +274,7 @@ handle_request(ReqKey,
     gtp_context:trigger_usage_report(self(), URRActions, PCtx),
 
     DataNew =
-	Data#{pfcp => PCtx, left_tunnel => LeftTunnel, aaa_session => S1},
+	Data#{pfcp => PCtx, tunnels => (maps:get(tunnels, Data))#{'Access' => LeftTunnel}, aaa_session => S1},
 
     ResponseIEs = [#v2_cause{v2_cause = request_accepted}],
     Response = response(modify_bearer_response, LeftTunnel, ResponseIEs, Request),
@@ -291,7 +291,7 @@ handle_request(#request{src = Src, ip = IP, port = Port} = ReqKey,
 			       #v2_bearer_context{
 				  group = #{?'EPS Bearer ID' := EBI} = Bearer}} = IEs},
 	       _Resent, #{session := connected},
-	       #{context := Context, left_tunnel := LeftTunnel,
+	       #{context := Context, tunnels := #{'Access' := LeftTunnel},
 		 bearer := #{left := LeftBearer}, aaa_session := S0} = Data) ->
     OldSOpts = S0,
     {_URRActions, S1} = pgw_s5s8:update_session_from_gtp_req(IEs, S0, LeftTunnel, LeftBearer),
@@ -312,7 +312,7 @@ handle_request(ReqKey,
 	       #gtp{type = release_access_bearers_request} = Request,
 	       _Resent, #{session := connected} = _State,
 	       #{context := Context, pfcp := PCtx0,
-		 left_tunnel := LeftTunnel,
+		 tunnels := #{'Access' := LeftTunnel},
 		 bearer := #{left := LeftBearer0} = Bearer0,
 		 pcc := PCC} = Data) ->
     LeftBearer = LeftBearer0#bearer{remote = undefined},
@@ -335,7 +335,7 @@ handle_request(ReqKey,
 handle_request(ReqKey,
 	       #gtp{type = delete_session_request, ie = IEs} = Request,
 	       _Resent, #{session := connected} = State,
-	       #{left_tunnel := LeftTunnel} = Data0) ->
+	       #{tunnels := #{'Access' := LeftTunnel}} = Data0) ->
     FqTEID = maps:get(?'Sender F-TEID for Control Plane', IEs, undefined),
 
     case match_tunnel(?'S11-C MME', LeftTunnel, FqTEID) of
@@ -363,12 +363,12 @@ handle_response({CommandReqKey, OldSOpts},
 				   group = #{?'Cause' := #v2_cause{v2_cause = BearerCause}}
 				  }} = IEs},
 		_Request, #{session := connected} = State,
-		#{pfcp := PCtx, left_tunnel := LeftTunnel0, bearer := #{left := LeftBearer},
+		#{pfcp := PCtx, tunnels := #{'Access' := LeftTunnel0}, bearer := #{left := LeftBearer},
 		  aaa_session := S0} = Data) ->
     gtp_context:request_finished(CommandReqKey),
 
     {ok, LeftTunnel} = gtp_path:bind_tunnel(LeftTunnel0),
-    DataNew = Data#{left_tunnel => LeftTunnel},
+    DataNew = Data#{tunnels => (maps:get(tunnels, Data))#{'Access' => LeftTunnel}},
 
     if Cause =:= request_accepted andalso BearerCause =:= request_accepted ->
 	    {_URRActions, S1} = pgw_s5s8:update_session_from_gtp_req(IEs, S0, LeftTunnel, LeftBearer),
@@ -398,10 +398,10 @@ handle_response({From, TermCause}, timeout, #gtp{type = delete_bearer_request},
 handle_response({From, TermCause},
 		#gtp{type = delete_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause}}},
-		_Request, State, #{left_tunnel := LeftTunnel0} = Data0) ->
+		_Request, State, #{tunnels := #{'Access' := LeftTunnel0}} = Data0) ->
     {ok, LeftTunnel} = gtp_path:bind_tunnel(LeftTunnel0),
 
-    Data1 = Data0#{left_tunnel => LeftTunnel},
+    Data1 = Data0#{tunnels => (maps:get(tunnels, Data0))#{'Access' => LeftTunnel}},
 
     Data = smf_gtp_gsn_lib:close_context(?API, TermCause, Data1),
     if is_tuple(From) -> gen_statem:reply(From, {ok, Cause});
@@ -587,7 +587,7 @@ map_term_cause(_TermCause) ->
     reactivation_requested.
 
 delete_context(From, TermCause, #{session := connected} = State,
-	       #{left_tunnel := Tunnel} = Data) ->
+	       #{tunnels := #{'Access' := Tunnel}} = Data) ->
     Type = delete_bearer_request,
     EBI = 5,
     RequestIEs0 = [#v2_cause{v2_cause = map_term_cause(TermCause)},

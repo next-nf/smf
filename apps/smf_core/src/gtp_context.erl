@@ -350,7 +350,7 @@ init({[Socket, Info, Version, Interface,
       interface      => Interface,
       node_selection => NodeSelect,
       aaa_opts       => AAAOpts,
-      left_tunnel    => LeftTunnel,
+      tunnels        => #{'Access' => LeftTunnel},
       bearer         => Bearer},
 
     {ok, State, LoopData} = Interface:init(Opts, Data),
@@ -487,7 +487,7 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 				events = ReqEvents} = Request,
 	     #{session := connected} = _State,
 	     #{context := Context, pfcp := PCtx0,
-	       left_tunnel := LeftTunnel, bearer := Bearer,
+	       tunnels := #{'Access' := LeftTunnel}, bearer := Bearer,
 	       aaa_session := S0, pcf := _PCF0,
 	       charging := C0, aaa_auth := A0, pcc := PCC0} = Data) ->
     Events = case Handler of
@@ -606,7 +606,7 @@ handle_event(info, {update_session, Session, Events}, _State, _Data) ->
 
 handle_event(internal, {session, {update_credits, _} = CreditEv, _}, _State,
 	     #{context := Context, pfcp := PCtx0,
-	       left_tunnel := LeftTunnel, bearer := Bearer,
+	       tunnels := #{'Access' := LeftTunnel}, bearer := Bearer,
 	       pcc := PCC0} = Data) ->
     Now = erlang:monotonic_time(),
 
@@ -656,13 +656,8 @@ handle_event({call, From}, terminate_context, State, Data0) ->
     {next_state, State#{session := shutdown}, Data, [{reply, From, ok}]};
 
 handle_event({call, From}, {peer_down, Path, Notify}, State,
-	     #{left_tunnel := #tunnel{path = Path}} = Data0) ->
+	     #{tunnels := #{'Access' := #tunnel{path = Path}}} = Data0) ->
     Data = close_context(left, peer_restart, Notify, State, Data0),
-    {next_state, State#{session := shutdown}, Data, [{reply, From, ok}]};
-
-handle_event({call, From}, {peer_down, Path, Notify}, State,
-	     #{right_tunnel := #tunnel{path = Path}} = Data0) ->
-    Data = close_context(right, peer_restart, Notify, State, Data0),
     {next_state, State#{session := shutdown}, Data, [{reply, From, ok}]};
 
 handle_event({call, From}, {peer_down, _Path, _Notify}, _State, _Data) ->
