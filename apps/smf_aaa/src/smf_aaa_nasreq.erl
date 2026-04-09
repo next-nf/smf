@@ -43,6 +43,8 @@
 -ignore_xref([peer_up/3, peer_down/3, pick_peer/5,
 	      prepare_request/4, prepare_retransmit/4,
 	      handle_answer/5, handle_error/5, handle_request/3]).
+%% diameter message format is [CommandName | AvpMap] — an intentional improper list
+-dialyzer({nowarn_function, [prepare_request/4, handle_request/3, handle_common_request/3]}).
 
 -include_lib("kernel/include/inet.hrl").
 -include_lib("kernel/include/logger.hrl").
@@ -673,9 +675,7 @@ filter_reply_avps('ASR', Avps) ->
         'Redirected-Max-Cache-Time',
         'Proxy-Info'
     ],
-    maps:with(Permited, Avps);
-filter_reply_avps(_, Avps) ->
-    Avps.
+    maps:with(Permited, Avps).
 
 diameter_reply_code('ASR') -> 'ASA';
 diameter_reply_code('RAR') -> 'RAA'.

@@ -39,6 +39,8 @@
 -ignore_xref([peer_up/3, peer_down/3, pick_peer/5,
 	      prepare_request/4, prepare_retransmit/4,
 	      handle_answer/5, handle_error/5, handle_request/3]).
+%% diameter message format is [CommandName | AvpMap] — an intentional improper list
+-dialyzer({nowarn_function, [prepare_request/4, handle_request/3, handle_common_request/3]}).
 
 -include_lib("kernel/include/inet.hrl").
 -include_lib("kernel/include/logger.hrl").
@@ -372,9 +374,7 @@ filter_reply_avps('RAR', Avps) ->
     maps:with(Permited, Avps);
 filter_reply_avps('ASR', Avps) ->
     Permited = ['User-Name'],
-    maps:with(Permited, Avps);
-filter_reply_avps(_, Avps) ->
-    Avps.
+    maps:with(Permited, Avps).
 
 %%%===================================================================
 apply_answer_config(Answer, Answers) ->
@@ -383,14 +383,6 @@ apply_answer_config(Answer, Answers) ->
 	_ -> #{'Result-Code' => ?'DIAMETER_BASE_RESULT-CODE_AUTHORIZATION_REJECTED'}
     end.
 
-assign([Key], Fun, Avps) ->
-    Fun(Key, Avps);
-assign([Key | Next], Fun, Avps) ->
-    [V] = maps:get(Key, Avps, [#{}]),
-    Avps#{Key => [assign(Next, Fun, V)]}.
-
-repeated(Keys, Value, Avps) when is_list(Keys) ->
-    assign(Keys, repeated(_, Value, _), Avps);
 repeated(Key, Value, Avps)
   when is_atom(Key) ->
     maps:update_with(Key, fun(V) -> [Value|V] end, [Value], Avps).
