@@ -13,6 +13,7 @@
 -export([start_link/0]).
 -export([register/1, unregister/1, lookup/1]).
 -export([all/0]).
+-ignore_xref([start_link/0, unregister/1, all/0]).
 
 %% regine_server callbacks
 -export([init/1, handle_register/4, handle_unregister/3, handle_pid_remove/3, handle_death/3, terminate/2]).

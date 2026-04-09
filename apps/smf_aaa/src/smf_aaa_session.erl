@@ -18,9 +18,13 @@
 	 get_session/1, set_session/2, merge_session/2,
 	 get_handler/2, set_handler/3,
 	 terminate_action/1]).
+-ignore_xref([new/1, call/4, handle_reply/4,
+	      get_session/1, set_session/2, merge_session/2,
+	      get_handler/2, set_handler/3, terminate_action/1]).
 
 %% Session Object API
 -export([to_session/1, native_to_seconds/1]).
+-ignore_xref([native_to_seconds/1]).
 
 %% Shared helpers for per-protocol modules
 -export([new_session/1,
@@ -33,7 +37,9 @@
 
 %% Event helpers
 -export([ev_add/2, ev_del/2, ev_set/2]).
+-ignore_xref([ev_add/2, ev_del/2]).
 -export([trigger/4, trigger/5]).
+-ignore_xref([trigger/5]).
 
 -include_lib("kernel/include/logger.hrl").
 -include("include/smf_aaa_session.hrl").

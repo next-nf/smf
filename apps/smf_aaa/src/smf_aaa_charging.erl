@@ -9,6 +9,7 @@
 	 rf_initial/4, rf_update/4, rf_terminate/4,
 	 terminate/3,
 	 handle_reply/4]).
+-ignore_xref([terminate/3]).
 
 -include("include/smf_aaa_session.hrl").
 

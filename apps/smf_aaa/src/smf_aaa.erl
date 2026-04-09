@@ -13,6 +13,7 @@
 -export([setopts/1, setopt/2,
 	 add_function/2, add_handler/2, add_service/2, add_application/2,
 	 get_function/1, get_handler/1, get_service/1, get_application/1]).
+-ignore_xref([setopts/1, get_function/1]).
 
 -ifdef(TEST).
 -export([add_config/3]).

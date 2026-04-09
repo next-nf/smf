@@ -14,6 +14,7 @@
 	 initialize_handler/1, initialize_service/2, invoke/6, handle_response/6]).
 
 -export([get_state_atom/1]).
+-ignore_xref([get_state_atom/1]).
 
 -import(smf_aaa_session, [to_session/1]).
 

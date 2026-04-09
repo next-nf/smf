@@ -9,6 +9,7 @@
 
 %% API
 -export([init/0, sync/0, get_restart_counter/0, get_start_time/0]).
+-ignore_xref([sync/0]).
 
 -define(App, smf_core).
 

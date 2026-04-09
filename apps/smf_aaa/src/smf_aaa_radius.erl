@@ -16,6 +16,7 @@
 	 initialize_handler/1, initialize_service/2, invoke/6, handle_response/6]).
 -export([to_session/3, from_session/2]).
 -export([get_state_atom/1]).
+-ignore_xref([from_session/2, get_state_atom/1, to_session/3]).
 
 -include("smf_aaa_internal.hrl").
 -include("include/smf_aaa_session.hrl").

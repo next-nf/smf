@@ -12,6 +12,7 @@
 %% API
 -export([validate_function/1,
 	 initialize_function/2]).
+-ignore_xref([validate_function/1, initialize_function/2]).
 -export(['3gpp_from_session'/2, qos_from_session/1]).
 -export([encode_ipv6prefix/1, decode_ipv6prefix/1]).
 -export([validate_termination_cause_mapping/1]).

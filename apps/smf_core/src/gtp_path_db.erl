@@ -19,6 +19,7 @@
 -export([get/1, put/2, cas_restart_counter/3]).
 -export([state/3, attach/2, detach/2]).
 -export([all/0]).
+-ignore_xref([get/1, put/2, all/0]).
 
 -define(TAB, ?MODULE).
 

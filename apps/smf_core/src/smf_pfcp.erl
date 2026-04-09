@@ -20,6 +20,7 @@
 	 outer_header_removal/2,
 	 ctx_teid_key/2,
 	 up_inactivity_timer/1]).
+-ignore_xref([f_teid/1, outer_header_removal/1]).
 -export([init_ctx/1, reset_ctx/1,
 	 get_id/3, get_chid/3, get_bearer_key_by_pdr/2,
 	 update_pfcp_rules/3,

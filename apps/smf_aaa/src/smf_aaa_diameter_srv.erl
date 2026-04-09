@@ -29,6 +29,7 @@
 	 finish_request/2,
 	 send_request/4, retry_request/4, await_response/1, await_response/2,
 	 prepare_request/4, get_peers_info/0]).
+-ignore_xref([start_link/0, stop/0, pick_peer/2, start_request/2, await_response/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,

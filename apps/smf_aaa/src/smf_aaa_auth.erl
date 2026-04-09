@@ -9,6 +9,7 @@
 	 start/4, interim/4, stop/4,
 	 terminate/3,
 	 handle_reply/4]).
+-ignore_xref([authorize/4, terminate/3]).
 
 -include("include/smf_aaa_session.hrl").
 

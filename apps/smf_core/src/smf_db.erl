@@ -10,11 +10,13 @@
 %% API
 -export([init/0, backend/0]).
 -export([create/2, delete_table/1]).
+-ignore_xref([backend/0, delete_table/1]).
 -export([insert/2, insert_new/2, delete/2, delete_object/2]).
 -export([lookup/2, take/2, update_element/3]).
 -export([select/1, select/2, select/3]).
 -export([tab2list/1]).
 -export([fold/5]).
+-ignore_xref([select/1, select/3, fold/5]).
 
 %% Types
 -export_type([table/0, table_opts/0, cursor/0]).

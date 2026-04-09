@@ -17,7 +17,7 @@
 	 wait_till_ready/0,
 	 is_ready/0]).
 
--ignore_xref([start_link/0, validate_options/1]).
+-ignore_xref([start_link/0, validate_options/1, is_ready/0]).
 
 -ifdef(TEST).
 -export([start/2, wait_till_running/0, is_running/0]).

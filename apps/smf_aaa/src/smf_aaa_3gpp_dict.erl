@@ -10,6 +10,7 @@
 -module(smf_aaa_3gpp_dict).
 
 -export([ip2bin/1, bin2ip/1]).
+-ignore_xref([bin2ip/1]).
 -export([encode/2, decode/2]).
 
 %% 3GPP-IMSI

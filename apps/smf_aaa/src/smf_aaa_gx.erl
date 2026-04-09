@@ -25,6 +25,7 @@
 -export([to_session/3, from_session/2]).
 
 -export([get_state_atom/1]).
+-ignore_xref([from_session/2, get_state_atom/1]).
 
 %% diameter callbacks
 -export([peer_up/3,
@@ -35,6 +36,9 @@
 	 handle_answer/5,
 	 handle_error/5,
 	 handle_request/3]).
+-ignore_xref([peer_up/3, peer_down/3, pick_peer/5,
+	      prepare_request/4, prepare_retransmit/4,
+	      handle_answer/5, handle_error/5, handle_request/3]).
 
 -include_lib("kernel/include/inet.hrl").
 -include_lib("kernel/include/logger.hrl").
