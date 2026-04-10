@@ -105,9 +105,10 @@ to_json(Req0, ObjList) when length(ObjList) /= 1 ->
     {stop, Req, done};
 
 to_json(Req, [{gtp_context, Pid}]) ->
-    #{bearers := #{right := RightBearer}, context := Context} = gtp_context:info(Pid),
+    #{bearers := BearerMap, context := Context} = gtp_context:info(Pid),
+    SGiBearer = smf_gsn_lib:get_sgi_default_bearer(BearerMap),
     Keys = [apn, imsi, msisdn, vrf, ms_v4, ms_v6],
-    Obj = lists:foldl(fun(K, B) -> context2binding(K, RightBearer, Context, B) end, #{}, Keys),
+    Obj = lists:foldl(fun(K, B) -> context2binding(K, SGiBearer, Context, B) end, #{}, Keys),
     Response = jsx:encode(Obj),
     {Response, Req, done}.
 

@@ -40,6 +40,8 @@
 	 assign_local_data_teid/5
 	]).
 -export([get_access_default_bearer/1, put_access_default_bearer/2, access_default_bearer_key/1]).
+-export([get_sgi_default_bearer/1, put_sgi_default_bearer/2]).
+-ignore_xref([put_sgi_default_bearer/2]).
 -ignore_xref([access_default_bearer_key/1]).
 
 -ifdef(TEST).
@@ -838,16 +840,16 @@ release_context_ips(#context{ms_ip = _IP} = Context) ->
 ip_pdu(<<6:4, TC:8, FlowLabel:20, Length:16, ?ICMPv6:8,
 	     _HopLimit:8, SrcAddr:16/bytes, DstAddr:16/bytes,
 	     PayLoad:Length/bytes, _/binary>>,
-       AccessBearer, RightBearer, Context, PCtx) ->
-    icmpv6(TC, FlowLabel, SrcAddr, DstAddr, PayLoad, AccessBearer, RightBearer, Context, PCtx);
-ip_pdu(Data, _AccessBearer, _RightBearer, _Context, _PCtx) ->
+       AccessBearer, SGiBearer, Context, PCtx) ->
+    icmpv6(TC, FlowLabel, SrcAddr, DstAddr, PayLoad, AccessBearer, SGiBearer, Context, PCtx);
+ip_pdu(Data, _AccessBearer, _SGiBearer, _Context, _PCtx) ->
     ?LOG(warning, "unhandled T-PDU: ~p", [Data]),
     ok.
 
 %% IPv6 Router Solicitation
 icmpv6(TC, FlowLabel, _SrcAddr, ?'IPv6 All Routers LL',
        <<?'ICMPv6 Router Solicitation':8, _Code:8, _CSum:16, _/binary>>,
-       AccessBearer, #bearer{local = #ue_ip{v6 = MSv6}},
+       AccessBearer, #bearer{local = #ue_ip{v6 = MSv6}} = _SGiBearer,
        #context{dns_v6 = DNSv6}, PCtx) ->
     IPv6 = smf_ip_pool:ip(MSv6),
     {Prefix, PLen} = smf_inet:ipv6_interface_id(IPv6, ?NULL_INTERFACE_ID),
@@ -895,7 +897,7 @@ icmpv6(TC, FlowLabel, _SrcAddr, ?'IPv6 All Routers LL',
     smf_pfcp_context:send_g_pdu(PCtx, AccessBearer, ICMPv6);
 
 icmpv6(_TC, _FlowLabel, _SrcAddr, _DstAddr, _PayLoad,
-       _AccessBearer, _RightBearer, _Context, _PCtx) ->
+       _AccessBearer, _SGiBearer, _Context, _PCtx) ->
     ?LOG(warning, "unhandeld ICMPv6 from ~p to ~p: ~p", [_SrcAddr, _DstAddr, _PayLoad]),
     ok.
 
@@ -934,6 +936,12 @@ get_access_default_bearer(#{{'Access', default_ebi} := EBI} = BearerMap) ->
 
 put_access_default_bearer(AccessBearer, #{{'Access', default_ebi} := EBI} = BearerMap) ->
     BearerMap#{{'Access', EBI} := AccessBearer}.
+
+get_sgi_default_bearer(#{{'SGi-LAN', default_lan_id} := LanId} = BearerMap) ->
+    maps:get({'SGi-LAN', LanId}, BearerMap).
+
+put_sgi_default_bearer(SGiBearer, #{{'SGi-LAN', default_lan_id} := LanId} = BearerMap) ->
+    BearerMap#{{'SGi-LAN', LanId} := SGiBearer}.
 
 access_default_bearer_key(#{{'Access', default_ebi} := EBI}) ->
     {'Access', EBI}.

@@ -67,14 +67,14 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
 	    {error, Err4} -> throw(Err4#ctx_err{context = Context0, tunnel = AccessTunnel})
 	end,
 
-    {PCtx0, NodeCaps, RightBearer0} =
+    {PCtx0, NodeCaps, SGiBearer0} =
 	case smf_pfcp_context:reselect_upf(Candidates, Session1, APNOpts, UPinfo) of
 	    {ok, Result5} -> Result5;
 	    {error, Err5} -> throw(Err5#ctx_err{context = Context0, tunnel = AccessTunnel})
 	end,
 
-    {Result6, {Cause, SessionOpts3, RightBearer, Context1}} =
-	smf_gsn_lib:allocate_ips(PAA, APNOpts, Session1, DAF, AccessTunnel, RightBearer0, Context0),
+    {Result6, {Cause, SessionOpts3, SGiBearer, Context1}} =
+	smf_gsn_lib:allocate_ips(PAA, APNOpts, Session1, DAF, AccessTunnel, SGiBearer0, Context0),
     case Result6 of
 	ok -> ok;
 	{error, Err6} -> throw(Err6#ctx_err{context = Context1, tunnel = AccessTunnel})
@@ -85,7 +85,8 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
     EBI = Context#context.default_bearer_id,
     BearerMap0 = #{{'Access', default_ebi} => EBI,
 		   {'Access', EBI} => AccessBearer,
-		   right => RightBearer},
+		   {'SGi-LAN', default_lan_id} => 1,
+		   {'SGi-LAN', 1} => SGiBearer},
     BearerMap1 =
 	case smf_gsn_lib:assign_local_data_teid({'Access', EBI}, PCtx0, NodeCaps, AccessTunnel, BearerMap0) of
 	    {ok, Result7} -> Result7;

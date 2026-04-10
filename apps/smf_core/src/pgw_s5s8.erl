@@ -140,9 +140,9 @@ handle_pdu(ReqKey, #gtp{ie = PDU} = Msg, _State,
 	     bearers := BearerMap} = Data) ->
     ?LOG(debug, "GTP-U PGW: ~p, ~p", [ReqKey, gtp_c_lib:fmt_gtp(Msg)]),
     AccessBearer = smf_gsn_lib:get_access_default_bearer(BearerMap),
-    RightBearer = maps:get(right, BearerMap),
+    SGiBearer = smf_gsn_lib:get_sgi_default_bearer(BearerMap),
 
-    smf_gsn_lib:ip_pdu(PDU, AccessBearer, RightBearer, Context, PCtx),
+    smf_gsn_lib:ip_pdu(PDU, AccessBearer, SGiBearer, Context, PCtx),
     {keep_state, Data}.
 
 %% API Message Matrix:
