@@ -140,6 +140,14 @@ aaa_reply(#aaa_request{from = {Pid, Ref}, handler = Handler},
 	  Result, Avps, Session) when is_map(Session) ->
     ReplyAvps = Handler:from_session(Session, Avps),
     Pid ! {Ref, {Result, ReplyAvps}},
+    ok;
+aaa_reply(#aaa_request{from = Fun, handler = Handler} = Request, Result, Avps,
+	  Session) when is_map(Session), is_function(Fun, 4) ->
+    ReplyAvps = case Handler of
+		    undefined -> Avps;
+		    _ -> Handler:from_session(Session, Avps)
+		end,
+    Fun(Request, Result, ReplyAvps, #{}),
     ok.
 
 get_session(#aaa_state{session = Session}) -> Session.
