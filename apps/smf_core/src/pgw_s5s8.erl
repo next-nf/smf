@@ -258,7 +258,7 @@ handle_request(ReqKey,
 		 tunnels := #{'Access' := AccessTunnelOld} = Tunnels,
 		 bearers := BearerMap0,
 		 aaa_session := S0, pcc := PCC} = Data) ->
-    process_secondary_rat_usage_data_reports(IEs, Context, S0),
+    process_secondary_rat_usage_data_reports(IEs, Context, Data),
     AccessBearerOld = smf_gsn_lib:get_access_default_bearer(BearerMap0),
 
     {AccessTunnel0, AccessBearer} =
@@ -322,7 +322,7 @@ handle_request(ReqKey,
 		 tunnels := #{'Access' := AccessTunnelOld} = Tunnels, bearers := BearerMap0,
 		 aaa_session := S0} = Data)
   when not is_map_key(?'Bearer Contexts to be modified', IEs) ->
-    process_secondary_rat_usage_data_reports(IEs, Context, S0),
+    process_secondary_rat_usage_data_reports(IEs, Context, Data),
     AccessBearerOld = smf_gsn_lib:get_access_default_bearer(BearerMap0),
 
     {AccessTunnel0, AccessBearer} =
@@ -376,7 +376,7 @@ handle_request(ReqKey,
 	       _Resent, #{session := connected} = _State,
 	       #{context := Context, pfcp := PCtx, tunnels := #{'Access' := AccessTunnel},
 		 bearers := BearerMap, aaa_session := S0} = Data) ->
-    process_secondary_rat_usage_data_reports(IEs, Context, S0),
+    process_secondary_rat_usage_data_reports(IEs, Context, Data),
     AccessBearer = smf_gsn_lib:get_access_default_bearer(BearerMap),
 
     {URRActions, S1} = update_session_from_gtp_req(IEs, S0, AccessTunnel, AccessBearer),
@@ -415,12 +415,12 @@ handle_request(ReqKey,
 handle_request(ReqKey,
 	       #gtp{type = delete_session_request, ie = IEs} = Request,
 	       _Resent, #{session := connected} = State,
-	       #{context := Context, tunnels := #{'Access' := AccessTunnel}, aaa_session := S0} = Data0) ->
+	       #{context := Context, tunnels := #{'Access' := AccessTunnel}} = Data0) ->
     FqTEID = maps:get(?'Sender F-TEID for Control Plane', IEs, undefined),
 
     case match_tunnel(?'S5/S8-C SGW', AccessTunnel, FqTEID) of
 	ok ->
-	    process_secondary_rat_usage_data_reports(IEs, Context, S0),
+	    process_secondary_rat_usage_data_reports(IEs, Context, Data0),
 	    Data = smf_gtp_gsn_lib:close_context(?API, normal, Data0),
 	    Response = response(delete_session_response, AccessTunnel, request_accepted),
 	    gtp_context:send_response(ReqKey, Request, Response),
@@ -481,8 +481,8 @@ handle_response({From, TermCause},
 		#gtp{type = delete_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = RespCause}} = IEs},
 		_Request, State,
-		#{context := Context, aaa_session := S0} = Data0) ->
-    process_secondary_rat_usage_data_reports(IEs, Context, S0),
+		#{context := Context} = Data0) ->
+    process_secondary_rat_usage_data_reports(IEs, Context, Data0),
     Data = smf_gtp_gsn_lib:close_context(?API, TermCause, Data0),
     if is_tuple(From) -> gen_statem:reply(From, {ok, RespCause});
        true -> ok
@@ -785,12 +785,15 @@ sec_rat_udr_to_report(#v2_secondary_rat_usage_data_report{irpgw = true} = Report
 sec_rat_udr_to_report([H|T], Ctx, Reports) ->
     sec_rat_udr_to_report(H, Ctx, sec_rat_udr_to_report(T, Ctx, Reports)).
 
-process_secondary_rat_usage_data_reports(#{?'Secondary RAT Usage Data Report' := SecRatUDR},
-					 Context, _Session) ->
-    _Report =
+process_secondary_rat_usage_data_reports(
+  #{?'Secondary RAT Usage Data Report' := SecRatUDR}, Context,
+  #{charging := Charging, aaa_session := Session}) ->
+    Report =
 	#{'RAN-Secondary-RAT-Usage-Report' =>
 	      sec_rat_udr_to_report(SecRatUDR, Context, [])},
-    %% TODO: route through smf_aaa_charging:rf_update when async secondary RAT reporting is wired up
+    Now = erlang:monotonic_time(),
+    SOpts = #{now => Now, async => true},
+    smf_aaa_charging:rf_update(Charging, Session, Report, SOpts),
     ok;
 process_secondary_rat_usage_data_reports(_, _, _) ->
     ok.
