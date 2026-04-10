@@ -82,8 +82,8 @@ peer_down(Context, Path, Notify) ->
     Fun = fun() -> (catch gen_statem:call(Context, {peer_down, Path, Notify})) end,
     jobs:run(path_restart, Fun).
 
-remote_context_register_new(AccessTunnel, Bearer, Context) ->
-    Keys = context2keys(AccessTunnel, Bearer, Context),
+remote_context_register_new(AccessTunnel, BearerMap, Context) ->
+    Keys = context2keys(AccessTunnel, BearerMap, Context),
     case gtp_context_reg:register_new(Keys, ?MODULE, self()) of
 	ok ->
 	    ok;
@@ -342,8 +342,8 @@ init({[Socket, Info, Version, Interface,
 
 		 version           = Version
 		},
-    Bearer = #{left => #bearer{interface = 'Access'},
-	       right => #bearer{interface = 'SGi-LAN'}},
+    BearerMap = #{left => #bearer{interface = 'Access'},
+		  right => #bearer{interface = 'SGi-LAN'}},
     Data = #{
       context        => Context,
       version        => Version,
@@ -351,7 +351,7 @@ init({[Socket, Info, Version, Interface,
       node_selection => NodeSelect,
       aaa_opts       => AAAOpts,
       tunnels        => #{'Access' => AccessTunnel},
-      bearer         => Bearer},
+      bearers        => BearerMap},
 
     {ok, State, LoopData} = Interface:init(Opts, Data),
     gen_statem:enter_loop(?MODULE, LoopOpts, State, LoopData).
@@ -487,7 +487,7 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 				events = ReqEvents} = Request,
 	     #{session := connected} = _State,
 	     #{context := Context, pfcp := PCtx0,
-	       tunnels := #{'Access' := AccessTunnel}, bearer := Bearer,
+	       tunnels := #{'Access' := AccessTunnel}, bearers := BearerMap,
 	       aaa_session := S0, pcf := _PCF0,
 	       charging := C0, aaa_auth := A0, pcc := PCC0} = Data) ->
     Events = case Handler of
@@ -523,7 +523,7 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 %%% step 2
 %%% step 3:
     {PCtx1, UsageReport, _} =
-	case smf_pfcp_context:modify_session(PCC1, [], #{}, Bearer, PCtx0) of
+	case smf_pfcp_context:modify_session(PCC1, [], #{}, BearerMap, PCtx0) of
 	    {ok, Result1} -> Result1;
 	    {error, Err1} -> throw(Err1#ctx_err{context = Context, tunnel = AccessTunnel})
 	end,
@@ -544,7 +544,7 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 
 %%% step 6:
     {PCtx, _, _} =
-	case smf_pfcp_context:modify_session(PCC4, [], #{}, Bearer, PCtx1) of
+	case smf_pfcp_context:modify_session(PCC4, [], #{}, BearerMap, PCtx1) of
 	    {ok, Result2} -> Result2;
 	    {error, Err2} -> throw(Err2#ctx_err{context = Context, tunnel = AccessTunnel})
 	end,
@@ -606,13 +606,13 @@ handle_event(info, {update_session, Session, Events}, _State, _Data) ->
 
 handle_event(internal, {session, {update_credits, _} = CreditEv, _}, _State,
 	     #{context := Context, pfcp := PCtx0,
-	       tunnels := #{'Access' := AccessTunnel}, bearer := Bearer,
+	       tunnels := #{'Access' := AccessTunnel}, bearers := BearerMap,
 	       pcc := PCC0} = Data) ->
     Now = erlang:monotonic_time(),
 
     {PCC, _PCCErrors} = smf_pcc_context:gy_events_to_pcc_ctx(Now, [CreditEv], PCC0),
     {PCtx, _, _} =
-	case smf_pfcp_context:modify_session(PCC, [], #{}, Bearer, PCtx0) of
+	case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
 	    {ok, Result1} -> Result1;
 	    {error, Err1} -> throw(Err1#ctx_err{context = Context, tunnel = AccessTunnel})
 	end,
@@ -879,12 +879,12 @@ validate_ies(#gtp{version = Version, type = MsgType, ie = IEs}, Cause, #{interfa
 %% context registry
 %%====================================================================
 
-context2keys(#tunnel{socket = Socket} = AccessTunnel, Bearer,
+context2keys(#tunnel{socket = Socket} = AccessTunnel, BearerMap,
 	     #context{apn = APN, context_id = ContextId}) ->
     ordsets:from_list(
       tunnel2keys(AccessTunnel)
       ++ [context_key(Socket, ContextId) || ContextId /= undefined]
-      ++ maps:fold(bsf_keys(APN, _, _, _), [], Bearer)).
+      ++ maps:fold(bsf_keys(APN, _, _, _), [], BearerMap)).
 
 tunnel2keys(Tunnel) ->
     [tunnel_key(local, Tunnel), tunnel_key(remote, Tunnel)].
@@ -939,8 +939,8 @@ usage_report_to_accounting(undefined) ->
 %% Helper
 %%====================================================================
 
-fteid_tunnel_side(FqTEID, #{bearer := Bearer}) ->
-    fteid_tunnel_side_f(FqTEID, maps:next(maps:iterator(Bearer))).
+fteid_tunnel_side(FqTEID, #{bearers := BearerMap}) ->
+    fteid_tunnel_side_f(FqTEID, maps:next(maps:iterator(BearerMap))).
 
 fteid_tunnel_side_f(_, none) ->
     none;

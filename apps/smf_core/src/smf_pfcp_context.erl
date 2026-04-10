@@ -50,7 +50,7 @@ create_session(Handler, PCC, PCtx, Bearer, Ctx)
     session_establishment_request(Handler, PCC, PCtx, Bearer, Ctx).
 
 %% modify_session/5
-modify_session(PCC, URRActions, Opts, #{left := Left, right := Right} = _Bearer, PCtx0)
+modify_session(PCC, URRActions, Opts, #{left := Left, right := Right} = _BearerMap, PCtx0)
   when is_record(PCC, pcc_ctx), is_record(PCtx0, pfcp_ctx) ->
     {SxRules0, SxErrors, PCtx} = build_sx_rules(PCC, Opts, PCtx0, Left, Right),
     SxRules =
@@ -147,12 +147,12 @@ update_bearer_f(_, Acc) ->
     Acc.
 
 %% update_bearer/3
-update_bearer(#{created_pdr := PDR}, Bearer, PCtx) when is_map(PDR) ->
-    update_bearer_f(PDR, {Bearer, PCtx});
-update_bearer(#{created_pdr := PDRs}, Bearer, PCtx) when is_list(PDRs) ->
-    lists:foldl(fun update_bearer_f/2, {Bearer, PCtx}, PDRs);
-update_bearer(_, Bearer, PCtx) ->
-    {Bearer, PCtx}.
+update_bearer(#{created_pdr := PDR}, BearerMap, PCtx) when is_map(PDR) ->
+    update_bearer_f(PDR, {BearerMap, PCtx});
+update_bearer(#{created_pdr := PDRs}, BearerMap, PCtx) when is_list(PDRs) ->
+    lists:foldl(fun update_bearer_f/2, {BearerMap, PCtx}, PDRs);
+update_bearer(_, BearerMap, PCtx) ->
+    {BearerMap, PCtx}.
 
 %% session_info/3
 session_info(tp_created_nat_binding,
@@ -180,8 +180,8 @@ session_info(RespIEs) ->
 
 %% session_establishment_request/5
 session_establishment_request(Handler, PCC, PCtx0,
-			      #{left := Left, right := Right} = Bearer0, Ctx) ->
-    register_ctx_ids(Handler, Bearer0, PCtx0),
+			      #{left := Left, right := Right} = BearerMap0, Ctx) ->
+    register_ctx_ids(Handler, BearerMap0, PCtx0),
     {ok, CntlNode, _, _} = smf_sx_socket:id(),
 
     PCtx1 = pctx_update_from_ctx(PCtx0, Ctx),
@@ -201,9 +201,9 @@ session_establishment_request(Handler, PCC, PCtx0,
 	      ie = #{pfcp_cause := 'Request accepted',
 		     f_seid := #f_seid{}} = RespIEs} ->
 	    SessionInfo = session_info(RespIEs),
-	    {Bearer, PCtx} = update_bearer(RespIEs, Bearer0, PCtx2),
-	    register_ctx_ids(Handler, Bearer, PCtx),
-	    {ok, {update_dp_seid(RespIEs, PCtx), Bearer, SessionInfo}};
+	    {BearerMap, PCtx} = update_bearer(RespIEs, BearerMap0, PCtx2),
+	    register_ctx_ids(Handler, BearerMap, PCtx),
+	    {ok, {update_dp_seid(RespIEs, PCtx), BearerMap, SessionInfo}};
 	_ ->
 	    {error, ?CTX_ERR(?FATAL, system_failure)}
     end.
@@ -818,15 +818,15 @@ make_pctx_bearer_key(_, #bearer{local = FqTEID}, PCtx, Keys)
 make_pctx_bearer_key(_, _, _, Keys) ->
     Keys.
 
-make_pctx_keys(Bearer, #pfcp_ctx{seid = #seid{cp = SEID}} = PCtx) ->
-    maps:fold(make_pctx_bearer_key(_, _, PCtx, _), [#seid_key{seid = SEID}], Bearer).
+make_pctx_keys(BearerMap, #pfcp_ctx{seid = #seid{cp = SEID}} = PCtx) ->
+    maps:fold(make_pctx_bearer_key(_, _, PCtx, _), [#seid_key{seid = SEID}], BearerMap).
 
-register_ctx_ids(Handler, Bearer, PCtx) ->
-    Keys = make_pctx_keys(Bearer, PCtx),
+register_ctx_ids(Handler, BearerMap, PCtx) ->
+    Keys = make_pctx_keys(BearerMap, PCtx),
     gtp_context_reg:register(Keys, Handler, self()).
 
-unregister_ctx_ids(Handler, Bearer, PCtx) ->
-    Keys = make_pctx_keys(Bearer, PCtx),
+unregister_ctx_ids(Handler, BearerMap, PCtx) ->
+    Keys = make_pctx_keys(BearerMap, PCtx),
     gtp_context_reg:unregister(Keys, Handler, self()).
 
 %% ===========================================================================

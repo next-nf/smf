@@ -928,11 +928,11 @@ choose_ip(_LocalIP, _IP4, _IP6) ->
     {error, ?CTX_ERR(?FATAL, system_failure)}.
 
 %% assign_local_data_teid/5
-assign_local_data_teid(Key, PCtx, NodeOrVRF, TunnelOrIP, Bearer) ->
+assign_local_data_teid(Key, PCtx, NodeOrVRF, TunnelOrIP, BearerMap) ->
     do([error_m ||
-	   B0 = maps:get(Key, Bearer),
+	   B0 = maps:get(Key, BearerMap),
 	   B1 <- assign_local_data_teid_5(Key, PCtx, NodeOrVRF, TunnelOrIP, B0),
-	   return(maps:put(Key, B1, Bearer))
+	   return(maps:put(Key, B1, BearerMap))
        ]).
 
 assign_local_data_teid_5(Key, PCtx, {VRFs, _} = _NodeCaps,

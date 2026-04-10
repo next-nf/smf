@@ -82,9 +82,9 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
 
     Context = add_apn_timeout(APNOpts, SessionOpts3, Context1),
 
-    Bearer0 = #{left => LeftBearer, right => RightBearer},
-    Bearer1 =
-	case smf_gsn_lib:assign_local_data_teid(left, PCtx0, NodeCaps, AccessTunnel, Bearer0) of
+    BearerMap0 = #{left => LeftBearer, right => RightBearer},
+    BearerMap1 =
+	case smf_gsn_lib:assign_local_data_teid(left, PCtx0, NodeCaps, AccessTunnel, BearerMap0) of
 	    {ok, Result7} -> Result7;
 	    {error, Err7} -> throw(Err7#ctx_err{context = Context, tunnel = AccessTunnel})
 	end,
@@ -132,8 +132,8 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
     PCC3 = smf_pcc_context:session_events_to_pcc_ctx(AuthSEvs, PCC2),
     PCC4 = smf_pcc_context:session_events_to_pcc_ctx(RfSEvs, PCC3),
 
-    {PCtx, Bearer, SessionInfo} =
-	case smf_pfcp_context:create_session(gtp_context, PCC4, PCtx0, Bearer1, Context) of
+    {PCtx, BearerMap, SessionInfo} =
+	case smf_pfcp_context:create_session(gtp_context, PCC4, PCtx0, BearerMap1, Context) of
 	       {ok, Result10} -> Result10;
 	       {error, Err10} -> throw(Err10#ctx_err{context = Context, tunnel = AccessTunnel})
 	   end,
@@ -152,14 +152,14 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
 	       {PCF1, Session5}
 	end,
 
-    case gtp_context:remote_context_register_new(AccessTunnel, Bearer, Context) of
+    case gtp_context:remote_context_register_new(AccessTunnel, BearerMap, Context) of
 	ok ->
-	    {ok, Cause, SessionOpts, Context, Bearer, PCC4, PCtx,
+	    {ok, Cause, SessionOpts, Context, BearerMap, PCC4, PCtx,
 	     Session6, PCF2, Charging2, Auth2};
 	{error, #ctx_err{level = Level, where = {File, Line}}} ->
 	    ?LOG(debug, #{type => ctx_err, level => Level, file => File,
 			  line => Line, reply => system_failure}),
-	    {error, system_failure, SessionOpts, Context, Bearer, PCC4, PCtx,
+	    {error, system_failure, SessionOpts, Context, BearerMap, PCC4, PCtx,
 	     Session6, PCF2, Charging2, Auth2}
     end.
 
@@ -199,12 +199,12 @@ update_tunnel_endpoint(TunnelOld, Tunnel0) ->
 %% Bearer Support
 %%====================================================================
 
-apply_bearer_change(Bearer, URRActions, SendEM, PCtx0, PCC) ->
+apply_bearer_change(BearerMap, URRActions, SendEM, PCtx0, PCC) ->
     ModifyOpts =
 	if SendEM -> #{send_end_marker => true};
 	   true   -> #{}
 	end,
-    case smf_pfcp_context:modify_session(PCC, URRActions, ModifyOpts, Bearer, PCtx0) of
+    case smf_pfcp_context:modify_session(PCC, URRActions, ModifyOpts, BearerMap, PCtx0) of
 	{ok, {PCtx, UsageReport, SessionInfo}} ->
 	    gtp_context:usage_report(self(), URRActions, UsageReport),
 	    {ok, {PCtx, SessionInfo}};
