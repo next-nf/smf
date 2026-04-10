@@ -39,6 +39,8 @@
 	 assign_tunnel_teid/3,
 	 assign_local_data_teid/5
 	]).
+-export([get_access_default_bearer/1, put_access_default_bearer/2, access_default_bearer_key/1]).
+-ignore_xref([access_default_bearer_key/1]).
 
 -ifdef(TEST).
 -export([sntp_time_to_datetime/1]).
@@ -836,16 +838,16 @@ release_context_ips(#context{ms_ip = _IP} = Context) ->
 ip_pdu(<<6:4, TC:8, FlowLabel:20, Length:16, ?ICMPv6:8,
 	     _HopLimit:8, SrcAddr:16/bytes, DstAddr:16/bytes,
 	     PayLoad:Length/bytes, _/binary>>,
-       LeftBearer, RightBearer, Context, PCtx) ->
-    icmpv6(TC, FlowLabel, SrcAddr, DstAddr, PayLoad, LeftBearer, RightBearer, Context, PCtx);
-ip_pdu(Data, _LeftBearer, _RightBearer, _Context, _PCtx) ->
+       AccessBearer, RightBearer, Context, PCtx) ->
+    icmpv6(TC, FlowLabel, SrcAddr, DstAddr, PayLoad, AccessBearer, RightBearer, Context, PCtx);
+ip_pdu(Data, _AccessBearer, _RightBearer, _Context, _PCtx) ->
     ?LOG(warning, "unhandled T-PDU: ~p", [Data]),
     ok.
 
 %% IPv6 Router Solicitation
 icmpv6(TC, FlowLabel, _SrcAddr, ?'IPv6 All Routers LL',
        <<?'ICMPv6 Router Solicitation':8, _Code:8, _CSum:16, _/binary>>,
-       LeftBearer, #bearer{local = #ue_ip{v6 = MSv6}},
+       AccessBearer, #bearer{local = #ue_ip{v6 = MSv6}},
        #context{dns_v6 = DNSv6}, PCtx) ->
     IPv6 = smf_ip_pool:ip(MSv6),
     {Prefix, PLen} = smf_inet:ipv6_interface_id(IPv6, ?NULL_INTERFACE_ID),
@@ -890,10 +892,10 @@ icmpv6(TC, FlowLabel, _SrcAddr, ?'IPv6 All Routers LL',
     ICMPv6 = <<6:4, TC:8, FlowLabel:20, ICMPLength:16, ?ICMPv6:8, TTL:8,
 	       NwSrc:16/bytes, NwDst:16/bytes,
 	       ?'ICMPv6 Router Advertisement':8, 0:8, CSum:16, RAOpts/binary>>,
-    smf_pfcp_context:send_g_pdu(PCtx, LeftBearer, ICMPv6);
+    smf_pfcp_context:send_g_pdu(PCtx, AccessBearer, ICMPv6);
 
 icmpv6(_TC, _FlowLabel, _SrcAddr, _DstAddr, _PayLoad,
-       _LeftBearer, _RightBearer, _Context, _PCtx) ->
+       _AccessBearer, _RightBearer, _Context, _PCtx) ->
     ?LOG(warning, "unhandeld ICMPv6 from ~p to ~p: ~p", [_SrcAddr, _DstAddr, _PayLoad]),
     ok.
 
@@ -926,6 +928,15 @@ choose_ip(LocalIP, _IP4, IP6)
 choose_ip(_LocalIP, _IP4, _IP6) ->
     %% IP version mismatch, broken peer GSN or misconfiguration
     {error, ?CTX_ERR(?FATAL, system_failure)}.
+
+get_access_default_bearer(#{{'Access', default_ebi} := EBI} = BearerMap) ->
+    maps:get({'Access', EBI}, BearerMap).
+
+put_access_default_bearer(AccessBearer, #{{'Access', default_ebi} := EBI} = BearerMap) ->
+    BearerMap#{{'Access', EBI} := AccessBearer}.
+
+access_default_bearer_key(#{{'Access', default_ebi} := EBI}) ->
+    {'Access', EBI}.
 
 %% assign_local_data_teid/5
 assign_local_data_teid(Key, PCtx, NodeOrVRF, TunnelOrIP, BearerMap) ->

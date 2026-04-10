@@ -135,10 +135,12 @@ handle_event(info, _Info, _State, _Data) ->
 
 handle_pdu(ReqKey, #gtp{ie = PDU} = Msg, _State,
 	   #{context := Context, pfcp := PCtx,
-	     bearers := #{left := LeftBearer, right := RightBearer}} = Data) ->
+	     bearers := BearerMap} = Data) ->
     ?LOG(debug, "GTP-U SAE-GW: ~p, ~p", [ReqKey, gtp_c_lib:fmt_gtp(Msg)]),
+    AccessBearer = smf_gsn_lib:get_access_default_bearer(BearerMap),
+    RightBearer = maps:get(right, BearerMap),
 
-    smf_gsn_lib:ip_pdu(PDU, LeftBearer, RightBearer, Context, PCtx),
+    smf_gsn_lib:ip_pdu(PDU, AccessBearer, RightBearer, Context, PCtx),
     {keep_state, Data}.
 
 handle_request(_ReqKey, _Msg, true, _State, _Data) ->
@@ -153,7 +155,7 @@ handle_request(ReqKey,
 			  } = IEs} = Request,
 	       _Resent, State,
 	       #{context := Context0, aaa_opts := AAAopts, node_selection := NodeSelect,
-		  tunnels := #{'Access' := AccessTunnel0} = Tunnels, bearers := #{left := LeftBearer0},
+		  tunnels := #{'Access' := AccessTunnel0} = Tunnels,
 		 aaa_session := S0, pcf := PCF0, charging := C0, aaa_auth := A0,
 		 pcc := PCC0} = Data) ->
 
@@ -167,8 +169,8 @@ handle_request(ReqKey,
 
     Context1 = update_context_from_gtp_req(Request, Context0),
 
-    {AccessTunnel1, LeftBearer1} =
-	case update_tunnel_from_gtp_req(Request, AccessTunnel0, LeftBearer0) of
+    {AccessTunnel1, AccessBearer1} =
+	case update_tunnel_from_gtp_req(Request, AccessTunnel0, #bearer{interface = 'Access'}) of
 	    {ok, Result1} -> Result1;
 	    {error, Err1} -> throw(Err1#ctx_err{context = Context1, tunnel = AccessTunnel0})
 	end,
@@ -182,14 +184,14 @@ handle_request(ReqKey,
     gtp_context:terminate_colliding_context(AccessTunnel, Context1),
 
     SessionOpts0 = pgw_s5s8:init_session(IEs, AccessTunnel, Context1, AAAopts),
-    SessionOpts1 = pgw_s5s8:init_session_from_gtp_req(IEs, AAAopts, AccessTunnel, LeftBearer1, SessionOpts0),
+    SessionOpts1 = pgw_s5s8:init_session_from_gtp_req(IEs, AAAopts, AccessTunnel, AccessBearer1, SessionOpts0),
     %% SessionOpts = init_session_qos(ReqQoSProfile, SessionOpts1),
 
     {Verdict, Cause, SessionOpts, Context, BearerMap, PCC4, PCtx,
      S1, PCF1, C1, A1} =
        case smf_gtp_gsn_lib:create_session(APN, pdn_alloc(PAA), DAF, UpSelInfo,
 					    S0, PCF0, C0, A0,
-					    SessionOpts1, Context1, AccessTunnel, LeftBearer1, PCC0) of
+					    SessionOpts1, Context1, AccessTunnel, AccessBearer1, PCC0) of
 	   {ok, Result} -> Result;
 	   {error, Err} -> throw(Err)
        end,
@@ -219,20 +221,21 @@ handle_request(ReqKey,
 	       _Resent, #{session := connected} = _State,
 	       #{context := Context, pfcp := PCtx0,
 		 tunnels := #{'Access' := AccessTunnelOld} = Tunnels,
-		 bearers := #{left := LeftBearerOld} = BearerMap0,
+		 bearers := BearerMap0,
 		 aaa_session := S0, pcc := PCC} = Data) ->
-    {AccessTunnel0, LeftBearer} =
+    AccessBearerOld = smf_gsn_lib:get_access_default_bearer(BearerMap0),
+    {AccessTunnel0, AccessBearer} =
 	case update_tunnel_from_gtp_req(
-	       Request, AccessTunnelOld#tunnel{version = v2}, LeftBearerOld) of
+	       Request, AccessTunnelOld#tunnel{version = v2}, AccessBearerOld) of
 	    {ok, Result1} -> Result1;
 	    {error, Err1} -> throw(Err1#ctx_err{context = Context, tunnel = AccessTunnelOld})
 	end,
-    BearerMap = BearerMap0#{left => LeftBearer},
+    BearerMap = smf_gsn_lib:put_access_default_bearer(AccessBearer, BearerMap0),
 
     AccessTunnel = smf_gtp_gsn_lib:update_tunnel_endpoint(AccessTunnelOld, AccessTunnel0),
-    {URRActions, S1} = pgw_s5s8:update_session_from_gtp_req(IEs, S0, AccessTunnel, LeftBearer),
+    {URRActions, S1} = pgw_s5s8:update_session_from_gtp_req(IEs, S0, AccessTunnel, AccessBearer),
     {PCtx, S2} =
-	if LeftBearer /= LeftBearerOld ->
+	if AccessBearer /= AccessBearerOld ->
 		case smf_gtp_gsn_lib:apply_bearer_change(
 		       BearerMap, URRActions, true, PCtx0, PCC) of
 		    {ok, {RPCtx, SessionInfo}} ->
@@ -259,18 +262,19 @@ handle_request(ReqKey,
 	       #gtp{type = modify_bearer_request, ie = IEs} = Request,
 	       _Resent, #{session := connected} = _State,
 	       #{context := Context, pfcp := PCtx,
-		 tunnels := #{'Access' := AccessTunnelOld} = Tunnels, bearers := #{left := LeftBearerOld},
+		 tunnels := #{'Access' := AccessTunnelOld} = Tunnels, bearers := BearerMap0,
 		 aaa_session := S0} = Data)
   when not is_map_key(?'Bearer Contexts to be modified', IEs) ->
-    {AccessTunnel0, LeftBearer} =
+    AccessBearerOld = smf_gsn_lib:get_access_default_bearer(BearerMap0),
+    {AccessTunnel0, AccessBearer} =
 	case update_tunnel_from_gtp_req(
-	       Request, AccessTunnelOld#tunnel{version = v2}, LeftBearerOld) of
+	       Request, AccessTunnelOld#tunnel{version = v2}, AccessBearerOld) of
 	    {ok, Result1} -> Result1;
 	    {error, Err1} -> throw(Err1#ctx_err{context = Context, tunnel = AccessTunnelOld})
 	end,
 
     AccessTunnel = smf_gtp_gsn_lib:update_tunnel_endpoint(AccessTunnelOld, AccessTunnel0),
-    {URRActions, S1} = pgw_s5s8:update_session_from_gtp_req(IEs, S0, AccessTunnel, LeftBearer),
+    {URRActions, S1} = pgw_s5s8:update_session_from_gtp_req(IEs, S0, AccessTunnel, AccessBearer),
     gtp_context:trigger_usage_report(self(), URRActions, PCtx),
 
     DataNew =
@@ -292,9 +296,10 @@ handle_request(#request{src = Src, ip = IP, port = Port} = ReqKey,
 				  group = #{?'EPS Bearer ID' := EBI} = Bearer}} = IEs},
 	       _Resent, #{session := connected},
 	       #{context := Context, tunnels := #{'Access' := AccessTunnel},
-		 bearers := #{left := LeftBearer}, aaa_session := S0} = Data) ->
+		 bearers := BearerMap, aaa_session := S0} = Data) ->
     OldSOpts = S0,
-    {_URRActions, S1} = pgw_s5s8:update_session_from_gtp_req(IEs, S0, AccessTunnel, LeftBearer),
+    AccessBearer = smf_gsn_lib:get_access_default_bearer(BearerMap),
+    {_URRActions, S1} = pgw_s5s8:update_session_from_gtp_req(IEs, S0, AccessTunnel, AccessBearer),
 
     Type = update_bearer_request,
     RequestIEs0 = [AMBR,
@@ -313,10 +318,11 @@ handle_request(ReqKey,
 	       _Resent, #{session := connected} = _State,
 	       #{context := Context, pfcp := PCtx0,
 		 tunnels := #{'Access' := AccessTunnel},
-		 bearers := #{left := LeftBearer0} = BearerMap0,
+		 bearers := BearerMap0,
 		 pcc := PCC} = Data) ->
-    LeftBearer = LeftBearer0#bearer{remote = undefined},
-    BearerMap = BearerMap0#{left => LeftBearer},
+    AccessBearerOld = smf_gsn_lib:get_access_default_bearer(BearerMap0),
+    AccessBearer = AccessBearerOld#bearer{remote = undefined},
+    BearerMap = smf_gsn_lib:put_access_default_bearer(AccessBearer, BearerMap0),
 
     PCtx =
 	case smf_gtp_gsn_lib:apply_bearer_change(BearerMap, [], true, PCtx0, PCC) of
@@ -363,15 +369,16 @@ handle_response({CommandReqKey, OldSOpts},
 				   group = #{?'Cause' := #v2_cause{v2_cause = BearerCause}}
 				  }} = IEs},
 		_Request, #{session := connected} = State,
-		#{pfcp := PCtx, tunnels := #{'Access' := AccessTunnel0} = Tunnels, bearers := #{left := LeftBearer},
+		#{pfcp := PCtx, tunnels := #{'Access' := AccessTunnel0} = Tunnels, bearers := BearerMap,
 		  aaa_session := S0} = Data) ->
     gtp_context:request_finished(CommandReqKey),
+    AccessBearer = smf_gsn_lib:get_access_default_bearer(BearerMap),
 
     {ok, AccessTunnel} = gtp_path:bind_tunnel(AccessTunnel0),
     DataNew = Data#{tunnels => Tunnels#{'Access' => AccessTunnel}},
 
     if Cause =:= request_accepted andalso BearerCause =:= request_accepted ->
-	    {_URRActions, S1} = pgw_s5s8:update_session_from_gtp_req(IEs, S0, AccessTunnel, LeftBearer),
+	    {_URRActions, S1} = pgw_s5s8:update_session_from_gtp_req(IEs, S0, AccessTunnel, AccessBearer),
 	    URRActions = gtp_context:collect_charging_events(OldSOpts, S1),
 	    gtp_context:trigger_usage_report(self(), URRActions, PCtx),
 	    {keep_state, DataNew#{aaa_session => S1}};
@@ -654,7 +661,7 @@ pdn_pco(_SessionOpts, _RequestIEs, IE) ->
 bearer_context(EBI, BearerMap, Context, IEs) ->
     maps:fold(bearer_context(EBI, _, _, Context, _), IEs, BearerMap).
 
-bearer_context(EBI, left, Bearer, _Context, IEs) ->
+bearer_context(EBI, {'Access', _}, #bearer{} = Bearer, _Context, IEs) ->
     IE = #v2_bearer_context{
 	    group=[#v2_cause{v2_cause = request_accepted},
 		   EBI,

@@ -33,7 +33,7 @@
 -include("smf_core_config.hrl").
 -include("include/smf.hrl").
 
--record(sx_upd, {now, errors = [], monitors = #{}, pctx = #pfcp_ctx{}, left, right}).
+-record(sx_upd, {now, errors = [], monitors = #{}, pctx = #pfcp_ctx{}, access, right}).
 
 -define(SECONDS_PER_DAY, 86400).
 
@@ -50,9 +50,11 @@ create_session(Handler, PCC, PCtx, Bearer, Ctx)
     session_establishment_request(Handler, PCC, PCtx, Bearer, Ctx).
 
 %% modify_session/5
-modify_session(PCC, URRActions, Opts, #{left := Left, right := Right} = _BearerMap, PCtx0)
+modify_session(PCC, URRActions, Opts, BearerMap, PCtx0)
   when is_record(PCC, pcc_ctx), is_record(PCtx0, pfcp_ctx) ->
-    {SxRules0, SxErrors, PCtx} = build_sx_rules(PCC, Opts, PCtx0, Left, Right),
+    Access = smf_gsn_lib:get_access_default_bearer(BearerMap),
+    Right = maps:get(right, BearerMap),
+    {SxRules0, SxErrors, PCtx} = build_sx_rules(PCC, Opts, PCtx0, Access, Right),
     SxRules =
 	lists:foldl(
 	  fun({offline, _}, SxR) ->
@@ -179,13 +181,14 @@ session_info(RespIEs) ->
     maps:fold(fun session_info/3, #{}, RespIEs).
 
 %% session_establishment_request/5
-session_establishment_request(Handler, PCC, PCtx0,
-			      #{left := Left, right := Right} = BearerMap0, Ctx) ->
+session_establishment_request(Handler, PCC, PCtx0, BearerMap0, Ctx) ->
+    Access = smf_gsn_lib:get_access_default_bearer(BearerMap0),
+    Right = maps:get(right, BearerMap0),
     register_ctx_ids(Handler, BearerMap0, PCtx0),
     {ok, CntlNode, _, _} = smf_sx_socket:id(),
 
     PCtx1 = pctx_update_from_ctx(PCtx0, Ctx),
-    {SxRules, SxErrors, PCtx2} = build_sx_rules(PCC, #{}, PCtx1, Left, Right),
+    {SxRules, SxErrors, PCtx2} = build_sx_rules(PCC, #{}, PCtx1, Access, Right),
     ?LOG(debug, "SxRules: ~p~n", [SxRules]),
     ?LOG(debug, "SxErrors: ~p~n", [SxErrors]),
     ?LOG(debug, "CtxPending: ~p~n", [Ctx]),
@@ -273,9 +276,9 @@ apply_charging_profile(OCP, Now, URR) ->
     maps:fold(apply_charging_profile(_, _, Now, _), URR, OCP).
 
 %% build_sx_rules/5
-build_sx_rules(PCC, Opts, PCtx0, Left, Right) ->
+build_sx_rules(PCC, Opts, PCtx0, Access, Right) ->
     PCtx2 = smf_pfcp:reset_ctx(PCtx0),
-    Init = #sx_upd{now = calendar:universal_time(), pctx = PCtx2, left = Left, right = Right},
+    Init = #sx_upd{now = calendar:universal_time(), pctx = PCtx2, access = Access, right = Right},
     #sx_upd{errors = Errors, pctx = NewPCtx0} =
 	build_sx_rules_3(PCC, Opts, Init),
     NewPCtx = smf_pfcp:apply_timers(PCtx0, NewPCtx0),
@@ -299,15 +302,15 @@ build_sx_rules_3(#pcc_ctx{monitors = Monitors, rules = PolicyRules,
 %% install special SLAAC and RA rule (only for tunnels for the moment)
 build_sx_ctx_rule(#sx_upd{
 		     pctx = #pfcp_ctx{cp_bearer = CpBearer} = PCtx0,
-		     left = LeftBearer, right = RightBearer
+		     access = AccessBearer, right = RightBearer
 		    } = Update)
-  when not is_record(LeftBearer#bearer.remote, ue_ip),
+  when not is_record(AccessBearer#bearer.remote, ue_ip),
        RightBearer#bearer.local#ue_ip.v6 /= undefined ->
     {PdrId, PCtx1} = smf_pfcp:get_id(pdr, ipv6_mcast_pdr, PCtx0),
     {FarId, PCtx2} = smf_pfcp:get_id(far, dp_to_cp_far, PCtx1),
-    {LeftBearerReq, PCtx} = make_request_bearer(PdrId, LeftBearer, PCtx2),
+    {AccessBearerReq, PCtx} = make_request_bearer(PdrId, AccessBearer, PCtx2),
 
-    PDI = smf_pfcp:traffic_endpoint(LeftBearerReq,
+    PDI = smf_pfcp:traffic_endpoint(AccessBearerReq,
 	    #{sdf_filter =>
 		  #sdf_filter{flow_description =
 				  <<"permit out 58 from ff00::/8 to assigned">>}}),
@@ -515,21 +518,21 @@ far(FarId, _RedirInfo, _Src, Dst) ->
 
 %% build_sx_rule/6
 build_sx_rule(Direction, Name, Definition, FilterInfo, URRs,
-	      #sx_upd{left = LeftBearer, right = RightBearer} = Update) ->
-    build_sx_rule(Direction, Name, Definition, FilterInfo, URRs, LeftBearer, RightBearer, Update).
+	      #sx_upd{access = AccessBearer, right = RightBearer} = Update) ->
+    build_sx_rule(Direction, Name, Definition, FilterInfo, URRs, AccessBearer, RightBearer, Update).
 
 %% build_sx_rule/8
 build_sx_rule(Direction = downlink, Name, Definition, FilterInfo, URRs,
-	      LeftBearer, RightBearer, #sx_upd{pctx = PCtx0} = Update)
-  when LeftBearer#bearer.remote /= undefined ->
+	      AccessBearer, RightBearer, #sx_upd{pctx = PCtx0} = Update)
+  when AccessBearer#bearer.remote /= undefined ->
     [Precedence] = maps:get('Precedence', Definition, [1000]),
     RuleName = {Direction, Name},
     {PdrId, PCtx1} = smf_pfcp:get_id(pdr, RuleName, PCtx0),
     {FarId, PCtx2} = smf_pfcp:get_id(far, RuleName, PCtx1),
     {RightBearerReq, PCtx} = make_request_bearer(PdrId, RightBearer, PCtx2),
 
-    PDR = pdr(PdrId, Precedence, dst, RightBearerReq, LeftBearer, FilterInfo, FarId, URRs),
-    FAR = far(FarId, undefined, RightBearer, LeftBearer),
+    PDR = pdr(PdrId, Precedence, dst, RightBearerReq, AccessBearer, FilterInfo, FarId, URRs),
+    FAR = far(FarId, undefined, RightBearer, AccessBearer),
 
     Update#sx_upd{
       pctx = smf_pfcp_rules:add(
@@ -537,17 +540,17 @@ build_sx_rule(Direction = downlink, Name, Definition, FilterInfo, URRs,
 		{far, RuleName, FAR}], PCtx)};
 
 build_sx_rule(Direction = uplink, Name, Definition, FilterInfo, URRs,
-	      LeftBearer, RightBearer, #sx_upd{pctx = PCtx0} = Update) ->
+	      AccessBearer, RightBearer, #sx_upd{pctx = PCtx0} = Update) ->
     [Precedence] = maps:get('Precedence', Definition, [1000]),
     RuleName = {Direction, Name},
     {PdrId, PCtx1} = smf_pfcp:get_id(pdr, RuleName, PCtx0),
     {FarId, PCtx2} = smf_pfcp:get_id(far, RuleName, PCtx1),
-    {LeftBearerReq, PCtx} = make_request_bearer(PdrId, LeftBearer, PCtx2),
+    {AccessBearerReq, PCtx} = make_request_bearer(PdrId, AccessBearer, PCtx2),
 
-    PDR = pdr(PdrId, Precedence, src, LeftBearerReq, RightBearer, FilterInfo, FarId, URRs),
+    PDR = pdr(PdrId, Precedence, src, AccessBearerReq, RightBearer, FilterInfo, FarId, URRs),
 
     RedirInfo = maps:get('Redirect-Information', Definition, undefined),
-    FAR = far(FarId, RedirInfo, LeftBearer, RightBearer),
+    FAR = far(FarId, RedirInfo, AccessBearer, RightBearer),
 
     Update#sx_upd{
       pctx = smf_pfcp_rules:add(
@@ -555,7 +558,7 @@ build_sx_rule(Direction = uplink, Name, Definition, FilterInfo, URRs,
 		{far, RuleName, FAR}], PCtx)};
 
 build_sx_rule(_Direction, Name, _Definition, _FilterInfo, _URRs,
-	      _LeftBearer, _RightBearer, Update) ->
+	      _AccessBearer, _RightBearer, Update) ->
     sx_rule_error({system_error, Name}, Update).
 
 %% ===========================================================================

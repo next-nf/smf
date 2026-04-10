@@ -342,16 +342,13 @@ init({[Socket, Info, Version, Interface,
 
 		 version           = Version
 		},
-    BearerMap = #{left => #bearer{interface = 'Access'},
-		  right => #bearer{interface = 'SGi-LAN'}},
     Data = #{
       context        => Context,
       version        => Version,
       interface      => Interface,
       node_selection => NodeSelect,
       aaa_opts       => AAAOpts,
-      tunnels        => #{'Access' => AccessTunnel},
-      bearers        => BearerMap},
+      tunnels        => #{'Access' => AccessTunnel}},
 
     {ok, State, LoopData} = Interface:init(Opts, Data),
     gen_statem:enter_loop(?MODULE, LoopOpts, State, LoopData).
@@ -652,12 +649,12 @@ handle_event({call, _From}, delete_context, _State, _Data) ->
     {keep_state_and_data, [postpone]};
 
 handle_event({call, From}, terminate_context, State, Data0) ->
-    Data = close_context(left, normal, State, Data0),
+    Data = close_context('Access', normal, State, Data0),
     {next_state, State#{session := shutdown}, Data, [{reply, From, ok}]};
 
 handle_event({call, From}, {peer_down, Path, Notify}, State,
 	     #{tunnels := #{'Access' := #tunnel{path = Path}}} = Data0) ->
-    Data = close_context(left, peer_restart, Notify, State, Data0),
+    Data = close_context('Access', peer_restart, Notify, State, Data0),
     {next_state, State#{session := shutdown}, Data, [{reply, From, ok}]};
 
 handle_event({call, From}, {peer_down, _Path, _Notify}, _State, _Data) ->

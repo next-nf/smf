@@ -35,17 +35,17 @@ connect_upf_candidates(APN, Services, NodeSelect, PeerUpNode) ->
     {ok, {Candidates, SxConnectId}}.
 
 create_session(APN, PAA, DAF, UPSelInfo, Session, PCF, Charging, Auth,
-	       SessionOpts, Context, AccessTunnel, LeftBearer, PCC) ->
+	       SessionOpts, Context, AccessTunnel, AccessBearer, PCC) ->
     try
 	{ok, create_session_fun(APN, PAA, DAF, UPSelInfo, Session, PCF, Charging, Auth,
-				SessionOpts, Context, AccessTunnel, LeftBearer, PCC)}
+				SessionOpts, Context, AccessTunnel, AccessBearer, PCC)}
     catch
 	throw:Error ->
 	    {error, Error}
     end.
 
 create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Charging0, Auth0,
-		   SessionOpts0, Context0, AccessTunnel, LeftBearer, PCC0) ->
+		   SessionOpts0, Context0, AccessTunnel, AccessBearer, PCC0) ->
 
     smf_sx_node:wait_connect(SxConnectId),
 
@@ -82,9 +82,12 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
 
     Context = add_apn_timeout(APNOpts, SessionOpts3, Context1),
 
-    BearerMap0 = #{left => LeftBearer, right => RightBearer},
+    EBI = Context#context.default_bearer_id,
+    BearerMap0 = #{{'Access', default_ebi} => EBI,
+		   {'Access', EBI} => AccessBearer,
+		   right => RightBearer},
     BearerMap1 =
-	case smf_gsn_lib:assign_local_data_teid(left, PCtx0, NodeCaps, AccessTunnel, BearerMap0) of
+	case smf_gsn_lib:assign_local_data_teid({'Access', EBI}, PCtx0, NodeCaps, AccessTunnel, BearerMap0) of
 	    {ok, Result7} -> Result7;
 	    {error, Err7} -> throw(Err7#ctx_err{context = Context, tunnel = AccessTunnel})
 	end,
