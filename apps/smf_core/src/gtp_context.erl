@@ -485,6 +485,7 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 	     #{session := connected} = _State,
 	     #{context := Context, pfcp := PCtx0,
 	       tunnels := #{'Access' := AccessTunnel}, bearers := BearerMap,
+	       interface := Interface,
 	       aaa_session := S0, pcf := _PCF0,
 	       charging := C0, aaa_auth := A0, pcc := PCC0} = Data) ->
     Events = case Handler of
@@ -551,8 +552,10 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 
     GxReport = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors2 ++ PCCErrors4),
     smf_aaa_session:aaa_reply(Request, ok, GxReport, S3),
-    {keep_state, Data#{pfcp := PCtx, pcc := PCC4,
-		       aaa_session := S3, charging := C2, aaa_auth := A1}};
+    Data1 = Data#{pfcp := PCtx, pcc := PCC4,
+		  aaa_session := S3, charging := C2, aaa_auth := A1},
+    Data2 = Interface:handle_dedicated_bearer_changes(PCC0, PCC4, Data1),
+    {keep_state, Data2};
 
 handle_event(info, #aaa_request{procedure = {gy, 'RAR'},
 				handler = Handler, session = Avps,

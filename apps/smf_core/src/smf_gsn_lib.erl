@@ -42,6 +42,7 @@
 -export([get_access_default_bearer/1, put_access_default_bearer/2, access_default_bearer_key/1]).
 -export([get_sgi_default_bearer/1, put_sgi_default_bearer/2]).
 -export([resolve_access_bearer/2]).
+-export([detect_new_bearers/3, detect_removed_bearers/3, remove_bearer_id_for_ebi/2]).
 -ignore_xref([put_sgi_default_bearer/2]).
 -ignore_xref([access_default_bearer_key/1]).
 -ignore_xref([resolve_access_bearer/2]).
@@ -989,3 +990,68 @@ assign_local_data_teid_5(_Key, #pfcp_ctx{} = PCtx,
 	   FqTEID = #fq_teid{ip = smf_inet:to_ip(IP), teid = DataTEI},
 	   return(Bearer#bearer{vrf = VRF, local = FqTEID})
        ]).
+
+%%%===================================================================
+%%% Dedicated bearer detection helpers
+%%%===================================================================
+
+collect_bearer_ids(Rules) ->
+    maps:fold(
+      fun(_, Rule, Acc) ->
+	  case maps:get('Bearer-Identifier', Rule, undefined) of
+	      [BId] -> Acc#{BId => true};
+	      _     -> Acc
+	  end
+      end, #{}, Rules).
+
+%% detect_new_bearers/3
+%% Returns [{BearerId, QoS, FlowInfo}] for Bearer-Identifiers that appear in
+%% NewPCC but not in OldPCC and that don't already have a bearer mapping.
+detect_new_bearers(#pcc_ctx{rules = OldRules},
+		   #pcc_ctx{rules = NewRules},
+		   BearerMap) ->
+    NewBIds =
+	maps:fold(
+	  fun(Name, Rule, Acc) ->
+	      case maps:get('Bearer-Identifier', Rule, undefined) of
+		  [BId] when not is_map_key({bearer_id, BId}, BearerMap),
+			      not is_map_key(Name, OldRules),
+			      not is_map_key(BId, Acc) ->
+		      QoS = case maps:get('QoS-Information', Rule, undefined) of
+				[Q] -> Q;
+				Q   -> Q
+			    end,
+		      FlowInfo = maps:get('Flow-Information', Rule, []),
+		      Acc#{BId => {QoS, FlowInfo}};
+		  _ ->
+		      Acc
+	      end
+	  end, #{}, NewRules),
+    maps:fold(fun(BId, {QoS, FlowInfo}, Acc) ->
+		  [{BId, QoS, FlowInfo} | Acc]
+	      end, [], NewBIds).
+
+%% detect_removed_bearers/3
+%% Returns [EBI] for Bearer-Identifiers that had rules in OldPCC but have none
+%% in NewPCC, mapped to their EBI via the bearer map.
+detect_removed_bearers(#pcc_ctx{rules = OldRules},
+		       #pcc_ctx{rules = NewRules},
+		       BearerMap) ->
+    OldBIds = collect_bearer_ids(OldRules),
+    NewBIds = collect_bearer_ids(NewRules),
+    RemovedBIds = maps:keys(maps:without(maps:keys(NewBIds), OldBIds)),
+    lists:filtermap(
+      fun(BId) ->
+	  case maps:get({bearer_id, BId}, BearerMap, undefined) of
+	      EBI when is_integer(EBI) -> {true, EBI};
+	      _                        -> false
+	  end
+      end, RemovedBIds).
+
+%% remove_bearer_id_for_ebi/2
+%% Remove the {bearer_id, _} entry that maps to the given EBI.
+remove_bearer_id_for_ebi(EBI, BearerMap) ->
+    maps:filter(
+      fun({bearer_id, _}, V) -> V /= EBI;
+	 (_, _)              -> true
+      end, BearerMap).

@@ -18,6 +18,8 @@
 	 handle_event/4, terminate/3]).
 
 -export([delete_context/4, close_context/5]).
+-export([handle_dedicated_bearer_changes/3]).
+-ignore_xref([handle_dedicated_bearer_changes/3]).
 
 %% PFCP context API's
 %%-export([defered_usage_report/3]).
@@ -493,6 +495,9 @@ encode_paa(Type, IPv4, IPv6) ->
 
 close_context(_Side, Reason, _Notify, _State, Data) ->
     smf_gtp_gsn_lib:close_context(?API, Reason, Data).
+
+handle_dedicated_bearer_changes(_OldPCC, _NewPCC, Data) ->
+    Data.
 
 get_context_from_req(?'Access Point Name', #v2_access_point_name{apn = APN}, Context) ->
     Context#context{apn = APN};

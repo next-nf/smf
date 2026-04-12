@@ -19,6 +19,8 @@
 
 -export([delete_context/4, close_context/5]).
 -export([init_session/4, init_session_from_gtp_req/5, update_session_from_gtp_req/4]).
+-export([handle_dedicated_bearer_changes/3]).
+-ignore_xref([handle_dedicated_bearer_changes/3]).	% called via Interface variable
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("gtplib/include/gtp_packet.hrl").
@@ -88,6 +90,9 @@ request_spec(v2, modify_bearer_command, _) ->
      {?'Bearer Contexts to be modified',			mandatory}];
 request_spec(v2, resume_notification, _) ->
     [{?'IMSI',							mandatory}];
+request_spec(v2, create_bearer_response, _) ->
+    [{?'Cause',                                                         mandatory},
+     {?'Bearer Contexts to be created',                                 mandatory}];
 request_spec(v2, _, _) ->
     [].
 
@@ -109,7 +114,8 @@ init(_Opts, Data0) ->
     OCPcfg = maps:get('Offline-Charging-Profile', AAASession, #{}),
     PCC = #pcc_ctx{offline_charging_profile = OCPcfg},
     Data = Data0#{'Version' => v2, aaa_session => AAASession, pcf => PCF,
-		  charging => Charging, aaa_auth => AAAAuth, pcc => PCC},
+		  charging => Charging, aaa_auth => AAAAuth, pcc => PCC,
+		  pending_bearers => #{}},
     {ok, smf_context:init_state(), Data}.
 
 handle_event(Type, Content, State, #{'Version' := v1} = Data) ->
@@ -439,6 +445,64 @@ handle_request(ReqKey, _Msg, _Resent, _State, _Data) ->
 handle_response(ReqInfo, #gtp{version = v1} = Msg, Request, State, Data) ->
     ?GTP_v1_Interface:handle_response(ReqInfo, Msg, Request, State, Data);
 
+handle_response({create_bearer, PgwFTEID},
+		#gtp{type = create_bearer_response,
+		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause},
+			    ?'Bearer Contexts to be created' :=
+				#v2_bearer_context{group = BearerCtxGroup}}},
+		_Request, #{session := connected} = _State,
+		#{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC,
+		  pending_bearers := Pending0} = Data0)
+  when ?CAUSE_OK(Cause) ->
+    case maps:take(PgwFTEID, Pending0) of
+	{{BearerId, AccessBearer0}, Pending} ->
+	    #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} = BearerCtxGroup,
+	    AccessBearer = update_bearer_from_response(BearerCtxGroup, AccessBearer0),
+	    BearerMap = BearerMap0#{{'Access', EBI} => AccessBearer,
+				    {bearer_id, BearerId} => EBI},
+	    case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
+		{ok, {PCtx, _, _}} ->
+		    {keep_state, Data0#{bearers := BearerMap, pfcp := PCtx,
+					pending_bearers := Pending}};
+		{error, _} ->
+		    {keep_state, Data0#{bearers := BearerMap,
+					pending_bearers := Pending}}
+	    end;
+	error ->
+	    keep_state_and_data
+    end;
+
+handle_response({create_bearer, PgwFTEID},
+		#gtp{type = create_bearer_response},
+		_Request, _State,
+		#{pending_bearers := Pending0} = Data0) ->
+    Pending = maps:remove(PgwFTEID, Pending0),
+    {keep_state, Data0#{pending_bearers := Pending}};
+
+handle_response({create_bearer, _PgwFTEID}, timeout,
+		#gtp{type = create_bearer_request}, _State, _Data) ->
+    ?LOG(error, "Create Bearer Request timed out"),
+    keep_state_and_data;
+
+handle_response({delete_dedicated_bearer, EBI},
+		#gtp{type = delete_bearer_response,
+		     ie = #{?'Cause' := #v2_cause{v2_cause = _Cause}}},
+		_Request, _State,
+		#{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC} = Data0) ->
+    BearerMap1 = maps:remove({'Access', EBI}, BearerMap0),
+    BearerMap = smf_gsn_lib:remove_bearer_id_for_ebi(EBI, BearerMap1),
+    case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
+	{ok, {PCtx, _, _}} ->
+	    {keep_state, Data0#{bearers := BearerMap, pfcp := PCtx}};
+	{error, _} ->
+	    {keep_state, Data0#{bearers := BearerMap}}
+    end;
+
+handle_response({delete_dedicated_bearer, _EBI}, timeout,
+		#gtp{type = delete_bearer_request}, _State, _Data) ->
+    ?LOG(error, "Delete Dedicated Bearer Request timed out"),
+    keep_state_and_data;
+
 handle_response({CommandReqKey, OldSOpts},
 		#gtp{type = update_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause},
@@ -492,6 +556,116 @@ handle_response({From, TermCause},
 handle_response(_CommandReqKey, _Response, _Request, #{session := SState}, _Data)
   when SState =/= connected ->
     keep_state_and_data.
+
+%%%===================================================================
+%%% Dedicated Bearer helpers
+%%%===================================================================
+
+encode_bearer_level_qos(#{'QoS-Class-Identifier' := QCI} = QoS) ->
+    MBR4ul = maps:get('Max-Requested-Bandwidth-UL', QoS, 0),
+    MBR4dl = maps:get('Max-Requested-Bandwidth-DL', QoS, 0),
+    GBR4ul = maps:get('Guaranteed-Bitrate-UL', QoS, 0),
+    GBR4dl = maps:get('Guaranteed-Bitrate-DL', QoS, 0),
+    ARP = maps:get('Allocation-Retention-Priority', QoS, #{}),
+    PL  = maps:get('Priority-Level', ARP, 1),
+    PCI = maps:get('Pre-emption-Capability', ARP, 1),
+    PVI = maps:get('Pre-emption-Vulnerability', ARP, 0),
+    #v2_bearer_level_quality_of_service{
+       pci = PCI, pl = PL, pvi = PVI, label = QCI,
+       maximum_bit_rate_for_uplink      = MBR4ul div 1000,
+       maximum_bit_rate_for_downlink    = MBR4dl div 1000,
+       guaranteed_bit_rate_for_uplink   = GBR4ul div 1000,
+       guaranteed_bit_rate_for_downlink = GBR4dl div 1000};
+encode_bearer_level_qos(_) ->
+    #v2_bearer_level_quality_of_service{
+       pci = 1, pl = 1, pvi = 0, label = 9,
+       maximum_bit_rate_for_uplink = 0,
+       maximum_bit_rate_for_downlink = 0,
+       guaranteed_bit_rate_for_uplink = 0,
+       guaranteed_bit_rate_for_downlink = 0}.
+
+update_bearer_field(
+  _, #v2_fully_qualified_tunnel_endpoint_identifier{
+	 interface_type = ?'S5/S8-U SGW',
+	 key = TEI, ipv4 = IP4, ipv6 = IP6}, Bearer) ->
+    IP = if is_binary(IP4), byte_size(IP4) =:= 4 -> smf_inet:bin2ip(IP4);
+	    is_binary(IP6), byte_size(IP6) =:= 16 -> smf_inet:bin2ip(IP6);
+	    true -> undefined
+	 end,
+    Bearer#bearer{remote = #fq_teid{ip = IP, teid = TEI}};
+update_bearer_field(_, _, Bearer) ->
+    Bearer.
+
+update_bearer_from_response(BearerCtxGroup, Bearer0) ->
+    maps:fold(fun update_bearer_field/3, Bearer0, BearerCtxGroup).
+
+create_dedicated_bearer(LinkedEBI, QoS, TFTBin, AccessBearer, Tunnel) ->
+    BearerCtx =
+	[#v2_eps_bearer_id{eps_bearer_id = 0},
+	 encode_bearer_level_qos(QoS),
+	 #v2_eps_bearer_level_traffic_flow_template{value = TFTBin},
+	 s5s8_pgw_gtp_u_tei(AccessBearer)],
+    RequestIEs0 = [#v2_eps_bearer_id{eps_bearer_id = LinkedEBI},
+		   #v2_bearer_context{group = BearerCtx}],
+    RequestIEs = gtp_v2_c:build_recovery(create_bearer_request, Tunnel, false, RequestIEs0),
+    PgwFTEID = AccessBearer#bearer.local,
+    send_request(Tunnel, ?T3, ?N3, create_bearer_request, RequestIEs,
+		 {create_bearer, PgwFTEID}).
+
+delete_dedicated_bearer(EBI, DefaultEBI, Tunnel) ->
+    BearerCtx = [#v2_eps_bearer_id{eps_bearer_id = EBI},
+		 #v2_cause{v2_cause = reactivation_requested}],
+    RequestIEs0 = [#v2_eps_bearer_id{eps_bearer_id = DefaultEBI},
+		   #v2_bearer_context{group = BearerCtx}],
+    RequestIEs = gtp_v2_c:build_recovery(delete_bearer_request, Tunnel, false, RequestIEs0),
+    send_request(Tunnel, ?T3, ?N3, delete_bearer_request, RequestIEs,
+		 {delete_dedicated_bearer, EBI}).
+
+handle_dedicated_bearer_changes(OldPCC, NewPCC,
+				#{bearers := BearerMap,
+				  tunnels := #{'Access' := AccessTunnel},
+				  context := #context{default_bearer_id = DefaultEBI}} = Data) ->
+    NewBearers = smf_gsn_lib:detect_new_bearers(OldPCC, NewPCC, BearerMap),
+    Data1 = lists:foldl(
+	      fun({BId, QoS, FlowInfo}, D) ->
+		  initiate_create_dedicated_bearer(BId, QoS, FlowInfo,
+						   DefaultEBI, AccessTunnel, D)
+	      end, Data, NewBearers),
+    RemovedEBIs = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
+    lists:foldl(
+      fun(EBI, D) ->
+	  initiate_delete_dedicated_bearer(EBI, DefaultEBI, AccessTunnel, D)
+      end, Data1, RemovedEBIs).
+
+initiate_create_dedicated_bearer(BearerId, QoS, FlowInfo, DefaultEBI, AccessTunnel,
+				 #{bearers := BearerMap0, pfcp := PCtx0,
+				   pending_bearers := Pending0} = Data) ->
+    %% Derive PGW GTP-U IP and VRF from the existing default Access bearer
+    DefaultBearer = smf_gsn_lib:get_access_default_bearer(BearerMap0),
+    case DefaultBearer of
+	#bearer{vrf = VRF, local = #fq_teid{ip = PgwUIP}} when PgwUIP /= v4, PgwUIP /= v6 ->
+	    %% Allocate a real TEID from the TEI manager
+	    case smf_tei_mngr:alloc_tei(PCtx0) of
+		{ok, DataTEI} ->
+		    AccessBearer = #bearer{interface = 'Access',
+					   vrf = VRF,
+					   local = #fq_teid{ip = PgwUIP, teid = DataTEI}},
+		    TFTBin = smf_tft:flow_info_to_tft(FlowInfo),
+		    create_dedicated_bearer(DefaultEBI, QoS, TFTBin, AccessBearer, AccessTunnel),
+		    PgwFTEID = AccessBearer#bearer.local,
+		    Pending = Pending0#{PgwFTEID => {BearerId, AccessBearer}},
+		    Data#{pending_bearers := Pending};
+		_ ->
+		    Data
+	    end;
+	_ ->
+	    Data
+    end.
+
+
+initiate_delete_dedicated_bearer(EBI, DefaultEBI, AccessTunnel, Data) ->
+    delete_dedicated_bearer(EBI, DefaultEBI, AccessTunnel),
+    Data.
 
 terminate(_Reason, _State, #{pfcp := PCtx, context := Context}) ->
     smf_pfcp_context:delete_session(terminate, PCtx),
