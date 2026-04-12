@@ -41,8 +41,10 @@
 	]).
 -export([get_access_default_bearer/1, put_access_default_bearer/2, access_default_bearer_key/1]).
 -export([get_sgi_default_bearer/1, put_sgi_default_bearer/2]).
+-export([resolve_access_bearer/2]).
 -ignore_xref([put_sgi_default_bearer/2]).
 -ignore_xref([access_default_bearer_key/1]).
+-ignore_xref([resolve_access_bearer/2]).
 
 -ifdef(TEST).
 -export([sntp_time_to_datetime/1]).
@@ -945,6 +947,20 @@ put_sgi_default_bearer(SGiBearer, #{{'SGi-LAN', default_lan_id} := LanId} = Bear
 
 access_default_bearer_key(#{{'Access', default_ebi} := EBI}) ->
     {'Access', EBI}.
+
+%% resolve_access_bearer/2
+%% Resolve which Access bearer a PCC rule is bound to.
+%% Looks up Bearer-Identifier in the rule definition.
+%% Falls back to default Access bearer if no binding found.
+resolve_access_bearer(#{'Bearer-Identifier' := [BId]}, BearerMap) ->
+    case maps:get({bearer_id, BId}, BearerMap, undefined) of
+	EBI when is_integer(EBI), is_map_key({'Access', EBI}, BearerMap) ->
+	    maps:get({'Access', EBI}, BearerMap);
+	_ ->
+	    get_access_default_bearer(BearerMap)
+    end;
+resolve_access_bearer(_, BearerMap) ->
+    get_access_default_bearer(BearerMap).
 
 %% assign_local_data_teid/5
 assign_local_data_teid(Key, PCtx, NodeOrVRF, TunnelOrIP, BearerMap) ->

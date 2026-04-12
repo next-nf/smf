@@ -33,7 +33,7 @@
 -include("smf_core_config.hrl").
 -include("include/smf.hrl").
 
--record(sx_upd, {now, errors = [], monitors = #{}, pctx = #pfcp_ctx{}, access, sgi}).
+-record(sx_upd, {now, errors = [], monitors = #{}, pctx = #pfcp_ctx{}, bearers = #{}}).
 
 -define(SECONDS_PER_DAY, 86400).
 
@@ -52,9 +52,7 @@ create_session(Handler, PCC, PCtx, Bearer, Ctx)
 %% modify_session/5
 modify_session(PCC, URRActions, Opts, BearerMap, PCtx0)
   when is_record(PCC, pcc_ctx), is_record(PCtx0, pfcp_ctx) ->
-    Access = smf_gsn_lib:get_access_default_bearer(BearerMap),
-    SGi = smf_gsn_lib:get_sgi_default_bearer(BearerMap),
-    {SxRules0, SxErrors, PCtx} = build_sx_rules(PCC, Opts, PCtx0, Access, SGi),
+    {SxRules0, SxErrors, PCtx} = build_sx_rules(PCC, Opts, PCtx0, BearerMap),
     SxRules =
 	lists:foldl(
 	  fun({offline, _}, SxR) ->
@@ -182,13 +180,11 @@ session_info(RespIEs) ->
 
 %% session_establishment_request/5
 session_establishment_request(Handler, PCC, PCtx0, BearerMap0, Ctx) ->
-    Access = smf_gsn_lib:get_access_default_bearer(BearerMap0),
-    SGi = smf_gsn_lib:get_sgi_default_bearer(BearerMap0),
     register_ctx_ids(Handler, BearerMap0, PCtx0),
     {ok, CntlNode, _, _} = smf_sx_socket:id(),
 
     PCtx1 = pctx_update_from_ctx(PCtx0, Ctx),
-    {SxRules, SxErrors, PCtx2} = build_sx_rules(PCC, #{}, PCtx1, Access, SGi),
+    {SxRules, SxErrors, PCtx2} = build_sx_rules(PCC, #{}, PCtx1, BearerMap0),
     ?LOG(debug, "SxRules: ~p~n", [SxRules]),
     ?LOG(debug, "SxErrors: ~p~n", [SxErrors]),
     ?LOG(debug, "CtxPending: ~p~n", [Ctx]),
@@ -275,10 +271,10 @@ apply_charging_profile(_K, _V, _Now, URR) ->
 apply_charging_profile(OCP, Now, URR) ->
     maps:fold(apply_charging_profile(_, _, Now, _), URR, OCP).
 
-%% build_sx_rules/5
-build_sx_rules(PCC, Opts, PCtx0, Access, SGi) ->
+%% build_sx_rules/4
+build_sx_rules(PCC, Opts, PCtx0, BearerMap) ->
     PCtx2 = smf_pfcp:reset_ctx(PCtx0),
-    Init = #sx_upd{now = calendar:universal_time(), pctx = PCtx2, access = Access, sgi = SGi},
+    Init = #sx_upd{now = calendar:universal_time(), pctx = PCtx2, bearers = BearerMap},
     #sx_upd{errors = Errors, pctx = NewPCtx0} =
 	build_sx_rules_3(PCC, Opts, Init),
     NewPCtx = smf_pfcp:apply_timers(PCtx0, NewPCtx0),
@@ -300,10 +296,13 @@ build_sx_rules_3(#pcc_ctx{monitors = Monitors, rules = PolicyRules,
     maps:fold(fun build_sx_rule/3, Update5, PolicyRules).
 
 %% install special SLAAC and RA rule (only for tunnels for the moment)
-build_sx_ctx_rule(#sx_upd{
-		     pctx = #pfcp_ctx{cp_bearer = CpBearer} = PCtx0,
-		     access = AccessBearer, sgi = SGiBearer
-		    } = Update)
+build_sx_ctx_rule(#sx_upd{pctx = #pfcp_ctx{cp_bearer = CpBearer} = PCtx0,
+			  bearers = BearerMap} = Update) ->
+    AccessBearer = smf_gsn_lib:get_access_default_bearer(BearerMap),
+    SGiBearer = smf_gsn_lib:get_sgi_default_bearer(BearerMap),
+    build_sx_ctx_rule(AccessBearer, SGiBearer, CpBearer, PCtx0, Update).
+
+build_sx_ctx_rule(AccessBearer, SGiBearer, CpBearer, PCtx0, Update)
   when not is_record(AccessBearer#bearer.remote, ue_ip),
        SGiBearer#bearer.local#ue_ip.v6 /= undefined ->
     {PdrId, PCtx1} = smf_pfcp:get_id(pdr, ipv6_mcast_pdr, PCtx0),
@@ -328,7 +327,7 @@ build_sx_ctx_rule(#sx_upd{
       pctx = smf_pfcp_rules:add(
 	       [{pdr, ipv6_mcast_pdr, PDR},
 		{far, dp_to_cp_far, FAR}], PCtx)};
-build_sx_ctx_rule(Update) ->
+build_sx_ctx_rule(_, _, _, _, Update) ->
     Update.
 
 build_sx_charging_rule(PCC, PolicyRules, Update) ->
@@ -518,7 +517,9 @@ far(FarId, _RedirInfo, _Src, Dst) ->
 
 %% build_sx_rule/6
 build_sx_rule(Direction, Name, Definition, FilterInfo, URRs,
-	      #sx_upd{access = AccessBearer, sgi = SGiBearer} = Update) ->
+	      #sx_upd{bearers = BearerMap} = Update) ->
+    SGiBearer = smf_gsn_lib:get_sgi_default_bearer(BearerMap),
+    AccessBearer = smf_gsn_lib:resolve_access_bearer(Definition, BearerMap),
     build_sx_rule(Direction, Name, Definition, FilterInfo, URRs, AccessBearer, SGiBearer, Update).
 
 %% build_sx_rule/8
