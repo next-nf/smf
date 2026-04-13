@@ -1163,6 +1163,13 @@ pdn_ppp_pco(SessionOpts, {?'PCO-DNS-Server-IPv4-Address', <<>>}, Opts) ->
 				O
 			end
 		end, Opts, ['MS-Secondary-DNS-Server', 'MS-Primary-DNS-Server']);
+pdn_ppp_pco(SessionOpts, {?'PCO-Bearer-Control-Mode', <<>>}, Opts) ->
+    case maps:get('Bearer-Control-Mode', SessionOpts, undefined) of
+	BCM when is_integer(BCM) ->
+	    [{?'PCO-Bearer-Control-Mode', <<BCM:8>>} | Opts];
+	_ ->
+	    Opts
+    end;
 pdn_ppp_pco(_SessionOpts, PPPReqOpt, Opts) ->
     ?LOG(debug, "Apply PPP Opt: ~p", [PPPReqOpt]),
     Opts.

@@ -451,10 +451,17 @@ from_session('3GPP-MSISDN', MSISDN, Avps) ->
 
 %% 'OC-Supported-Features'
 %% 'TDF-Information'
+
 %% 'Network-Request-Support'
+from_session('Network-Request-Support', Value, Avps) ->
+    Avps#{'Network-Request-Support' => [Value]};
+
 %% 'Packet-Filter-Information'
 %% 'Packet-Filter-Operation'
+
 %% 'Bearer-Identifier'
+from_session('Bearer-Identifier', Value, Avps) ->
+    Avps#{'Bearer-Identifier' => [Value]};
 
 %% 'Bearer-Operation'
 from_session('Bearer-Operation', Value, Avps) ->
@@ -615,6 +622,8 @@ to_session(Procedure, SessEvs, Avps) ->
     maps:fold(to_session(Procedure, _, _, _), SessEvs, Avps).
 
 %% to_session/4
+to_session(_, 'Bearer-Control-Mode', [BCM], {Session, Events}) ->
+    {Session#{'Bearer-Control-Mode' => BCM}, Events};
 to_session(_, 'Usage-Monitoring-Information', Value, SessEv) ->
     lists:foldl(fun umi_to_session/2, SessEv, Value);
 to_session(_, 'Charging-Rule-Install', V, {Session, Events}) ->
