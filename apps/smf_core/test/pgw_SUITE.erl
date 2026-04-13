@@ -373,6 +373,13 @@
 				  'Charging-Rule-Install' =>
 				      [#{'Charging-Rule-Base-Name' => [<<"m2m0001">>]}]
 				 }},
+		      'Initial-Gx-BCM-UE-NW' =>
+			  #{avps =>
+				#{'Result-Code' => 2001,
+				  'Bearer-Control-Mode' => [2],
+				  'Charging-Rule-Install' =>
+				      [#{'Charging-Rule-Base-Name' => [<<"m2m0001">>]}]
+				 }},
 		      'Initial-Gx-Split1' =>
 			  #{avps =>
 				#{'Result-Code' => 2001,
@@ -999,6 +1006,10 @@ init_per_testcase(gx_invalid_charging_rule, Config) ->
 init_per_testcase(tdf_app_id, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-TDF-App'}]),
+    Config;
+init_per_testcase(gx_rar_dedicated_bearer_create, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 %% gtp inactivity_timeout reduced to 300ms for test purposes
 init_per_testcase(gtp_idle_timeout_pfcp_session_loss, Config) ->
@@ -5487,7 +5498,7 @@ up_inactivity_timer(Config) ->
 
 %%--------------------------------------------------------------------
 gx_rar_dedicated_bearer_create() ->
-    [{doc, "Check that a Gx RAR with Bearer-Identifier creates a dedicated bearer"}].
+    [{doc, "Check that a Gx RAR with QCI/ARP mismatch creates a dedicated bearer"}].
 gx_rar_dedicated_bearer_create(Config) ->
     Cntl = whereis(gtpc_client_server),
     CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
@@ -5505,17 +5516,23 @@ gx_rar_dedicated_bearer_create(Config) ->
     AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
                           session = SessionOpts, events = []},
 
-    %% Install a PCC rule with a Bearer-Identifier to trigger dedicated bearer creation
+    %% Install a PCC rule with a QCI/ARP different from the default bearer
+    %% to trigger dedicated bearer creation (BCM = UE_NW set in init_per_testcase)
     DedRule = #{'Charging-Rule-Definition' =>
                     [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
                        'Flow-Information' =>
                            [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
                               'Flow-Direction' => [2]}],
+                       'QoS-Information' =>
+                           [#{'QoS-Class-Identifier' => 1,
+                              'Allocation-Retention-Priority' =>
+                                  #{'Priority-Level' => 2,
+                                    'Pre-emption-Capability' => 1,
+                                    'Pre-emption-Vulnerability' => 0}}],
                        'Metering-Method' => [1],
                        'Precedence' => [100],
                        'Online' => [0],
-                       'Offline' => [0]}],
-                'Bearer-Identifier' => [<<"bearer-1">>]},
+                       'Offline' => [0]}]},
     InstCR = [{pcc, install, [DedRule]}],
     Server ! AAAReq#aaa_request{events = InstCR},
 
@@ -5587,9 +5604,9 @@ gx_rar_dedicated_bearer_create(Config) ->
     %% Allow response to be processed
     ct:sleep(200),
 
-    %% Verify the bearer was installed
+    %% Verify the bearer was installed with QCI/ARP key
     #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
-    ?match(#{{bearer_id, <<"bearer-1">>} := DedEBI}, BearerMap),
+    ?match(#{{qci_arp, 1, {2, 1, 0}} := DedEBI}, BearerMap),
     ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap),
 
     delete_session(GtpC),

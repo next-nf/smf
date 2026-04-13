@@ -83,10 +83,15 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
     Context = add_apn_timeout(APNOpts, SessionOpts3, Context1),
 
     EBI = Context#context.default_bearer_id,
-    BearerMap0 = #{{'Access', default_ebi} => EBI,
-		   {'Access', EBI} => AccessBearer,
-		   {'SGi-LAN', default_lan_id} => 1,
-		   {'SGi-LAN', 1} => SGiBearer},
+    BearerMap0a = #{{'Access', default_ebi} => EBI,
+		    {'Access', EBI} => AccessBearer,
+		    {'SGi-LAN', default_lan_id} => 1,
+		    {'SGi-LAN', 1} => SGiBearer},
+    BearerMap0 =
+	case smf_gsn_lib:get_rule_qci_arp(maps:get('QoS-Information', SessionOpts3, #{})) of
+	    {QCI, ARP} -> BearerMap0a#{{qci_arp, QCI, ARP} => EBI};
+	    undefined  -> BearerMap0a
+	end,
     BearerMap1 =
 	case smf_gsn_lib:assign_local_data_teid({'Access', EBI}, PCtx0, NodeCaps, AccessTunnel, BearerMap0) of
 	    {ok, Result7} -> Result7;

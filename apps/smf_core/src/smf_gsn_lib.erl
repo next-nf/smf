@@ -42,7 +42,8 @@
 -export([get_access_default_bearer/1, put_access_default_bearer/2, access_default_bearer_key/1]).
 -export([get_sgi_default_bearer/1, put_sgi_default_bearer/2]).
 -export([resolve_access_bearer/2]).
--export([detect_new_bearers/3, detect_removed_bearers/3, remove_bearer_id_for_ebi/2]).
+-export([detect_new_bearers/4, detect_removed_bearers/3,
+	 remove_bearer_metadata_for_ebi/2, get_rule_qci_arp/1]).
 -ignore_xref([put_sgi_default_bearer/2]).
 -ignore_xref([access_default_bearer_key/1]).
 -ignore_xref([resolve_access_bearer/2]).
@@ -951,16 +952,29 @@ access_default_bearer_key(#{{'Access', default_ebi} := EBI}) ->
 
 %% resolve_access_bearer/2
 %% Resolve which Access bearer a PCC rule is bound to.
-%% Looks up Bearer-Identifier in the rule definition.
-%% Falls back to default Access bearer if no binding found.
-resolve_access_bearer(#{'Bearer-Identifier' := [BId]}, BearerMap) ->
+%% Looks up by QCI/ARP first, then falls back to Bearer-Identifier,
+%% then to the default Access bearer.
+resolve_access_bearer(Definition, BearerMap) ->
+    case get_rule_qci_arp(Definition) of
+	{QCI, ARP} ->
+	    case maps:get({qci_arp, QCI, ARP}, BearerMap, undefined) of
+		EBI when is_integer(EBI), is_map_key({'Access', EBI}, BearerMap) ->
+		    maps:get({'Access', EBI}, BearerMap);
+		_ ->
+		    resolve_by_bearer_id(Definition, BearerMap)
+	    end;
+	undefined ->
+	    resolve_by_bearer_id(Definition, BearerMap)
+    end.
+
+resolve_by_bearer_id(#{'Bearer-Identifier' := [BId]}, BearerMap) ->
     case maps:get({bearer_id, BId}, BearerMap, undefined) of
 	EBI when is_integer(EBI), is_map_key({'Access', EBI}, BearerMap) ->
 	    maps:get({'Access', EBI}, BearerMap);
 	_ ->
 	    get_access_default_bearer(BearerMap)
     end;
-resolve_access_bearer(_, BearerMap) ->
+resolve_by_bearer_id(_, BearerMap) ->
     get_access_default_bearer(BearerMap).
 
 %% assign_local_data_teid/5
@@ -995,63 +1009,86 @@ assign_local_data_teid_5(_Key, #pfcp_ctx{} = PCtx,
 %%% Dedicated bearer detection helpers
 %%%===================================================================
 
-collect_bearer_ids(Rules) ->
+%% get_rule_qci_arp/1
+%% Extract {QCI, ARP} from a PCC rule's QoS-Information.
+%% ARP is normalized to {PL, PCI, PVI} tuple for use as a map key.
+get_rule_qci_arp(#{'QoS-Information' := [QoS]}) ->
+    get_qci_arp(QoS);
+get_rule_qci_arp(#{'QoS-Information' := QoS}) when is_map(QoS) ->
+    get_qci_arp(QoS);
+get_rule_qci_arp(_) ->
+    undefined.
+
+get_qci_arp(#{'QoS-Class-Identifier' := QCI} = QoS) ->
+    ARP = maps:get('Allocation-Retention-Priority', QoS, #{}),
+    PL  = maps:get('Priority-Level', ARP, 1),
+    PCI = maps:get('Pre-emption-Capability', ARP, 1),
+    PVI = maps:get('Pre-emption-Vulnerability', ARP, 0),
+    {QCI, {PL, PCI, PVI}};
+get_qci_arp(_) ->
+    undefined.
+
+collect_rule_qci_arps(Rules) ->
     maps:fold(
       fun(_, Rule, Acc) ->
-	  case maps:get('Bearer-Identifier', Rule, undefined) of
-	      [BId] -> Acc#{BId => true};
-	      _     -> Acc
+	  case get_rule_qci_arp(Rule) of
+	      {QCI, ARP} -> Acc#{{QCI, ARP} => true};
+	      _          -> Acc
 	  end
       end, #{}, Rules).
 
-%% detect_new_bearers/3
-%% Returns [{BearerId, QoS, FlowInfo}] for Bearer-Identifiers that appear in
-%% NewPCC but not in OldPCC and that don't already have a bearer mapping.
+%% detect_new_bearers/4
+%% Returns [{QCI, ARP, QoS, FlowInfo}] for PCC rules whose QCI/ARP does not
+%% match any existing bearer.  Only triggers when BCM = UE_NW (2).
+detect_new_bearers(_OldPCC, _NewPCC, _BearerMap, BCM)
+  when BCM /= ?'DIAMETER_GX_BEARER-CONTROL-MODE_UE_NW' ->
+    [];
 detect_new_bearers(#pcc_ctx{rules = OldRules},
 		   #pcc_ctx{rules = NewRules},
-		   BearerMap) ->
-    NewBIds =
+		   BearerMap, _BCM) ->
+    NewQCIs =
 	maps:fold(
 	  fun(Name, Rule, Acc) ->
-	      case maps:get('Bearer-Identifier', Rule, undefined) of
-		  [BId] when not is_map_key({bearer_id, BId}, BearerMap),
-			      not is_map_key(Name, OldRules),
-			      not is_map_key(BId, Acc) ->
+	      case {maps:is_key(Name, OldRules), get_rule_qci_arp(Rule)} of
+		  {false, {QCI, ARP}}
+		    when not is_map_key({qci_arp, QCI, ARP}, BearerMap),
+			 not is_map_key({QCI, ARP}, Acc) ->
 		      QoS = case maps:get('QoS-Information', Rule, undefined) of
 				[Q] -> Q;
 				Q   -> Q
 			    end,
 		      FlowInfo = maps:get('Flow-Information', Rule, []),
-		      Acc#{BId => {QoS, FlowInfo}};
+		      Acc#{{QCI, ARP} => {QoS, FlowInfo}};
 		  _ ->
 		      Acc
 	      end
 	  end, #{}, NewRules),
-    maps:fold(fun(BId, {QoS, FlowInfo}, Acc) ->
-		  [{BId, QoS, FlowInfo} | Acc]
-	      end, [], NewBIds).
+    maps:fold(fun({QCI, ARP}, {QoS, FlowInfo}, L) ->
+		  [{QCI, ARP, QoS, FlowInfo} | L]
+	      end, [], NewQCIs).
 
 %% detect_removed_bearers/3
-%% Returns [EBI] for Bearer-Identifiers that had rules in OldPCC but have none
-%% in NewPCC, mapped to their EBI via the bearer map.
+%% Returns [EBI] for QCI/ARP combinations that had rules in OldPCC but have
+%% none in NewPCC, mapped to their EBI via the bearer map.
 detect_removed_bearers(#pcc_ctx{rules = OldRules},
 		       #pcc_ctx{rules = NewRules},
 		       BearerMap) ->
-    OldBIds = collect_bearer_ids(OldRules),
-    NewBIds = collect_bearer_ids(NewRules),
-    RemovedBIds = maps:keys(maps:without(maps:keys(NewBIds), OldBIds)),
+    OldQAs = collect_rule_qci_arps(OldRules),
+    NewQAs = collect_rule_qci_arps(NewRules),
+    RemovedQAs = maps:keys(maps:without(maps:keys(NewQAs), OldQAs)),
     lists:filtermap(
-      fun(BId) ->
-	  case maps:get({bearer_id, BId}, BearerMap, undefined) of
+      fun({QCI, ARP}) ->
+	  case maps:get({qci_arp, QCI, ARP}, BearerMap, undefined) of
 	      EBI when is_integer(EBI) -> {true, EBI};
 	      _                        -> false
 	  end
-      end, RemovedBIds).
+      end, RemovedQAs).
 
-%% remove_bearer_id_for_ebi/2
-%% Remove the {bearer_id, _} entry that maps to the given EBI.
-remove_bearer_id_for_ebi(EBI, BearerMap) ->
+%% remove_bearer_metadata_for_ebi/2
+%% Remove all {qci_arp, _, _} and {bearer_id, _} entries that map to EBI.
+remove_bearer_metadata_for_ebi(EBI, BearerMap) ->
     maps:filter(
-      fun({bearer_id, _}, V) -> V /= EBI;
-	 (_, _)              -> true
+      fun({qci_arp, _, _}, V) -> V /= EBI;
+	 ({bearer_id, _},   V) -> V /= EBI;
+	 (_, _)                -> true
       end, BearerMap).

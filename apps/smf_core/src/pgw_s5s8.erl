@@ -455,11 +455,14 @@ handle_response({create_bearer, PgwFTEID},
 		  pending_bearers := Pending0} = Data0)
   when ?CAUSE_OK(Cause) ->
     case maps:take(PgwFTEID, Pending0) of
-	{{BearerId, AccessBearer0}, Pending} ->
+	{{QCI, ARP, AccessBearer0}, Pending} ->
 	    #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} = BearerCtxGroup,
 	    AccessBearer = update_bearer_from_response(BearerCtxGroup, AccessBearer0),
+	    %% PGW assigns Bearer-Identifier equal to the EBI (as a binary octet)
+	    PgwBI = <<EBI:8>>,
 	    BearerMap = BearerMap0#{{'Access', EBI} => AccessBearer,
-				    {bearer_id, BearerId} => EBI},
+				    {qci_arp, QCI, ARP} => EBI,
+				    {bearer_id, PgwBI} => EBI},
 	    case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
 		{ok, {PCtx, _, _}} ->
 		    {keep_state, Data0#{bearers := BearerMap, pfcp := PCtx,
@@ -490,7 +493,7 @@ handle_response({delete_dedicated_bearer, EBI},
 		_Request, _State,
 		#{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC} = Data0) ->
     BearerMap1 = maps:remove({'Access', EBI}, BearerMap0),
-    BearerMap = smf_gsn_lib:remove_bearer_id_for_ebi(EBI, BearerMap1),
+    BearerMap = smf_gsn_lib:remove_bearer_metadata_for_ebi(EBI, BearerMap1),
     case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
 	{ok, {PCtx, _, _}} ->
 	    {keep_state, Data0#{bearers := BearerMap, pfcp := PCtx}};
@@ -624,11 +627,14 @@ delete_dedicated_bearer(EBI, DefaultEBI, Tunnel) ->
 handle_dedicated_bearer_changes(OldPCC, NewPCC,
 				#{bearers := BearerMap,
 				  tunnels := #{'Access' := AccessTunnel},
-				  context := #context{default_bearer_id = DefaultEBI}} = Data) ->
-    NewBearers = smf_gsn_lib:detect_new_bearers(OldPCC, NewPCC, BearerMap),
+				  context := #context{default_bearer_id = DefaultEBI},
+				  aaa_session := Session} = Data) ->
+    BCM = maps:get('Bearer-Control-Mode', Session,
+		   ?'DIAMETER_GX_BEARER-CONTROL-MODE_UE_ONLY'),
+    NewBearers = smf_gsn_lib:detect_new_bearers(OldPCC, NewPCC, BearerMap, BCM),
     Data1 = lists:foldl(
-	      fun({BId, QoS, FlowInfo}, D) ->
-		  initiate_create_dedicated_bearer(BId, QoS, FlowInfo,
+	      fun({QCI, ARP, QoS, FlowInfo}, D) ->
+		  initiate_create_dedicated_bearer(QCI, ARP, QoS, FlowInfo,
 						   DefaultEBI, AccessTunnel, D)
 	      end, Data, NewBearers),
     RemovedEBIs = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
@@ -637,7 +643,7 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
 	  initiate_delete_dedicated_bearer(EBI, DefaultEBI, AccessTunnel, D)
       end, Data1, RemovedEBIs).
 
-initiate_create_dedicated_bearer(BearerId, QoS, FlowInfo, DefaultEBI, AccessTunnel,
+initiate_create_dedicated_bearer(QCI, ARP, QoS, FlowInfo, DefaultEBI, AccessTunnel,
 				 #{bearers := BearerMap0, pfcp := PCtx0,
 				   pending_bearers := Pending0} = Data) ->
     %% Derive PGW GTP-U IP and VRF from the existing default Access bearer
@@ -653,7 +659,7 @@ initiate_create_dedicated_bearer(BearerId, QoS, FlowInfo, DefaultEBI, AccessTunn
 		    TFTBin = smf_tft:flow_info_to_tft(FlowInfo),
 		    create_dedicated_bearer(DefaultEBI, QoS, TFTBin, AccessBearer, AccessTunnel),
 		    PgwFTEID = AccessBearer#bearer.local,
-		    Pending = Pending0#{PgwFTEID => {BearerId, AccessBearer}},
+		    Pending = Pending0#{PgwFTEID => {QCI, ARP, AccessBearer}},
 		    Data#{pending_bearers := Pending};
 		_ ->
 		    Data
