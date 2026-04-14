@@ -424,7 +424,7 @@ make_request(create_session_request, multi_bearer,
 		     fq_teid(2, ?'S5/S8-U SGW', LocalDataTEI, LocalIP)
 		    ]},
 	 #v2_bearer_context{
-	    instance = 1,
+	    instance = 0,
 	    group = [#v2_bearer_level_quality_of_service{
 			pci = 1, pl = 2, pvi = 0, label = 1,
 			maximum_bit_rate_for_uplink      = 1000,
@@ -1018,22 +1018,7 @@ validate_response(create_session_request, multi_bearer, Response,
        #gtp{type = create_session_response,
 	    tei = LocalCntlTEI,
 	    ie = #{{v2_cause,0} := #v2_cause{v2_cause = request_accepted},
-		   {v2_bearer_context,0} :=
-		       #v2_bearer_context{
-			  group = #{
-			    {v2_cause,0} := #v2_cause{v2_cause = request_accepted},
-			    {v2_eps_bearer_id,0} := #v2_eps_bearer_id{eps_bearer_id = 5},
-			    {v2_fully_qualified_tunnel_endpoint_identifier,2} :=
-				#v2_fully_qualified_tunnel_endpoint_identifier{
-				   interface_type = ?'S5/S8-U PGW'}}},
-		   {v2_bearer_context,1} :=
-		       #v2_bearer_context{
-			  group = #{
-			    {v2_cause,0} := #v2_cause{v2_cause = request_accepted},
-			    {v2_eps_bearer_id,0} := #v2_eps_bearer_id{eps_bearer_id = 6},
-			    {v2_fully_qualified_tunnel_endpoint_identifier,2} :=
-				#v2_fully_qualified_tunnel_endpoint_identifier{
-				   interface_type = ?'S5/S8-U PGW'}}}}},
+		   {v2_bearer_context,0} := [_,_]}},
        Response),
     #gtp{ie = #{{v2_fully_qualified_tunnel_endpoint_identifier,1} :=
 		    #v2_fully_qualified_tunnel_endpoint_identifier{

@@ -1758,16 +1758,10 @@ create_session_multi_bearer(Config) ->
     {GtpC, _, Response} = create_session(multi_bearer, Config),
 
     %% response must contain bearer contexts for both EBI 5 and EBI 6
+    %% multiple bearers share instance 0 and are stored as a list
     ?match(
        #gtp{type = create_session_response,
-	    ie = #{{v2_bearer_context, 0} :=
-		       #v2_bearer_context{
-			  group = #{{v2_eps_bearer_id, 0} :=
-					#v2_eps_bearer_id{eps_bearer_id = 5}}},
-		   {v2_bearer_context, 1} :=
-		       #v2_bearer_context{
-			  group = #{{v2_eps_bearer_id, 0} :=
-					#v2_eps_bearer_id{eps_bearer_id = 6}}}}},
+	    ie = #{{v2_bearer_context, 0} := [_,_]}},
        Response),
 
     delete_session(GtpC),

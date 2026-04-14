@@ -185,15 +185,14 @@ handle_request(_ReqKey, _Msg, true, _State, _Data) ->
 
 handle_request(ReqKey,
 	       #gtp{type = create_session_request,
-		    ie = #{?'Access Point Name' := #v2_access_point_name{apn = APN},
-			   ?'Bearer Contexts to be created' :=
-			       #v2_bearer_context{group = #{?'EPS Bearer ID' := EBI}}
+		    ie = #{?'Access Point Name' := #v2_access_point_name{apn = APN}
 			  } = IEs} = Request,
 	       _Resent, State,
 	       #{context := Context0, aaa_opts := AAAopts, node_selection := NodeSelect,
 		 tunnels := #{'Access' := AccessTunnel0} = Tunnels,
 		 aaa_session := S0, pcf := PCF0, charging := C0, aaa_auth := A0,
 		 pcc := PCC0} = Data) ->
+    EBI = get_default_bearer_ebi(IEs),
     PeerUpNode =
 	case IEs of
 	    #{?'SGW-U node name' := #v2_fully_qualified_domain_name{fqdn = SGWuFQDN}} ->
@@ -673,20 +672,38 @@ update_bearer_field(_, _, Bearer) ->
 update_bearer_from_response(BearerCtxGroup, Bearer0) ->
     maps:fold(fun update_bearer_field/3, Bearer0, BearerCtxGroup).
 
-%% Process additional bearer contexts in CSR (instance > 0).
-%% These appear during handover from GTPv1 with multiple PDP contexts.
-process_additional_bearer_contexts(IEs, AccessTunnel, Data) ->
-    AdditionalBearers = maps:fold(
-        fun({v2_bearer_context, Instance},
-            #v2_bearer_context{group = Group}, Acc) when Instance > 0 ->
-                [{Instance, Group} | Acc];
-           (_, _, Acc) ->
-                Acc
-        end, [], IEs),
+%% Extract the default bearer EBI from a CSR IE map.
+%% Bearer Contexts to be created may be a single record or a list (put_ie stores
+%% multiple same-instance IEs as a list, newest first).
+get_default_bearer_ebi(#{?'Bearer Contexts to be created' :=
+                             #v2_bearer_context{group = #{?'EPS Bearer ID' :=
+                                                              #v2_eps_bearer_id{eps_bearer_id = EBI}}}}) ->
+    EBI;
+get_default_bearer_ebi(#{?'Bearer Contexts to be created' := BearerCtxs})
+  when is_list(BearerCtxs) ->
+    %% put_ie stores in reverse wire order; the default bearer (first in wire) is last in list
+    #v2_bearer_context{group = #{?'EPS Bearer ID' :=
+                                     #v2_eps_bearer_id{eps_bearer_id = EBI}}} = lists:last(BearerCtxs),
+    EBI.
+
+%% Process additional bearer contexts in CSR.
+%% In GTPv2, multiple bearers all use the same instance (0); put_ie stores them as a list.
+%% Skip the default bearer (already handled by create_session) and install the rest.
+process_additional_bearer_contexts(IEs, AccessTunnel,
+                                   #{context := #context{default_bearer_id = DefaultEBI}} = Data) ->
+    BearerCtxs = case IEs of
+                     #{?'Bearer Contexts to be created' := L} when is_list(L) -> L;
+                     #{?'Bearer Contexts to be created' := S} -> [S];
+                     _ -> []
+                 end,
     lists:foldl(
-      fun({_Instance, Group}, D) ->
-	      install_additional_bearer(Group, AccessTunnel, D)
-      end, Data, AdditionalBearers).
+      fun(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
+                                           #v2_eps_bearer_id{eps_bearer_id = EBI}} = Group}, D)
+            when EBI /= DefaultEBI ->
+              install_additional_bearer(Group, AccessTunnel, D);
+         (_, D) ->
+              D
+      end, Data, BearerCtxs).
 
 install_additional_bearer(BearerGroup, _AccessTunnel,
                           #{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC} = Data) ->
@@ -1011,6 +1028,8 @@ copy_to_session(?'Bearer Contexts to be created',
 		       #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}}},
 		_AAAopts, Session) ->
     Session#{'3GPP-NSAPI' => EBI};
+copy_to_session(?'Bearer Contexts to be created', [_ | _] = BearerCtxs, AAAopts, Session) ->
+    copy_to_session(?'Bearer Contexts to be created', lists:last(BearerCtxs), AAAopts, Session);
 copy_to_session(_, #v2_selection_mode{mode = Mode}, _AAAopts, Session) ->
     Session#{'3GPP-Selection-Mode' => Mode};
 copy_to_session(_, #v2_charging_characteristics{value = Value}, _AAAopts, Session) ->
@@ -1040,6 +1059,8 @@ copy_to_session(_, #v2_ue_time_zone{timezone = TZ, dst = DST}, _AAAopts, Session
 copy_to_session(_, _, _AAAopts, Session) ->
     Session.
 
+copy_qos_to_session(#{?'Bearer Contexts to be created' := [_ | _] = BearerCtxs} = IEs, Session) ->
+    copy_qos_to_session(IEs#{?'Bearer Contexts to be created' := lists:last(BearerCtxs)}, Session);
 copy_qos_to_session(#{?'Bearer Contexts to be created' :=
 			  #v2_bearer_context{
 			     group = #{?'Bearer Level QoS' :=
@@ -1154,6 +1175,10 @@ get_context_from_req(?'Linked EPS Bearer ID', #v2_eps_bearer_id{eps_bearer_id = 
     Context#context{default_bearer_id =  EBI};
 get_context_from_req(_K, #v2_bearer_context{instance = 0, group = Bearer}, Context) ->
     maps:fold(fun get_context_from_bearer/3, Context, Bearer);
+get_context_from_req(?'Bearer Contexts to be created', [_ | _] = BearerCtxs, Context) ->
+    %% list: put_ie reverse wire order; default bearer is last
+    #v2_bearer_context{instance = 0, group = Bearer} = lists:last(BearerCtxs),
+    maps:fold(fun get_context_from_bearer/3, Context, Bearer);
 
 get_context_from_req(?'Access Point Name', #v2_access_point_name{apn = APN}, Context) ->
     Context#context{apn = APN};
@@ -1205,6 +1230,14 @@ get_tunnel_from_req({_, #v2_fully_qualified_tunnel_endpoint_identifier{
 	   end]);
 get_tunnel_from_req({_, #v2_bearer_context{instance = 0, group = Group}, Next},
 		    Tunnel, Bearer0) ->
+    do([error_m ||
+	   Bearer <- get_tunnel_from_bearer(maps:next(maps:iterator(Group)), Tunnel, Bearer0),
+	   get_tunnel_from_req(maps:next(Next), Tunnel, Bearer)
+       ]);
+get_tunnel_from_req({?'Bearer Contexts to be created', [_ | _] = BearerCtxs, Next},
+		    Tunnel, Bearer0) ->
+    %% list: put_ie reverse wire order; use last (first in wire) for default bearer
+    #v2_bearer_context{instance = 0, group = Group} = lists:last(BearerCtxs),
     do([error_m ||
 	   Bearer <- get_tunnel_from_bearer(maps:next(maps:iterator(Group)), Tunnel, Bearer0),
 	   get_tunnel_from_req(maps:next(Next), Tunnel, Bearer)
@@ -1372,7 +1405,7 @@ bearer_context(SessionOpts, _DefaultEBI, BearerMap, Context, IEs) ->
                             BearerCtx = bearer_qos_profile(SessionOpts, BearerCtx0),
                             {[#v2_bearer_context{instance = Inst,
                                                  group = BearerCtx} | Acc],
-                             Inst + 1}
+                             Inst}
                     end, {IEs, 0}, AccessBearers),
     BearerIEs.
 
