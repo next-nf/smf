@@ -750,6 +750,8 @@ common() ->
      gx_asr,
      gx_rar,
      gx_rar_dedicated_bearer_create,
+     bearer_resource_command_create,
+     dedicated_bearer_session_delete,
      gy_asr,
      gy_async_stop,
      gx_invalid_charging_rulebase,
@@ -1009,6 +1011,14 @@ init_per_testcase(tdf_app_id, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-TDF-App'}]),
     Config;
 init_per_testcase(gx_rar_dedicated_bearer_create, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(bearer_resource_command_create, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(dedicated_bearer_session_delete, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -5629,6 +5639,204 @@ gx_rar_dedicated_bearer_create(Config) ->
 	  end, meck:history(smf_aaa_pcf)),
     ?match([_], BearerCCRU),
 
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+bearer_resource_command_create() ->
+    [{doc, "Check that a Bearer Resource Command (new bearer) creates a dedicated bearer"}].
+bearer_resource_command_create(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+
+    %% Send Bearer Resource Command requesting a new dedicated bearer
+    {GtpC2, _BRCReq} = bearer_resource_command(simple, GtpC),
+
+    %% The PGW should now send a Create Bearer Request
+    CBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = create_bearer_request}, CBReq),
+    #gtp{seq_no = CBSeqNo,
+         ie = #{{v2_bearer_context, 0} :=
+                    #v2_bearer_context{
+                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 2} :=
+                                     #v2_fully_qualified_tunnel_endpoint_identifier{
+                                        interface_type = ?'S5/S8-U PGW',
+                                        key = PgwUTEI,
+                                        ipv4 = PgwUIP4,
+                                        ipv6 = PgwUIP6}
+                                }
+                      }}} = CBReq,
+
+    GtpCDed = gtp_context_new_teids(GtpC2),
+    #gtpc{local_ip = LocalIP,
+          local_data_tei = SgwUTEI,
+          remote_control_tei = RemoteCntlTEI} = GtpCDed,
+    DedEBI = 7,
+
+    PgwUFTEID =
+        if PgwUIP4 /= undefined, size(PgwUIP4) =:= 4 ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI, ipv4 = PgwUIP4};
+           PgwUIP6 /= undefined, size(PgwUIP6) =:= 16 ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI, ipv6 = PgwUIP6};
+           true ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI}
+        end,
+    SgwUFTEID =
+        case LocalIP of
+            {_,_,_,_} ->
+                #v2_fully_qualified_tunnel_endpoint_identifier{
+                   instance = 3, interface_type = ?'S5/S8-U SGW',
+                   key = SgwUTEI, ipv4 = smf_inet:ip2bin(LocalIP)};
+            {_,_,_,_,_,_,_,_} ->
+                #v2_fully_qualified_tunnel_endpoint_identifier{
+                   instance = 3, interface_type = ?'S5/S8-U SGW',
+                   key = SgwUTEI, ipv6 = smf_inet:ip2bin(LocalIP)}
+        end,
+    CBRespIEs = [#v2_cause{v2_cause = request_accepted},
+                 #v2_bearer_context{
+                    group = [#v2_cause{v2_cause = request_accepted},
+                             #v2_eps_bearer_id{eps_bearer_id = DedEBI},
+                             PgwUFTEID,
+                             SgwUFTEID]}],
+    CBResp = #gtp{version = v2, type = create_bearer_response,
+                  tei = RemoteCntlTEI, seq_no = CBSeqNo, ie = CBRespIEs},
+    send_pdu(Cntl, GtpCDed, CBResp),
+
+    ct:sleep(200),
+
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap),
+
+    delete_session(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+dedicated_bearer_session_delete() ->
+    [{doc, "Check that session deletion with active dedicated bearers cleans up correctly"}].
+dedicated_bearer_session_delete(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun =
+        fun(Request, Result, Avps, SOpts) ->
+                Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+                          session = SessionOpts, events = []},
+
+    DedRule = #{'Charging-Rule-Definition' =>
+                    [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+                       'Flow-Information' =>
+                           [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+                              'Flow-Direction' => [2]}],
+                       'QoS-Information' =>
+                           [#{'QoS-Class-Identifier' => 1,
+                              'Allocation-Retention-Priority' =>
+                                  #{'Priority-Level' => 2,
+                                    'Pre-emption-Capability' => 1,
+                                    'Pre-emption-Vulnerability' => 0}}],
+                       'Metering-Method' => [1],
+                       'Precedence' => [100],
+                       'Online' => [0],
+                       'Offline' => [0]}]},
+    InstCR = [{pcc, install, [DedRule]}],
+    Server ! AAAReq#aaa_request{events = InstCR},
+
+    {_, Resp0, _, _} =
+        receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+        after 5000 -> ct:fail(rar_timeout)
+        end,
+    ?equal(ok, Resp0),
+
+    CBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = create_bearer_request}, CBReq),
+    #gtp{seq_no = CBSeqNo,
+         ie = #{{v2_bearer_context, 0} :=
+                    #v2_bearer_context{
+                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 2} :=
+                                     #v2_fully_qualified_tunnel_endpoint_identifier{
+                                        interface_type = ?'S5/S8-U PGW',
+                                        key = PgwUTEI,
+                                        ipv4 = PgwUIP4,
+                                        ipv6 = PgwUIP6}
+                                }
+                      }}} = CBReq,
+
+    GtpCDed = gtp_context_new_teids(GtpC),
+    #gtpc{local_ip = LocalIP,
+          local_data_tei = SgwUTEI,
+          remote_control_tei = RemoteCntlTEI} = GtpCDed,
+    DedEBI = 6,
+
+    PgwUFTEID =
+        if PgwUIP4 /= undefined, size(PgwUIP4) =:= 4 ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI, ipv4 = PgwUIP4};
+           PgwUIP6 /= undefined, size(PgwUIP6) =:= 16 ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI, ipv6 = PgwUIP6};
+           true ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI}
+        end,
+    SgwUFTEID =
+        case LocalIP of
+            {_,_,_,_} ->
+                #v2_fully_qualified_tunnel_endpoint_identifier{
+                   instance = 3, interface_type = ?'S5/S8-U SGW',
+                   key = SgwUTEI, ipv4 = smf_inet:ip2bin(LocalIP)};
+            {_,_,_,_,_,_,_,_} ->
+                #v2_fully_qualified_tunnel_endpoint_identifier{
+                   instance = 3, interface_type = ?'S5/S8-U SGW',
+                   key = SgwUTEI, ipv6 = smf_inet:ip2bin(LocalIP)}
+        end,
+    CBRespIEs = [#v2_cause{v2_cause = request_accepted},
+                 #v2_bearer_context{
+                    group = [#v2_cause{v2_cause = request_accepted},
+                             #v2_eps_bearer_id{eps_bearer_id = DedEBI},
+                             PgwUFTEID,
+                             SgwUFTEID]}],
+    CBResp = #gtp{version = v2, type = create_bearer_response,
+                  tei = RemoteCntlTEI, seq_no = CBSeqNo, ie = CBRespIEs},
+    send_pdu(Cntl, GtpCDed, CBResp),
+
+    ct:sleep(200),
+
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap),
+
+    %% Delete the session with the dedicated bearer active
     delete_session(GtpC),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),

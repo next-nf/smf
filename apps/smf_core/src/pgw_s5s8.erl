@@ -59,6 +59,9 @@
 -define('Linked EPS Bearer ID',                         {v2_eps_bearer_id, 0}).
 -define('SGW-U node name',                              {v2_fully_qualified_domain_name, 0}).
 -define('Secondary RAT Usage Data Report',              {v2_secondary_rat_usage_data_report, 0}).
+-define('Procedure Transaction Id',                     {v2_procedure_transaction_id, 0}).
+-define('Traffic Aggregate Description',                {v2_traffic_aggregation_description, 0}).
+-define('Flow QoS',                                     {v2_flow_quality_of_service, 0}).
 
 -define('S5/S8-U SGW',  4).
 -define('S5/S8-U PGW',  5).
@@ -93,6 +96,10 @@ request_spec(v2, resume_notification, _) ->
 request_spec(v2, create_bearer_response, _) ->
     [{?'Cause',                                                         mandatory},
      {?'Bearer Contexts to be created',                                 mandatory}];
+request_spec(v2, bearer_resource_command, _) ->
+    [{?'Linked EPS Bearer ID',                                          mandatory},
+     {?'Procedure Transaction Id',                                      mandatory},
+     {?'Traffic Aggregate Description',                                 mandatory}];
 request_spec(v2, _, _) ->
     [].
 
@@ -419,6 +426,50 @@ handle_request(ReqKey,
     {keep_state_and_data, Actions};
 
 handle_request(ReqKey,
+	       #gtp{type = bearer_resource_command,
+		    ie = #{?'Linked EPS Bearer ID' :=
+			       #v2_eps_bearer_id{eps_bearer_id = _LinkedEBI},
+			   ?'Procedure Transaction Id' :=
+			       #v2_procedure_transaction_id{pti = _PTI},
+			   ?'Traffic Aggregate Description' :=
+			       #v2_traffic_aggregation_description{value = TADBin}
+			  } = IEs} = Request,
+	       _Resent, #{session := connected} = _State,
+	       #{context := Context,
+		 tunnels := #{'Access' := AccessTunnel},
+		 aaa_session := Session} = Data) ->
+    FlowInfo = smf_tft:tft_to_flow_info(TADBin),
+    EBI = case IEs of
+	      #{{v2_eps_bearer_id, 1} := #v2_eps_bearer_id{eps_bearer_id = E}} -> E;
+	      _ -> 0
+	  end,
+    BCM = maps:get('Bearer-Control-Mode', Session,
+		   ?'DIAMETER_GX_BEARER-CONTROL-MODE_UE_ONLY'),
+    if EBI =:= 0, BCM =:= ?'DIAMETER_GX_BEARER-CONTROL-MODE_UE_NW' ->
+	    QoS = extract_flow_qos(IEs),
+	    QCI = maps:get('QoS-Class-Identifier', QoS, 9),
+	    ARP0 = maps:get('Allocation-Retention-Priority', QoS, #{}),
+	    PL = maps:get('Priority-Level', ARP0, 1),
+	    PCI0 = maps:get('Pre-emption-Capability', ARP0, 1),
+	    PVI = maps:get('Pre-emption-Vulnerability', ARP0, 0),
+	    ARP = {PL, PCI0, PVI},
+	    DefaultEBI = Context#context.default_bearer_id,
+	    Data1 = initiate_create_dedicated_bearer(
+		      QCI, ARP, QoS, FlowInfo,
+		      DefaultEBI, AccessTunnel, Data),
+	    gtp_context:request_finished(ReqKey),
+	    Actions = context_idle_action([], Context),
+	    {keep_state, Data1, Actions};
+       true ->
+	    ResponseIEs = [#v2_cause{v2_cause = request_rejected}],
+	    Response = response(bearer_resource_failure_indication,
+				AccessTunnel, ResponseIEs, Request),
+	    gtp_context:send_response(ReqKey, Request, Response),
+	    Actions = context_idle_action([], Context),
+	    {keep_state, Data, Actions}
+    end;
+
+handle_request(ReqKey,
 	       #gtp{type = delete_session_request, ie = IEs} = Request,
 	       _Resent, #{session := connected} = State,
 	       #{context := Context, tunnels := #{'Access' := AccessTunnel}} = Data0) ->
@@ -585,6 +636,21 @@ encode_bearer_level_qos(_) ->
        maximum_bit_rate_for_downlink = 0,
        guaranteed_bit_rate_for_uplink = 0,
        guaranteed_bit_rate_for_downlink = 0}.
+
+extract_flow_qos(#{?'Flow QoS' :=
+		       #v2_flow_quality_of_service{
+			  label = QCI,
+			  maximum_bit_rate_for_uplink = MBR4ul,
+			  maximum_bit_rate_for_downlink = MBR4dl,
+			  guaranteed_bit_rate_for_uplink = GBR4ul,
+			  guaranteed_bit_rate_for_downlink = GBR4dl}}) ->
+    #{'QoS-Class-Identifier' => QCI,
+      'Max-Requested-Bandwidth-UL' => MBR4ul * 1000,
+      'Max-Requested-Bandwidth-DL' => MBR4dl * 1000,
+      'Guaranteed-Bitrate-UL' => GBR4ul * 1000,
+      'Guaranteed-Bitrate-DL' => GBR4dl * 1000};
+extract_flow_qos(_) ->
+    #{}.
 
 update_bearer_field(
   _, #v2_fully_qualified_tunnel_endpoint_identifier{

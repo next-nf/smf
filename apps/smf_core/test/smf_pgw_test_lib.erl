@@ -15,6 +15,7 @@
 	 delete_session/1, delete_session/2,
 	 modify_bearer/2,
 	 modify_bearer_command/2,
+	 bearer_resource_command/2,
 	 change_notification/2,
 	 suspend_notification/2,
 	 resume_notification/2]).
@@ -65,6 +66,9 @@ modify_bearer(SubType, GtpC) ->
 
 modify_bearer_command(SubType, GtpC) ->
     execute_command(modify_bearer_command, SubType, GtpC).
+
+bearer_resource_command(SubType, GtpC) ->
+    execute_command(bearer_resource_command, SubType, GtpC).
 
 change_notification(SubType, GtpC) ->
     execute_request(change_notification_request, SubType, GtpC).
@@ -526,6 +530,31 @@ make_request(modify_bearer_command, SubType,
 	   fq_teid(0, ?'S5/S8-C SGW',LocalCntlTEI, LocalIP)
 	  ],
     #gtp{version = v2, type = modify_bearer_command, tei = RemoteCntlTEI,
+	 seq_no = SeqNo bor 16#800000, ie = IEs};
+
+make_request(bearer_resource_command, simple,
+	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
+		   local_ip = LocalIP,
+		   local_control_tei = LocalCntlTEI,
+		   remote_control_tei = RemoteCntlTEI}) ->
+    FlowInfo = [#{'Flow-Description' => [<<"permit out 6 from 10.0.0.1 to assigned 5060">>],
+		  'Flow-Direction' => [2]}],
+    TADBin = smf_tft:flow_info_to_tft(FlowInfo),
+    IEs = [#v2_recovery{restart_counter = RCnt},
+	   %% Linked EPS Bearer ID (instance 0)
+	   #v2_eps_bearer_id{instance = 0, eps_bearer_id = 5},
+	   #v2_procedure_transaction_id{pti = 1},
+	   #v2_traffic_aggregation_description{value = TADBin},
+	   %% EPS Bearer ID for new bearer (instance 1, 0 = new)
+	   #v2_eps_bearer_id{instance = 1, eps_bearer_id = 0},
+	   #v2_flow_quality_of_service{label = 1,
+				       maximum_bit_rate_for_uplink = 1000,
+				       maximum_bit_rate_for_downlink = 1000,
+				       guaranteed_bit_rate_for_uplink = 500,
+				       guaranteed_bit_rate_for_downlink = 500},
+	   fq_teid(0, ?'S5/S8-C SGW', LocalCntlTEI, LocalIP)
+	  ],
+    #gtp{version = v2, type = bearer_resource_command, tei = RemoteCntlTEI,
 	 seq_no = SeqNo bor 16#800000, ie = IEs};
 
 make_request(change_notification_request, simple,
