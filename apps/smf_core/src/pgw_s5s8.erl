@@ -458,19 +458,18 @@ handle_response({create_bearer, PgwFTEID},
 	{{QCI, ARP, AccessBearer0}, Pending} ->
 	    #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} = BearerCtxGroup,
 	    AccessBearer = update_bearer_from_response(BearerCtxGroup, AccessBearer0),
-	    %% PGW assigns Bearer-Identifier equal to the EBI (as a binary octet)
 	    PgwBI = <<EBI:8>>,
 	    BearerMap = BearerMap0#{{'Access', EBI} => AccessBearer,
 				    {qci_arp, QCI, ARP} => EBI,
 				    {bearer_id, PgwBI} => EBI},
-	    case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
-		{ok, {PCtx, _, _}} ->
-		    {keep_state, Data0#{bearers := BearerMap, pfcp := PCtx,
-					pending_bearers := Pending}};
-		{error, _} ->
-		    {keep_state, Data0#{bearers := BearerMap,
-					pending_bearers := Pending}}
-	    end;
+	    PCtx = case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
+		       {ok, {PCtx1, _, _}} -> PCtx1;
+		       {error, _}         -> PCtx0
+		   end,
+	    Data1 = Data0#{bearers := BearerMap, pfcp := PCtx,
+			   pending_bearers := Pending},
+	    Data = report_bearer_establishment(PgwBI, QCI, ARP, Data1),
+	    {keep_state, Data};
 	error ->
 	    keep_state_and_data
     end;
@@ -672,6 +671,27 @@ initiate_create_dedicated_bearer(QCI, ARP, QoS, FlowInfo, DefaultEBI, AccessTunn
 initiate_delete_dedicated_bearer(EBI, DefaultEBI, AccessTunnel, Data) ->
     delete_dedicated_bearer(EBI, DefaultEBI, AccessTunnel),
     Data.
+
+%% Report new dedicated bearer to PCRF via Gx CCR-Update
+%% with Bearer-Operation = ESTABLISHMENT and the PGW-assigned Bearer-Identifier.
+report_bearer_establishment(PgwBI, QCI, {PL, PCI, PVI},
+			    #{pcf := PCF0, aaa_session := S0} = Data) ->
+    ARP = #{'Priority-Level' => PL,
+	    'Pre-emption-Capability' => PCI,
+	    'Pre-emption-Vulnerability' => PVI},
+    SOpts = #{'Bearer-Identifier' => PgwBI,
+	      'Bearer-Operation' =>
+		  ?'DIAMETER_GX_BEARER-OPERATION_ESTABLISHMENT',
+	      'QoS-Information' =>
+		  #{'QoS-Class-Identifier' => QCI,
+		    'Allocation-Retention-Priority' => ARP}},
+    Now = erlang:monotonic_time(),
+    case smf_aaa_pcf:ccr_update(PCF0, S0, SOpts, #{now => Now, async => true}) of
+	{ok, PCF1, S1, _Events} ->
+	    Data#{pcf := PCF1, aaa_session := S1};
+	_ ->
+	    Data
+    end.
 
 terminate(_Reason, _State, #{pfcp := PCtx, context := Context}) ->
     smf_pfcp_context:delete_session(terminate, PCtx),
