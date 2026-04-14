@@ -282,6 +282,62 @@ handle_request(ReqKey,
     gtp_context:send_response(ReqKey, Request, Response),
     {next_state, State#{session := shutdown}, Data};
 
+%% Secondary PDP Context — has Linked NSAPI
+handle_request(ReqKey,
+	       #gtp{type = create_pdp_context_request,
+		    ie = #{?'NSAPI' := #nsapi{nsapi = NSAPI},
+			   {nsapi, 1} := #nsapi{},
+			   ?'Quality of Service Profile' := ReqQoSProfile
+			  } = _IEs} = Request,
+	       _Resent, #{session := connected} = _State,
+	       #{context := Context,
+		 tunnels := #{'Access' := AccessTunnel0} = Tunnels,
+		 bearers := BearerMap0, pfcp := PCtx0, pcc := PCC,
+		 aaa_session := _Session} = Data) ->
+    {AccessTunnel, AccessBearer0} =
+	case update_tunnel_from_gtp_req(
+	       Request, AccessTunnel0#tunnel{version = v1}, #bearer{interface = 'Access'}) of
+	    {ok, Result1} -> Result1;
+	    {error, Err1} -> throw(Err1#ctx_err{context = Context, tunnel = AccessTunnel0})
+	end,
+
+    case smf_tei_mngr:alloc_tei(PCtx0) of
+	{ok, DataTEI} ->
+	    DefaultBearer = smf_gsn_lib:get_access_default_bearer(BearerMap0),
+	    #bearer{vrf = VRF, local = #fq_teid{ip = LocalIP}} = DefaultBearer,
+	    AccessBearer = AccessBearer0#bearer{
+			     vrf = VRF,
+			     local = #fq_teid{ip = LocalIP, teid = DataTEI}},
+	    BearerMap1 = BearerMap0#{{'Access', NSAPI} => AccessBearer},
+
+	    case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap1, PCtx0) of
+		{ok, {PCtx, _, _}} ->
+		    ResponseIEs0 = [#cause{value = request_accepted},
+				    context_charging_id(Context),
+				    ReqQoSProfile],
+		    ResponseIEs1 = tunnel_elements(AccessTunnel, ResponseIEs0),
+		    ResponseIEs = bearer_elements_for_secondary(AccessBearer, ResponseIEs1),
+		    Response = response(create_pdp_context_response, AccessTunnel,
+					ResponseIEs, Request),
+		    gtp_context:send_response(ReqKey, Request, Response),
+		    Actions = context_idle_action([], Context),
+		    {keep_state,
+		     Data#{bearers := BearerMap1, pfcp := PCtx,
+			   tunnels := Tunnels#{'Access' => AccessTunnel}},
+		     Actions};
+		{error, _} ->
+		    Response = response(create_pdp_context_response, AccessTunnel0,
+					system_failure),
+		    gtp_context:send_response(ReqKey, Request, Response),
+		    keep_state_and_data
+	    end;
+	_ ->
+	    Response = response(create_pdp_context_response, AccessTunnel0,
+				system_failure),
+	    gtp_context:send_response(ReqKey, Request, Response),
+	    keep_state_and_data
+    end;
+
 handle_request(ReqKey, _Msg, _Resent, _State, _Data) ->
     gtp_context:request_finished(ReqKey),
     keep_state_and_data.
@@ -303,6 +359,24 @@ handle_response(alive_check,
 handle_response(alive_check, _, #gtp{type = update_pdp_context_request}, State, Data) ->
     %% cause /= Request Accepted or timeout
     delete_context(undefined, cp_inactivity_timeout, State, Data);
+
+handle_response({initiate_pdp_ctx, _},
+		#gtp{type = initiate_pdp_context_activation_response,
+		     ie = #{?'Cause' := #cause{value = request_accepted}}},
+		_Request, _State, _Data) ->
+    keep_state_and_data;
+
+handle_response({initiate_pdp_ctx, _},
+		#gtp{type = initiate_pdp_context_activation_response},
+		_Request, _State, _Data) ->
+    ?LOG(warning, "Initiate PDP Context Activation rejected by SGSN"),
+    keep_state_and_data;
+
+handle_response({initiate_pdp_ctx, _}, timeout,
+		#gtp{type = initiate_pdp_context_activation_request},
+		_State, _Data) ->
+    ?LOG(error, "Initiate PDP Context Activation timed out"),
+    keep_state_and_data;
 
 handle_response({From, TermCause}, timeout, #gtp{type = delete_pdp_context_request},
 		State, Data0) ->
@@ -404,8 +478,23 @@ encode_eua(Org, Number, IPv4, IPv6) ->
 close_context(_Side, Reason, _Notify, _State, Data) ->
     smf_gtp_gsn_lib:close_context(?API, Reason, Data).
 
-handle_dedicated_bearer_changes(_OldPCC, _NewPCC, Data) ->
-    Data.
+handle_dedicated_bearer_changes(OldPCC, NewPCC,
+				#{bearers := BearerMap,
+				  tunnels := #{'Access' := AccessTunnel},
+				  context := #context{default_bearer_id = DefaultNSAPI},
+				  aaa_session := Session} = Data) ->
+    BCM = maps:get('Bearer-Control-Mode', Session,
+		   ?'DIAMETER_GX_BEARER-CONTROL-MODE_UE_ONLY'),
+    NewBearers = smf_gsn_lib:detect_new_bearers(OldPCC, NewPCC, BearerMap, BCM),
+    lists:foldl(
+      fun({_QCI, _ARP, _QoS, _FlowInfo}, D) ->
+	  RequestIEs = [#nsapi{nsapi = DefaultNSAPI},
+			#quality_of_service_profile{}],
+	  send_request(AccessTunnel, ?T3, ?N3,
+		       initiate_pdp_context_activation_request,
+		       RequestIEs, {initiate_pdp_ctx, DefaultNSAPI}),
+	  D
+      end, Data, NewBearers).
 
 map_attr('APN', #{?'Access Point Name' := #access_point_name{apn = APN}}) ->
     iolist_to_binary(lists:join($., APN));
@@ -956,6 +1045,11 @@ bearer_elements({'Access', _EBI}, #bearer{local = #fq_teid{ip = IP, teid = TEI}}
     | IEs];
 bearer_elements(_, _, IEs) ->
     IEs.
+
+bearer_elements_for_secondary(#bearer{local = #fq_teid{ip = IP, teid = TEI}}, IEs) ->
+    [#tunnel_endpoint_identifier_data_i{tei = TEI},
+     #gsn_address{instance = 1, address = smf_inet:ip2bin(IP)}
+    | IEs].
 
 context_charging_id(#context{charging_identifier = ChargingId}) ->
     #charging_id{id = <<ChargingId:32>>}.

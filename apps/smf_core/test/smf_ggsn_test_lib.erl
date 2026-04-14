@@ -11,6 +11,7 @@
 
 -export([make_request/3, make_response/3, validate_response/4,
 	 create_pdp_context/1, create_pdp_context/2,
+	 create_secondary_pdp_context/3,
 	 update_pdp_context/2,
 	 ms_info_change_notification/2,
 	 delete_pdp_context/1, delete_pdp_context/2]).
@@ -39,6 +40,10 @@ create_pdp_context(SubType, #gtpc{} = GtpC0) ->
 
 create_pdp_context(SubType, Config) ->
     execute_request(create_pdp_context_request, SubType, gtp_context(Config)).
+
+create_secondary_pdp_context(LinkedNSAPI, NewNSAPI, #gtpc{} = GtpC0) ->
+    GtpC = gtp_context_new_teids(GtpC0),
+    execute_request(create_pdp_context_request, {secondary, LinkedNSAPI, NewNSAPI}, GtpC).
 
 update_pdp_context(SubType, GtpC0)
   when SubType == tei_update ->
@@ -235,6 +240,27 @@ make_request(create_pdp_context_request, missing_ie,
     IEs = [#recovery{restart_counter = RCnt}],
     #gtp{version = v1, type = create_pdp_context_request, tei = 0,
 	 seq_no = SeqNo, ie = IEs};
+
+make_request(create_pdp_context_request, {secondary, LinkedNSAPI, NewNSAPI},
+	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
+		   local_ip = IP,
+		   local_control_tei = LocalCntlTEI,
+		   local_data_tei = LocalDataTEI,
+		   remote_control_tei = RemoteCntlTEI,
+		   rat_type = RAT}) ->
+    IEs = [#recovery{restart_counter = RCnt},
+	   #gsn_address{instance = 0, address = smf_inet:ip2bin(IP)},
+	   #gsn_address{instance = 1, address = smf_inet:ip2bin(IP)},
+	   #nsapi{instance = 0, nsapi = NewNSAPI},
+	   #nsapi{instance = 1, nsapi = LinkedNSAPI},
+	   #quality_of_service_profile{
+	      priority = 2,
+	      data = <<19,146,31,113,150,254,254,116,250,255,255,0,142,0>>},
+	   #rat_type{rat_type = RAT},
+	   #tunnel_endpoint_identifier_control_plane{tei = LocalCntlTEI},
+	   #tunnel_endpoint_identifier_data_i{tei = LocalDataTEI}],
+    #gtp{version = v1, type = create_pdp_context_request,
+	 tei = RemoteCntlTEI, seq_no = SeqNo, ie = IEs};
 
 make_request(create_pdp_context_request, SubType,
 	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
@@ -439,6 +465,34 @@ validate_response(create_pdp_context_request, aaa_reject, Response, GtpC) ->
 		ie = #{{cause,0} := #cause{value = user_authentication_failed}}},
 	   Response),
     GtpC;
+
+validate_response(create_pdp_context_request, {secondary, _LinkedNSAPI, _NewNSAPI},
+		  Response, GtpC) ->
+    validate_seq_no(Response, GtpC),
+    validate_teid(Response, GtpC),
+    ?match(#gtp{type = create_pdp_context_response,
+		ie = #{{cause,0} := #cause{value = request_accepted},
+		       {charging_id,0} := #charging_id{},
+		       {gsn_address,0} := #gsn_address{},
+		       {gsn_address,1} := #gsn_address{},
+		       {quality_of_service_profile,0} :=
+			   #quality_of_service_profile{},
+		       {tunnel_endpoint_identifier_control_plane,0} :=
+			   #tunnel_endpoint_identifier_control_plane{},
+		       {tunnel_endpoint_identifier_data_i,0} :=
+			   #tunnel_endpoint_identifier_data_i{}
+		      }}, Response),
+    #gtp{ie = #{{tunnel_endpoint_identifier_control_plane,0} :=
+		    #tunnel_endpoint_identifier_control_plane{
+		       tei = RemoteCntlTEI},
+		{tunnel_endpoint_identifier_data_i,0} :=
+		    #tunnel_endpoint_identifier_data_i{
+		      tei = RemoteDataTEI}
+	       }} = Response,
+    GtpC#gtpc{
+	  remote_control_tei = RemoteCntlTEI,
+	  remote_data_tei = RemoteDataTEI
+     };
 
 validate_response(create_pdp_context_request = Type, SubType, Response, GtpC)
   when SubType =:= duplicate_teids;

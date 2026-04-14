@@ -514,7 +514,8 @@ common() ->
      gtp_idle_timeout_gtp_session_loss,
      gtp_idle_timeout_pfcp_session_loss,
      up_inactivity_timer,
-     pfcp_sx_association_metric].
+     pfcp_sx_association_metric,
+     secondary_pdp_context_create].
 
 groups() ->
     [{common, [], common()},
@@ -2775,6 +2776,26 @@ pfcp_sx_association_metric(_Config) ->
     Metrics = prometheus_text_format:format(smf_core),
     ?match({match, _}, re:run(Metrics, "pfcp_sx_association_total")),
     ?match({match, _}, re:run(Metrics, "pfcp_sx_context_total")).
+
+%%--------------------------------------------------------------------
+secondary_pdp_context_create() ->
+    [{doc, "UE-initiated secondary PDP context creation"}].
+secondary_pdp_context_create(Config) ->
+    {GtpC1, _, _} = create_pdp_context(Config),
+
+    %% Primary NSAPI is 5; create secondary on NSAPI 6 linked to NSAPI 5
+    {GtpC2, _, _} = create_secondary_pdp_context(5, 6, GtpC1),
+
+    CtxKey = #context_key{socket = 'irx', id = {imsi, ?'IMSI', 5}},
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+
+    delete_pdp_context(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
 
 %%%===================================================================
 %%% Internal functions
