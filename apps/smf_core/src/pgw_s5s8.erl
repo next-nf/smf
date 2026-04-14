@@ -245,16 +245,22 @@ handle_request(ReqKey,
 	      tunnels => Tunnels#{'Access' => AccessTunnel}, bearers => BearerMap,
 	      aaa_session => S1, pcf => PCF1, charging => C1, aaa_auth => A1},
 
-    ResponseIEs = create_session_response(Cause, SessionOpts, IEs, EBI, AccessTunnel, BearerMap, Context),
+    %% Process additional bearer contexts (instance > 0) for handover scenarios
+    FinalData1 = process_additional_bearer_contexts(IEs, AccessTunnel, FinalData),
+
+    ResponseIEs = create_session_response(Cause, SessionOpts, IEs, EBI,
+					  AccessTunnel,
+					  maps:get(bearers, FinalData1),
+					  Context),
     Response = response(create_session_response, AccessTunnel, ResponseIEs, Request),
     gtp_context:send_response(ReqKey, Request, Response),
 
     case Verdict of
 	ok ->
 	    Actions = context_idle_action([], Context),
-	    {next_state, State#{session := connected}, FinalData, Actions};
+	    {next_state, State#{session := connected}, FinalData1, Actions};
 	_ ->
-	    {next_state, State#{session := shutdown}, FinalData}
+	    {next_state, State#{session := shutdown}, FinalData1}
     end;
 
 %% TODO:
@@ -666,6 +672,55 @@ update_bearer_field(_, _, Bearer) ->
 
 update_bearer_from_response(BearerCtxGroup, Bearer0) ->
     maps:fold(fun update_bearer_field/3, Bearer0, BearerCtxGroup).
+
+%% Process additional bearer contexts in CSR (instance > 0).
+%% These appear during handover from GTPv1 with multiple PDP contexts.
+process_additional_bearer_contexts(IEs, AccessTunnel, Data) ->
+    AdditionalBearers = maps:fold(
+        fun({v2_bearer_context, Instance},
+            #v2_bearer_context{group = Group}, Acc) when Instance > 0 ->
+                [{Instance, Group} | Acc];
+           (_, _, Acc) ->
+                Acc
+        end, [], IEs),
+    lists:foldl(
+      fun({_Instance, Group}, D) ->
+	      install_additional_bearer(Group, AccessTunnel, D)
+      end, Data, AdditionalBearers).
+
+install_additional_bearer(BearerGroup, _AccessTunnel,
+                          #{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC} = Data) ->
+    case BearerGroup of
+        #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} ->
+            DefaultBearer = smf_gsn_lib:get_access_default_bearer(BearerMap0),
+            #bearer{vrf = VRF, local = #fq_teid{ip = PgwUIP}} = DefaultBearer,
+            case smf_tei_mngr:alloc_tei(PCtx0) of
+                {ok, DataTEI} ->
+                    AccessBearer0 = #bearer{interface = 'Access', vrf = VRF,
+                                            local = #fq_teid{ip = PgwUIP, teid = DataTEI}},
+                    AccessBearer = update_bearer_from_response(BearerGroup, AccessBearer0),
+                    BearerMap1 = BearerMap0#{{'Access', EBI} => AccessBearer},
+                    BearerMap = case BearerGroup of
+                        #{?'Bearer Level QoS' :=
+                              #v2_bearer_level_quality_of_service{
+                                 pci = PCI, pl = PL, pvi = PVI, label = QCI}} ->
+                            ARP = {PL, PCI, PVI},
+                            BearerMap1#{{qci_arp, QCI, ARP} => EBI};
+                        _ ->
+                            BearerMap1
+                    end,
+                    case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
+                        {ok, {PCtx, _, _}} ->
+                            Data#{bearers := BearerMap, pfcp := PCtx};
+                        {error, _} ->
+                            Data#{bearers := BearerMap}
+                    end;
+                _ ->
+                    Data
+            end;
+        _ ->
+            Data
+    end.
 
 create_dedicated_bearer(LinkedEBI, QoS, TFTBin, AccessBearer, Tunnel) ->
     BearerCtx =
@@ -1300,19 +1355,26 @@ bearer_qos_profile(#{'QoS-Information' :=
 bearer_qos_profile(_SessionOpts, IE) ->
     IE.
 
-bearer_context(SessionOpts, EBI, BearerMap, Context, IEs) ->
-    maps:fold(bearer_context(SessionOpts, EBI, _, _, Context, _), IEs, BearerMap).
-
-bearer_context(SessionOpts, EBI, {'Access', _}, #bearer{} = Bearer, Context, IEs) ->
-    BearerCtx0 =
-	[#v2_cause{v2_cause = request_accepted},
-	 context_charging_id(Context),
-	 EBI,
-	 s5s8_pgw_gtp_u_tei(Bearer)],
-     BearerCtx = bearer_qos_profile(SessionOpts, BearerCtx0),
-   [#v2_bearer_context{group = BearerCtx} | IEs];
-bearer_context(_, _, _, _, _, IEs) ->
-    IEs.
+bearer_context(SessionOpts, _DefaultEBI, BearerMap, Context, IEs) ->
+    AccessBearers =
+        lists:sort(maps:fold(fun({'Access', N}, #bearer{} = Bearer, Acc) ->
+                                     [{N, Bearer} | Acc];
+                                (_, _, Acc) ->
+                                     Acc
+                             end, [], BearerMap)),
+    {BearerIEs, _} =
+        lists:foldl(fun({N, Bearer}, {Acc, Inst}) ->
+                            BearerCtx0 =
+                                [#v2_cause{v2_cause = request_accepted},
+                                 context_charging_id(Context),
+                                 #v2_eps_bearer_id{eps_bearer_id = N},
+                                 s5s8_pgw_gtp_u_tei(Bearer)],
+                            BearerCtx = bearer_qos_profile(SessionOpts, BearerCtx0),
+                            {[#v2_bearer_context{instance = Inst,
+                                                 group = BearerCtx} | Acc],
+                             Inst + 1}
+                    end, {IEs, 0}, AccessBearers),
+    BearerIEs.
 
 fq_teid(Instance, Type, TEI, {_,_,_,_} = IP) ->
     #v2_fully_qualified_tunnel_endpoint_identifier{

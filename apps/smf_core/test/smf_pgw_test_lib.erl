@@ -401,6 +401,56 @@ make_request(create_session_request, missing_ie,
     #gtp{version = v2, type = create_session_request, tei = 0,
 	 seq_no = SeqNo, ie = IEs};
 
+make_request(create_session_request, multi_bearer,
+	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
+		   local_ip = LocalIP,
+		   local_control_tei = LocalCntlTEI,
+		   local_data_tei = LocalDataTEI,
+		   rat_type = RAT}) ->
+    IEs0 =
+	[#v2_recovery{restart_counter = RCnt},
+	 #v2_access_point_name{apn = apn(simple)},
+	 #v2_aggregate_maximum_bit_rate{uplink = 48128, downlink = 1704125},
+	 #v2_apn_restriction{restriction_type_value = 0},
+	 #v2_bearer_context{
+	    instance = 0,
+	    group = [#v2_bearer_level_quality_of_service{
+			pci = 1, pl = 10, pvi = 0, label = 9,
+			maximum_bit_rate_for_uplink      = 0,
+			maximum_bit_rate_for_downlink    = 0,
+			guaranteed_bit_rate_for_uplink   = 0,
+			guaranteed_bit_rate_for_downlink = 0},
+		     #v2_eps_bearer_id{eps_bearer_id = 5},
+		     fq_teid(2, ?'S5/S8-U SGW', LocalDataTEI, LocalIP)
+		    ]},
+	 #v2_bearer_context{
+	    instance = 1,
+	    group = [#v2_bearer_level_quality_of_service{
+			pci = 1, pl = 2, pvi = 0, label = 1,
+			maximum_bit_rate_for_uplink      = 1000,
+			maximum_bit_rate_for_downlink    = 2000,
+			guaranteed_bit_rate_for_uplink   = 500,
+			guaranteed_bit_rate_for_downlink = 1000},
+		     #v2_eps_bearer_id{eps_bearer_id = 6},
+		     fq_teid(2, ?'S5/S8-U SGW', LocalDataTEI + 1, LocalIP)
+		    ]},
+	 fq_teid(0, ?'S5/S8-C SGW', LocalCntlTEI, LocalIP),
+	 #v2_indication{flags = []},
+	 #v2_international_mobile_subscriber_identity{
+	    imsi = imsi(simple, LocalCntlTEI)},
+	 #v2_mobile_equipment_identity{mei = imei(simple, LocalCntlTEI)},
+	 #v2_msisdn{msisdn = ?'MSISDN'},
+	 #v2_rat_type{rat_type = RAT},
+	 #v2_selection_mode{mode = 0},
+	 #v2_serving_network{plmn_id = smf_test_lib:plmn(1,1)},
+	 #v2_ue_time_zone{timezone = 10, dst = 0},
+	 #v2_user_location_information{tai = smf_test_lib:tai(1, 1, 55001),
+				       ecgi = smf_test_lib:ecgi(1, 1, 138873180)}],
+    IEs1 = make_pdn_type(simple, IEs0),
+    IEs = make_indication(simple, IEs1),
+    #gtp{version = v2, type = create_session_request, tei = 0,
+	 seq_no = SeqNo, ie = IEs};
+
 make_request(create_session_request, SubType,
 	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
 		   local_ip = LocalIP,
@@ -959,6 +1009,36 @@ validate_response(create_session_request, static_host_ipv6, Response, GtpC0) ->
     ?equal(128, PrefixLen),
     ?equal(?IPv6StaticHostIP, smf_inet:bin2ip(IPv6)),
     GtpC;
+
+validate_response(create_session_request, multi_bearer, Response,
+		  #gtpc{local_control_tei = LocalCntlTEI} = GtpC0) ->
+    validate_seq_no(Response, GtpC0),
+    validate_teid(Response, GtpC0),
+    ?match(
+       #gtp{type = create_session_response,
+	    tei = LocalCntlTEI,
+	    ie = #{{v2_cause,0} := #v2_cause{v2_cause = request_accepted},
+		   {v2_bearer_context,0} :=
+		       #v2_bearer_context{
+			  group = #{
+			    {v2_cause,0} := #v2_cause{v2_cause = request_accepted},
+			    {v2_eps_bearer_id,0} := #v2_eps_bearer_id{eps_bearer_id = 5},
+			    {v2_fully_qualified_tunnel_endpoint_identifier,2} :=
+				#v2_fully_qualified_tunnel_endpoint_identifier{
+				   interface_type = ?'S5/S8-U PGW'}}},
+		   {v2_bearer_context,1} :=
+		       #v2_bearer_context{
+			  group = #{
+			    {v2_cause,0} := #v2_cause{v2_cause = request_accepted},
+			    {v2_eps_bearer_id,0} := #v2_eps_bearer_id{eps_bearer_id = 6},
+			    {v2_fully_qualified_tunnel_endpoint_identifier,2} :=
+				#v2_fully_qualified_tunnel_endpoint_identifier{
+				   interface_type = ?'S5/S8-U PGW'}}}}},
+       Response),
+    #gtp{ie = #{{v2_fully_qualified_tunnel_endpoint_identifier,1} :=
+		    #v2_fully_qualified_tunnel_endpoint_identifier{
+		       key = RemoteCntlTEI}}} = Response,
+    GtpC0#gtpc{remote_control_tei = RemoteCntlTEI};
 
 validate_response(create_session_request, {ipv4, _, v6only}, Response, GtpC) ->
     validate_seq_no(Response, GtpC),

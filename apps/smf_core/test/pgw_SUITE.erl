@@ -668,6 +668,7 @@ common() ->
     [invalid_gtp_pdu,
      invalid_gtp_version,
      apn_lookup,
+     create_session_multi_bearer,
      create_session_request_missing_sender_teid,
      create_session_request_missing_ie,
      create_session_request_aaa_reject,
@@ -1009,6 +1010,10 @@ init_per_testcase(gx_invalid_charging_rule, Config) ->
 init_per_testcase(tdf_app_id, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-TDF-App'}]),
+    Config;
+init_per_testcase(create_session_multi_bearer, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(gx_rar_dedicated_bearer_create, Config) ->
     setup_per_testcase(Config),
@@ -1742,6 +1747,35 @@ simple_session_request(Config) ->
 	  %%     #reporting_triggers{periodic_reporting=1}
 	 }
        ], URR),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+create_session_multi_bearer() ->
+    [{doc, "Check that a CSR with multiple bearer contexts creates all bearers"}].
+create_session_multi_bearer(Config) ->
+    {GtpC, _, Response} = create_session(multi_bearer, Config),
+
+    %% response must contain bearer contexts for both EBI 5 and EBI 6
+    ?match(
+       #gtp{type = create_session_response,
+	    ie = #{{v2_bearer_context, 0} :=
+		       #v2_bearer_context{
+			  group = #{{v2_eps_bearer_id, 0} :=
+					#v2_eps_bearer_id{eps_bearer_id = 5}}},
+		   {v2_bearer_context, 1} :=
+		       #v2_bearer_context{
+			  group = #{{v2_eps_bearer_id, 0} :=
+					#v2_eps_bearer_id{eps_bearer_id = 6}}}}},
+       Response),
+
+    delete_session(GtpC),
+
+    ?equal([], outstanding_requests()),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4contexts(?TIMEOUT),
 
     meck_validate(Config),
     ok.
