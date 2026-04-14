@@ -11,6 +11,7 @@
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("smf_aaa/include/diameter_3gpp_ts32_299.hrl").
+-include_lib("smf_aaa/include/diameter_3gpp_ts29_212.hrl").
 -include_lib("smf_aaa/include/smf_aaa_3gpp.hrl").
 -include_lib("smf_aaa/include/smf_aaa_session.hrl").
 -include_lib("common_test/include/ct.hrl").
@@ -5608,6 +5609,25 @@ gx_rar_dedicated_bearer_create(Config) ->
     #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
     ?match(#{{qci_arp, 1, {2, 1, 0}} := DedEBI}, BearerMap),
     ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap),
+
+    %% Verify that a Gx CCR-Update was sent to report the new bearer
+    %% with Bearer-Operation = ESTABLISHMENT and Bearer-Identifier = <<EBI>>
+    BearerCCRU =
+	lists:filter(
+	  fun({_, {smf_aaa_pcf, ccr_update,
+		   [_, _, SOpts, _]}, _}) ->
+		  case SOpts of
+		      #{'Bearer-Operation' :=
+			    ?'DIAMETER_GX_BEARER-OPERATION_ESTABLISHMENT',
+			'Bearer-Identifier' := <<DedEBI:8>>} ->
+			  true;
+		      _ ->
+			  false
+		  end;
+	     (_) ->
+		  false
+	  end, meck:history(smf_aaa_pcf)),
+    ?match([_], BearerCCRU),
 
     delete_session(GtpC),
 
