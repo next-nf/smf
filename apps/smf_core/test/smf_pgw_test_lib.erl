@@ -434,6 +434,7 @@ make_request(create_session_request, multi_bearer,
 		     #v2_eps_bearer_id{eps_bearer_id = 6},
 		     fq_teid(2, ?'S5/S8-U SGW', LocalDataTEI + 1, LocalIP)
 		    ]},
+	 #v2_eps_bearer_id{eps_bearer_id = 5},
 	 fq_teid(0, ?'S5/S8-C SGW', LocalCntlTEI, LocalIP),
 	 #v2_indication{flags = []},
 	 #v2_international_mobile_subscriber_identity{

@@ -192,7 +192,7 @@ handle_request(ReqKey,
 		 tunnels := #{'Access' := AccessTunnel0} = Tunnels,
 		 aaa_session := S0, pcf := PCF0, charging := C0, aaa_auth := A0,
 		 pcc := PCC0} = Data) ->
-    EBI = get_default_bearer_ebi(IEs),
+    #v2_bearer_context{group = DefaultBearerGroup} = get_default_bearer_ctx(IEs),
     PeerUpNode =
 	case IEs of
 	    #{?'SGW-U node name' := #v2_fully_qualified_domain_name{fqdn = SGWuFQDN}} ->
@@ -210,7 +210,8 @@ handle_request(ReqKey,
     Context1 = update_context_from_gtp_req(Request, Context0),
 
     {AccessTunnel1, AccessBearer1} =
-	case update_tunnel_from_gtp_req(Request, AccessTunnel0, #bearer{interface = 'Access'}) of
+	case update_tunnel_from_gtp_req(Request, DefaultBearerGroup,
+					AccessTunnel0, #bearer{interface = 'Access'}) of
 	    {ok, Result1} -> Result1;
 	    {error, Err1} -> throw(Err1#ctx_err{context = Context1, tunnel = AccessTunnel0})
 	end,
@@ -247,7 +248,7 @@ handle_request(ReqKey,
     %% Process additional bearer contexts (instance > 0) for handover scenarios
     FinalData1 = process_additional_bearer_contexts(IEs, AccessTunnel, FinalData),
 
-    ResponseIEs = create_session_response(Cause, SessionOpts, IEs, EBI,
+    ResponseIEs = create_session_response(Cause, SessionOpts, IEs,
 					  AccessTunnel,
 					  maps:get(bearers, FinalData1),
 					  Context),
@@ -672,19 +673,24 @@ update_bearer_field(_, _, Bearer) ->
 update_bearer_from_response(BearerCtxGroup, Bearer0) ->
     maps:fold(fun update_bearer_field/3, Bearer0, BearerCtxGroup).
 
-%% Extract the default bearer EBI from a CSR IE map.
-%% Bearer Contexts to be created may be a single record or a list (put_ie stores
-%% multiple same-instance IEs as a list, newest first).
-get_default_bearer_ebi(#{?'Bearer Contexts to be created' :=
-                             #v2_bearer_context{group = #{?'EPS Bearer ID' :=
-                                                              #v2_eps_bearer_id{eps_bearer_id = EBI}}}}) ->
-    EBI;
-get_default_bearer_ebi(#{?'Bearer Contexts to be created' := BearerCtxs})
+%% Get the default bearer context from IEs.
+%% Single bearer: the record itself is the default.
+%% Multiple bearers (list): the top-level EBI IE identifies the default.
+get_default_bearer_ctx(#{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = DefaultEBI},
+			 ?'Bearer Contexts to be created' := BearerCtxs})
   when is_list(BearerCtxs) ->
-    %% put_ie stores in reverse wire order; the default bearer (first in wire) is last in list
-    #v2_bearer_context{group = #{?'EPS Bearer ID' :=
-                                     #v2_eps_bearer_id{eps_bearer_id = EBI}}} = lists:last(BearerCtxs),
-    EBI.
+    find_bearer_by_ebi(DefaultEBI, BearerCtxs);
+get_default_bearer_ctx(#{?'Bearer Contexts to be created' := #v2_bearer_context{} = Ctx}) ->
+    Ctx;
+get_default_bearer_ctx(_) ->
+    undefined.
+
+find_bearer_by_ebi(EBI, [#v2_bearer_context{
+			     group = #{?'EPS Bearer ID' :=
+					   #v2_eps_bearer_id{eps_bearer_id = EBI}}} = Ctx | _]) ->
+    Ctx;
+find_bearer_by_ebi(EBI, [_ | Rest]) ->
+    find_bearer_by_ebi(EBI, Rest).
 
 %% Process additional bearer contexts in CSR.
 %% In GTPv2, multiple bearers all use the same instance (0); put_ie stores them as a list.
@@ -1022,14 +1028,15 @@ copy_to_session(_, #v2_pdn_address_allocation{type = non_ip}, _AAAopts, Session)
 %%   (as the PAA IE contains exactly the same field). The receiver may ignore it.
 %%
 
+copy_to_session(?'EPS Bearer ID', #v2_eps_bearer_id{eps_bearer_id = EBI},
+		_AAAopts, Session) ->
+    Session#{'3GPP-NSAPI' => EBI};
 copy_to_session(?'Bearer Contexts to be created',
 		#v2_bearer_context{
 		   group =
 		       #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}}},
 		_AAAopts, Session) ->
     Session#{'3GPP-NSAPI' => EBI};
-copy_to_session(?'Bearer Contexts to be created', [_ | _] = BearerCtxs, AAAopts, Session) ->
-    copy_to_session(?'Bearer Contexts to be created', lists:last(BearerCtxs), AAAopts, Session);
 copy_to_session(_, #v2_selection_mode{mode = Mode}, _AAAopts, Session) ->
     Session#{'3GPP-Selection-Mode' => Mode};
 copy_to_session(_, #v2_charging_characteristics{value = Value}, _AAAopts, Session) ->
@@ -1059,43 +1066,44 @@ copy_to_session(_, #v2_ue_time_zone{timezone = TZ, dst = DST}, _AAAopts, Session
 copy_to_session(_, _, _AAAopts, Session) ->
     Session.
 
-copy_qos_to_session(#{?'Bearer Contexts to be created' := [_ | _] = BearerCtxs} = IEs, Session) ->
-    copy_qos_to_session(IEs#{?'Bearer Contexts to be created' := lists:last(BearerCtxs)}, Session);
-copy_qos_to_session(#{?'Bearer Contexts to be created' :=
-			  #v2_bearer_context{
-			     group = #{?'Bearer Level QoS' :=
-					   #v2_bearer_level_quality_of_service{
-					      pci = PCI, pl = PL, pvi = PVI, label = Label,
-					      maximum_bit_rate_for_uplink = MBR4ul,
-					      maximum_bit_rate_for_downlink = MBR4dl,
-					      guaranteed_bit_rate_for_uplink = GBR4ul,
-					      guaranteed_bit_rate_for_downlink = GBR4dl}}},
-		      ?'APN-AMBR' :=
+copy_qos_to_session(#{?'APN-AMBR' :=
 			  #v2_aggregate_maximum_bit_rate{
-			     uplink = AMBR4ul, downlink = AMBR4dl}},
+			     uplink = AMBR4ul, downlink = AMBR4dl}} = IEs,
 		    Session) ->
-    ARP = #{
-	    'Priority-Level' => PL,
-	    'Pre-emption-Capability' => PCI,
-	    'Pre-emption-Vulnerability' => PVI
-	   },
-    Info = #{
-	     'QoS-Class-Identifier' => Label,
-	     'Max-Requested-Bandwidth-UL' => MBR4ul * 1000,
-	     'Max-Requested-Bandwidth-DL' => MBR4dl * 1000,
-	     'Guaranteed-Bitrate-UL' => GBR4ul * 1000,
-	     'Guaranteed-Bitrate-DL' => GBR4dl * 1000,
+    case get_default_bearer_ctx(IEs) of
+	#v2_bearer_context{
+	   group = #{?'Bearer Level QoS' :=
+			 #v2_bearer_level_quality_of_service{
+			    pci = PCI, pl = PL, pvi = PVI, label = Label,
+			    maximum_bit_rate_for_uplink = MBR4ul,
+			    maximum_bit_rate_for_downlink = MBR4dl,
+			    guaranteed_bit_rate_for_uplink = GBR4ul,
+			    guaranteed_bit_rate_for_downlink = GBR4dl}}} ->
+	    ARP = #{
+		    'Priority-Level' => PL,
+		    'Pre-emption-Capability' => PCI,
+		    'Pre-emption-Vulnerability' => PVI
+		   },
+	    Info = #{
+		     'QoS-Class-Identifier' => Label,
+		     'Max-Requested-Bandwidth-UL' => MBR4ul * 1000,
+		     'Max-Requested-Bandwidth-DL' => MBR4dl * 1000,
+		     'Guaranteed-Bitrate-UL' => GBR4ul * 1000,
+		     'Guaranteed-Bitrate-DL' => GBR4dl * 1000,
 
-	     %% TBD:
-	     %%   [ Bearer-Identifier ]
+		     %% TBD:
+		     %%   [ Bearer-Identifier ]
 
-	     'Allocation-Retention-Priority' => ARP,
-	     'APN-Aggregate-Max-Bitrate-UL' => AMBR4ul * 1000,
-	     'APN-Aggregate-Max-Bitrate-DL' => AMBR4dl * 1000
+		     'Allocation-Retention-Priority' => ARP,
+		     'APN-Aggregate-Max-Bitrate-UL' => AMBR4ul * 1000,
+		     'APN-Aggregate-Max-Bitrate-DL' => AMBR4dl * 1000
 
-	     %%  *[ Conditional-APN-Aggregate-Max-Bitrate ]
-	    },
-    Session#{'QoS-Information' => Info};
+		     %%  *[ Conditional-APN-Aggregate-Max-Bitrate ]
+		    },
+	    Session#{'QoS-Information' => Info};
+	_ ->
+	    Session
+    end;
 copy_qos_to_session(_, Session) ->
     Session.
 
@@ -1175,10 +1183,6 @@ get_context_from_req(?'Linked EPS Bearer ID', #v2_eps_bearer_id{eps_bearer_id = 
     Context#context{default_bearer_id =  EBI};
 get_context_from_req(_K, #v2_bearer_context{instance = 0, group = Bearer}, Context) ->
     maps:fold(fun get_context_from_bearer/3, Context, Bearer);
-get_context_from_req(?'Bearer Contexts to be created', [_ | _] = BearerCtxs, Context) ->
-    %% list: put_ie reverse wire order; default bearer is last
-    #v2_bearer_context{instance = 0, group = Bearer} = lists:last(BearerCtxs),
-    maps:fold(fun get_context_from_bearer/3, Context, Bearer);
 
 get_context_from_req(?'Access Point Name', #v2_access_point_name{apn = APN}, Context) ->
     Context#context{apn = APN};
@@ -1234,20 +1238,22 @@ get_tunnel_from_req({_, #v2_bearer_context{instance = 0, group = Group}, Next},
 	   Bearer <- get_tunnel_from_bearer(maps:next(maps:iterator(Group)), Tunnel, Bearer0),
 	   get_tunnel_from_req(maps:next(Next), Tunnel, Bearer)
        ]);
-get_tunnel_from_req({?'Bearer Contexts to be created', [_ | _] = BearerCtxs, Next},
-		    Tunnel, Bearer0) ->
-    %% list: put_ie reverse wire order; use last (first in wire) for default bearer
-    #v2_bearer_context{instance = 0, group = Group} = lists:last(BearerCtxs),
-    do([error_m ||
-	   Bearer <- get_tunnel_from_bearer(maps:next(maps:iterator(Group)), Tunnel, Bearer0),
-	   get_tunnel_from_req(maps:next(Next), Tunnel, Bearer)
-       ]);
 get_tunnel_from_req({_, _, Next}, Tunnel, Bearer) ->
    get_tunnel_from_req(maps:next(Next), Tunnel, Bearer).
 
 %% update_tunnel_from_gtp_req/3
 update_tunnel_from_gtp_req(#gtp{ie = IEs}, Tunnel, Bearer) ->
     get_tunnel_from_req(maps:next(maps:iterator(IEs)), Tunnel, Bearer).
+
+%% update_tunnel_from_gtp_req/4 - extract control-plane F-TEID from IEs,
+%% user-plane F-TEID from the given default bearer context group.
+update_tunnel_from_gtp_req(#gtp{ie = IEs}, BearerGroup, Tunnel0, Bearer0) ->
+    do([error_m ||
+	   {Tunnel, _} <- get_tunnel_from_req(
+			    maps:next(maps:iterator(IEs)), Tunnel0, Bearer0),
+	   Bearer <- get_tunnel_from_bearer(
+		       maps:next(maps:iterator(BearerGroup)), Tunnel, Bearer0),
+	   return({Tunnel, Bearer})]).
 
 enter_ie(_Key, Value, IEs)
   when is_list(IEs) ->
@@ -1388,7 +1394,7 @@ bearer_qos_profile(#{'QoS-Information' :=
 bearer_qos_profile(_SessionOpts, IE) ->
     IE.
 
-bearer_context(SessionOpts, _DefaultEBI, BearerMap, Context, IEs) ->
+bearer_context(SessionOpts, BearerMap, Context, IEs) ->
     AccessBearers =
         lists:sort(maps:fold(fun({'Access', N}, #bearer{} = Bearer, Acc) ->
                                      [{N, Bearer} | Acc];
@@ -1479,11 +1485,11 @@ change_reporting_actions(RequestIEs, IE0) ->
     ENBCRSI = proplists:get_bool('ENBCRSI', Indications),
     _IE = change_reporting_action(CRSI, ENBCRSI, RequestIEs, Triggers, IE0).
 
-create_session_response(Cause, SessionOpts, RequestIEs, EBI,
+create_session_response(Cause, SessionOpts, RequestIEs,
 			Tunnel, BearerMap,
 			#context{ms_ip = #ue_ip{v4 = MSv4, v6 = MSv6}} = Context) ->
 
-    IE0 = bearer_context(SessionOpts, EBI, BearerMap, Context, []),
+    IE0 = bearer_context(SessionOpts, BearerMap, Context, []),
     IE1 = pdn_pco(SessionOpts, RequestIEs, IE0),
     IE2 = change_reporting_actions(RequestIEs, IE1),
 
