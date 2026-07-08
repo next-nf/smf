@@ -5693,6 +5693,9 @@ bearer_resource_command_create(Config) ->
     %% The PGW should now send a Create Bearer Request
     CBReq = recv_pdu(Cntl, 5000),
     ?match(#gtp{type = create_bearer_request}, CBReq),
+    %% UE-requested procedure: PTI from the Bearer Resource Command must be echoed
+    ?match(#gtp{ie = #{{v2_procedure_transaction_id, 0} :=
+                           #v2_procedure_transaction_id{pti = 1}}}, CBReq),
     #gtp{seq_no = CBSeqNo,
          ie = #{{v2_bearer_context, 0} :=
                     #v2_bearer_context{
