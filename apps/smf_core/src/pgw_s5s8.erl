@@ -758,11 +758,8 @@ create_dedicated_bearer(LinkedEBI, QoS, TFTBin, AccessBearer, Tunnel) ->
     send_request(Tunnel, ?T3, ?N3, create_bearer_request, RequestIEs,
 		 {create_bearer, PgwFTEID}).
 
-delete_dedicated_bearer(EBI, DefaultEBI, Tunnel) ->
-    BearerCtx = [#v2_eps_bearer_id{eps_bearer_id = EBI},
-		 #v2_cause{v2_cause = reactivation_requested}],
-    RequestIEs0 = [#v2_eps_bearer_id{eps_bearer_id = DefaultEBI},
-		   #v2_bearer_context{group = BearerCtx}],
+delete_dedicated_bearer(EBI, Tunnel) ->
+    RequestIEs0 = [#v2_eps_bearer_id{instance = 1, eps_bearer_id = EBI}],
     RequestIEs = gtp_v2_c:build_recovery(delete_bearer_request, Tunnel, false, RequestIEs0),
     send_request(Tunnel, ?T3, ?N3, delete_bearer_request, RequestIEs,
 		 {delete_dedicated_bearer, EBI}).
@@ -783,7 +780,7 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
     RemovedEBIs = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
     lists:foldl(
       fun(EBI, D) ->
-	  initiate_delete_dedicated_bearer(EBI, DefaultEBI, AccessTunnel, D)
+	  initiate_delete_dedicated_bearer(EBI, AccessTunnel, D)
       end, Data1, RemovedEBIs).
 
 initiate_create_dedicated_bearer(QCI, ARP, QoS, FlowInfo, DefaultEBI, AccessTunnel,
@@ -812,8 +809,8 @@ initiate_create_dedicated_bearer(QCI, ARP, QoS, FlowInfo, DefaultEBI, AccessTunn
     end.
 
 
-initiate_delete_dedicated_bearer(EBI, DefaultEBI, AccessTunnel, Data) ->
-    delete_dedicated_bearer(EBI, DefaultEBI, AccessTunnel),
+initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data) ->
+    delete_dedicated_bearer(EBI, AccessTunnel),
     Data.
 
 %% Report new dedicated bearer to PCRF via Gx CCR-Update
