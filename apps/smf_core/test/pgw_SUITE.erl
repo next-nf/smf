@@ -752,6 +752,7 @@ common() ->
      gx_rar,
      gx_rar_dedicated_bearer_create,
      gx_dedicated_bearer_create_failure,
+     gx_dedicated_bearer_create_partial_reject,
      bearer_resource_command_create,
      dedicated_bearer_session_delete,
      gy_asr,
@@ -1021,6 +1022,10 @@ init_per_testcase(gx_rar_dedicated_bearer_create, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(gx_dedicated_bearer_create_failure, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(gx_dedicated_bearer_create_partial_reject, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -5741,6 +5746,114 @@ gx_dedicated_bearer_create_failure(Config) ->
 
     %% Respond with a failure cause: the dedicated bearer could not be activated
     CBRespIEs = [#v2_cause{v2_cause = no_resources_available},
+                 #v2_bearer_context{
+                    group = [#v2_cause{v2_cause = no_resources_available},
+                             #v2_eps_bearer_id{eps_bearer_id = DedEBI}]}],
+    CBResp = #gtp{version = v2, type = create_bearer_response,
+                  tei = RemoteCntlTEI, seq_no = CBSeqNo, ie = CBRespIEs},
+    send_pdu(Cntl, GtpC, CBResp),
+
+    %% Allow response to be processed
+    ct:sleep(200),
+
+    %% The bearer must NOT have been installed
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?equal(false, maps:is_key({qci_arp, 1, {2, 1, 0}}, BearerMap)),
+    ?equal(false, maps:is_key({'Access', DedEBI}, BearerMap)),
+
+    %% A Gx CCR-Update must have been sent reporting the failed rule as INACTIVE
+    %% with Rule-Failure-Code RESOURCE_ALLOCATION_FAILURE (10).
+    FailCCRU =
+	lists:filter(
+	  fun({_, {smf_aaa_pcf, ccr_update, [_, _, SOpts, _]}, _}) ->
+		  case SOpts of
+		      #{'Charging-Rule-Report' :=
+			    [#{'Charging-Rule-Name' :=
+				   [<<"ded-rule-1">>],
+			       'PCC-Rule-Status' :=
+				   [?'DIAMETER_GX_PCC-RULE-STATUS_INACTIVE'],
+			       'Rule-Failure-Code' :=
+				   [?'DIAMETER_GX_RULE-FAILURE-CODE_RESOURCE_ALLOCATION_FAILURE']}]} ->
+			  true;
+		      _ ->
+			  false
+		  end;
+	     (_) ->
+		  false
+	  end, meck:history(smf_aaa_pcf)),
+    ?match([_], FailCCRU),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gx_dedicated_bearer_create_partial_reject() ->
+    [{doc, "Check that a Create Bearer Response with message Cause "
+	    "request_accepted_partially but a per-bearer rejection cause does "
+	    "NOT install the bearer and reports the PCC rule to the PCRF with "
+	    "Rule-Failure-Code RESOURCE_ALLOCATION_FAILURE"}].
+gx_dedicated_bearer_create_partial_reject(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun =
+        fun(Request, Result, Avps, SOpts) ->
+                Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+                          session = SessionOpts, events = []},
+
+    %% Install a PCC rule with a QCI/ARP different from the default bearer
+    %% to trigger dedicated bearer creation (BCM = UE_NW set in init_per_testcase)
+    DedRule = #{'Charging-Rule-Definition' =>
+                    [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+                       'Flow-Information' =>
+                           [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+                              'Flow-Direction' => [2]}],
+                       'QoS-Information' =>
+                           [#{'QoS-Class-Identifier' => 1,
+                              'Allocation-Retention-Priority' =>
+                                  #{'Priority-Level' => 2,
+                                    'Pre-emption-Capability' => 1,
+                                    'Pre-emption-Vulnerability' => 0}}],
+                       'Metering-Method' => [1],
+                       'Precedence' => [100],
+                       'Online' => [0],
+                       'Offline' => [0]}]},
+    InstCR = [{pcc, install, [DedRule]}],
+    Server ! AAAReq#aaa_request{events = InstCR},
+
+    %% Wait for RAR reply — should be ok
+    {_, Resp0, _, _} =
+        receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+        after 5000 -> ct:fail(rar_timeout)
+        end,
+    ?equal(ok, Resp0),
+
+    %% The PGW should now send a Create Bearer Request
+    CBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = create_bearer_request}, CBReq),
+    #gtp{seq_no = CBSeqNo} = CBReq,
+
+    GtpCDed = gtp_context_new_teids(GtpC),
+    #gtpc{remote_control_tei = RemoteCntlTEI} = GtpCDed,
+    DedEBI = 6,
+
+    %% Message-level Cause accepts partially, but the per-bearer Cause rejects
+    %% this bearer. The per-bearer Cause is authoritative (TS 29.274 7.2.4).
+    CBRespIEs = [#v2_cause{v2_cause = request_accepted_partially},
                  #v2_bearer_context{
                     group = [#v2_cause{v2_cause = no_resources_available},
                              #v2_eps_bearer_id{eps_bearer_id = DedEBI}]}],

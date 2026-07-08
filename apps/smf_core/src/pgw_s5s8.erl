@@ -511,57 +511,40 @@ handle_response({create_bearer, PgwFTEID},
 		#{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC,
 		  pending_bearers := Pending0} = Data0)
   when ?CAUSE_OK(Cause) ->
-    case maps:take(PgwFTEID, Pending0) of
-	{{QCI, ARP, AccessBearer0, _ChId}, Pending} ->
-	    #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} = BearerCtxGroup,
-	    AccessBearer = update_bearer_from_response(BearerCtxGroup, AccessBearer0),
-	    PgwBI = <<EBI:8>>,
-	    BearerMap = BearerMap0#{{'Access', EBI} => AccessBearer,
-				    {qci_arp, QCI, ARP} => EBI,
-				    {bearer_id, PgwBI} => EBI},
-	    PCtx = case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
-		       {ok, {PCtx1, _, _}} -> PCtx1;
-		       {error, _}         -> PCtx0
-		   end,
-	    Data1 = Data0#{bearers := BearerMap, pfcp := PCtx,
-			   pending_bearers := Pending},
-	    Data = report_bearer_establishment(PgwBI, QCI, ARP, Data1),
-	    {keep_state, Data};
-	error ->
-	    keep_state_and_data
+    %% The message-level Cause may be request_accepted_partially, so the
+    %% per-bearer Cause inside the Bearer Context is authoritative for this
+    %% bearer (TS 29.274 7.2.4, TS 29.212 4.5.12). Only install the bearer
+    %% when its own Cause is OK; otherwise treat it as a failed activation.
+    case ?CAUSE_OK(bearer_context_cause(BearerCtxGroup)) of
+	true ->
+	    case maps:take(PgwFTEID, Pending0) of
+		{{QCI, ARP, AccessBearer0, _ChId}, Pending} ->
+		    #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} = BearerCtxGroup,
+		    AccessBearer = update_bearer_from_response(BearerCtxGroup, AccessBearer0),
+		    PgwBI = <<EBI:8>>,
+		    BearerMap = BearerMap0#{{'Access', EBI} => AccessBearer,
+					    {qci_arp, QCI, ARP} => EBI,
+					    {bearer_id, PgwBI} => EBI},
+		    PCtx = case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
+			       {ok, {PCtx1, _, _}} -> PCtx1;
+			       {error, _}         -> PCtx0
+			   end,
+		    Data1 = Data0#{bearers := BearerMap, pfcp := PCtx,
+				   pending_bearers := Pending},
+		    Data = report_bearer_establishment(PgwBI, QCI, ARP, Data1),
+		    {keep_state, Data};
+		error ->
+		    keep_state_and_data
+	    end;
+	false ->
+	    handle_create_bearer_failure(PgwFTEID, Data0)
     end;
 
 handle_response({create_bearer, PgwFTEID},
 		#gtp{type = create_bearer_response},
-		_Request, _State,
-		#{bearers := BearerMap, pfcp := PCtx0, pcc := PCC,
-		  pending_bearers := Pending0} = Data0) ->
-    %% Dedicated bearer could not be activated (Cause /= request accepted).
-    %% Per TS 29.212 4.5.6/4.5.12 the PCEF shall remove the affected PCC
-    %% rule(s) and report them to the PCRF with PCC-Rule-Status INACTIVE and
-    %% Rule-Failure-Code RESOURCE_ALLOCATION_FAILURE.
-    case maps:take(PgwFTEID, Pending0) of
-	{{QCI, ARP, _AccessBearer, _ChId}, Pending} ->
-	    case affected_pcc_rules(QCI, ARP, PCC) of
-		[] ->
-		    {keep_state, Data0#{pending_bearers := Pending}};
-		RuleNames ->
-		    PCC1 = PCC#pcc_ctx{
-			     rules = maps:without(RuleNames, PCC#pcc_ctx.rules)},
-		    Data1 =
-			case smf_pfcp_context:modify_session(PCC1, [], #{}, BearerMap, PCtx0) of
-			    {ok, {PCtx, _, _}} ->
-				Data0#{pcc := PCC1, pfcp := PCtx,
-				       pending_bearers := Pending};
-			    {error, _} ->
-				Data0#{pcc := PCC1, pending_bearers := Pending}
-			end,
-		    Data = report_bearer_failure(RuleNames, Data1),
-		    {keep_state, Data}
-	    end;
-	error ->
-	    {keep_state, Data0}
-    end;
+		_Request, _State, Data0) ->
+    %% Dedicated bearer could not be activated (message-level Cause not OK).
+    handle_create_bearer_failure(PgwFTEID, Data0);
 
 handle_response({create_bearer, _PgwFTEID}, timeout,
 		#gtp{type = create_bearer_request}, _State, _Data) ->
@@ -886,6 +869,45 @@ report_bearer_failure(RuleNames,
 	_ ->
 	    Data
     end.
+
+%% Handle a Create Bearer Response that failed to activate the dedicated
+%% bearer, whether the failure is signalled at the message level or in the
+%% per-bearer Cause. Per TS 29.212 4.5.6/4.5.12 the PCEF shall remove the
+%% affected PCC rule(s) and report them to the PCRF with PCC-Rule-Status
+%% INACTIVE and Rule-Failure-Code RESOURCE_ALLOCATION_FAILURE.
+handle_create_bearer_failure(PgwFTEID,
+			     #{bearers := BearerMap, pfcp := PCtx0, pcc := PCC,
+			       pending_bearers := Pending0} = Data0) ->
+    case maps:take(PgwFTEID, Pending0) of
+	{{QCI, ARP, _AccessBearer, _ChId}, Pending} ->
+	    case affected_pcc_rules(QCI, ARP, PCC) of
+		[] ->
+		    {keep_state, Data0#{pending_bearers := Pending}};
+		RuleNames ->
+		    PCC1 = PCC#pcc_ctx{
+			     rules = maps:without(RuleNames, PCC#pcc_ctx.rules)},
+		    Data1 =
+			case smf_pfcp_context:modify_session(PCC1, [], #{}, BearerMap, PCtx0) of
+			    {ok, {PCtx, _, _}} ->
+				Data0#{pcc := PCC1, pfcp := PCtx,
+				       pending_bearers := Pending};
+			    {error, _} ->
+				Data0#{pcc := PCC1, pending_bearers := Pending}
+			end,
+		    Data = report_bearer_failure(RuleNames, Data1),
+		    {keep_state, Data}
+	    end;
+	error ->
+	    {keep_state, Data0}
+    end.
+
+%% Extract the per-bearer Cause from a Bearer Context group. The Cause is
+%% mandatory in a Create Bearer Response (TS 29.274 Table 7.2.4-2); default to
+%% request_accepted if it is absent so a well-formed accepted bearer installs.
+bearer_context_cause(#{?'Cause' := #v2_cause{v2_cause = BearerCause}}) ->
+    BearerCause;
+bearer_context_cause(_) ->
+    request_accepted.
 
 %% Reverse-map a failed bearer's {QCI, ARP} to the installed PCC rule name(s)
 %% that triggered it.
