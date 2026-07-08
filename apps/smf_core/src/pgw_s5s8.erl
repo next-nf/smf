@@ -750,7 +750,7 @@ create_dedicated_bearer(LinkedEBI, QoS, TFTBin, AccessBearer, Tunnel) ->
 	[#v2_eps_bearer_id{eps_bearer_id = 0},
 	 encode_bearer_level_qos(QoS),
 	 #v2_eps_bearer_level_traffic_flow_template{value = TFTBin},
-	 s5s8_pgw_gtp_u_tei(AccessBearer)],
+	 s5s8_pgw_gtp_u_tei(1, AccessBearer)],
     RequestIEs0 = [#v2_eps_bearer_id{eps_bearer_id = LinkedEBI},
 		   #v2_bearer_context{group = BearerCtx}],
     RequestIEs = gtp_v2_c:build_recovery(create_bearer_request, Tunnel, false, RequestIEs0),
@@ -1426,8 +1426,11 @@ s5s8_pgw_gtp_c_tei(#tunnel{local = #fq_teid{ip = IP, teid = TEI}}) ->
     %% or for GTP based Control Plane interface
     fq_teid(1, ?'S5/S8-C PGW', TEI, IP).
 
-s5s8_pgw_gtp_u_tei(#bearer{local = #fq_teid{ip = IP, teid = TEI}}) ->
-    fq_teid(2,  ?'S5/S8-U PGW', TEI, IP).
+s5s8_pgw_gtp_u_tei(Bearer) ->
+    s5s8_pgw_gtp_u_tei(2, Bearer).
+
+s5s8_pgw_gtp_u_tei(Instance, #bearer{local = #fq_teid{ip = IP, teid = TEI}}) ->
+    fq_teid(Instance, ?'S5/S8-U PGW', TEI, IP).
 
 cr_ran_type(1)  -> 'UTRAN';
 cr_ran_type(2)  -> 'UTRAN';

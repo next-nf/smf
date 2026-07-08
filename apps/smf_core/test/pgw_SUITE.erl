@@ -5588,7 +5588,7 @@ gx_rar_dedicated_bearer_create(Config) ->
     #gtp{seq_no = CBSeqNo,
          ie = #{{v2_bearer_context, 0} :=
                     #v2_bearer_context{
-                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 2} :=
+                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 1} :=
                                      #v2_fully_qualified_tunnel_endpoint_identifier{
                                         interface_type = ?'S5/S8-U PGW',
                                         key = PgwUTEI,
@@ -5696,7 +5696,7 @@ bearer_resource_command_create(Config) ->
     #gtp{seq_no = CBSeqNo,
          ie = #{{v2_bearer_context, 0} :=
                     #v2_bearer_context{
-                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 2} :=
+                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 1} :=
                                      #v2_fully_qualified_tunnel_endpoint_identifier{
                                         interface_type = ?'S5/S8-U PGW',
                                         key = PgwUTEI,
@@ -5809,7 +5809,7 @@ dedicated_bearer_session_delete(Config) ->
     #gtp{seq_no = CBSeqNo,
          ie = #{{v2_bearer_context, 0} :=
                     #v2_bearer_context{
-                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 2} :=
+                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 1} :=
                                      #v2_fully_qualified_tunnel_endpoint_identifier{
                                         interface_type = ?'S5/S8-U PGW',
                                         key = PgwUTEI,
