@@ -550,6 +550,9 @@ from_session('Called-Station-Id', Value, M) ->
 %% 'Offline'
 %% 'TFT-Packet-Filter-Information'
 %% 'Charging-Rule-Report'
+from_session('Charging-Rule-Report', Value, M) when is_list(Value) ->
+    M#{'Charging-Rule-Report' => Value};
+
 %% 'Application-Detection-Information'
 %% 'Event-Trigger'
 

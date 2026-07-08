@@ -534,9 +534,34 @@ handle_response({create_bearer, PgwFTEID},
 handle_response({create_bearer, PgwFTEID},
 		#gtp{type = create_bearer_response},
 		_Request, _State,
-		#{pending_bearers := Pending0} = Data0) ->
-    Pending = maps:remove(PgwFTEID, Pending0),
-    {keep_state, Data0#{pending_bearers := Pending}};
+		#{bearers := BearerMap, pfcp := PCtx0, pcc := PCC,
+		  pending_bearers := Pending0} = Data0) ->
+    %% Dedicated bearer could not be activated (Cause /= request accepted).
+    %% Per TS 29.212 4.5.6/4.5.12 the PCEF shall remove the affected PCC
+    %% rule(s) and report them to the PCRF with PCC-Rule-Status INACTIVE and
+    %% Rule-Failure-Code RESOURCE_ALLOCATION_FAILURE.
+    case maps:take(PgwFTEID, Pending0) of
+	{{QCI, ARP, _AccessBearer, _ChId}, Pending} ->
+	    case affected_pcc_rules(QCI, ARP, PCC) of
+		[] ->
+		    {keep_state, Data0#{pending_bearers := Pending}};
+		RuleNames ->
+		    PCC1 = PCC#pcc_ctx{
+			     rules = maps:without(RuleNames, PCC#pcc_ctx.rules)},
+		    Data1 =
+			case smf_pfcp_context:modify_session(PCC1, [], #{}, BearerMap, PCtx0) of
+			    {ok, {PCtx, _, _}} ->
+				Data0#{pcc := PCC1, pfcp := PCtx,
+				       pending_bearers := Pending};
+			    {error, _} ->
+				Data0#{pcc := PCC1, pending_bearers := Pending}
+			end,
+		    Data = report_bearer_failure(RuleNames, Data1),
+		    {keep_state, Data}
+	    end;
+	error ->
+	    {keep_state, Data0}
+    end;
 
 handle_response({create_bearer, _PgwFTEID}, timeout,
 		#gtp{type = create_bearer_request}, _State, _Data) ->
@@ -839,6 +864,39 @@ report_bearer_establishment(PgwBI, QCI, {PL, PCI, PVI},
 	_ ->
 	    Data
     end.
+
+%% Report dedicated bearer activation failure to PCRF via Gx CCR-Update
+%% with a Charging-Rule-Report naming the affected PCC rule(s) as INACTIVE
+%% with Rule-Failure-Code RESOURCE_ALLOCATION_FAILURE (TS 29.212 4.5.12).
+report_bearer_failure(RuleNames,
+		      #{pcf := PCF0, aaa_session := S0} = Data) ->
+    %% Rule keys may be binaries or single-element lists; flatten to a plain
+    %% list of name binaries for the repeated Charging-Rule-Name AVP.
+    Names = lists:flatmap(fun(N) when is_list(N) -> N; (N) -> [N] end, RuleNames),
+    Report = #{'Charging-Rule-Name' => Names,
+	       'PCC-Rule-Status'    =>
+		   [?'DIAMETER_GX_PCC-RULE-STATUS_INACTIVE'],
+	       'Rule-Failure-Code'  =>
+		   [?'DIAMETER_GX_RULE-FAILURE-CODE_RESOURCE_ALLOCATION_FAILURE']},
+    SOpts = #{'Charging-Rule-Report' => [Report]},
+    Now = erlang:monotonic_time(),
+    case smf_aaa_pcf:ccr_update(PCF0, S0, SOpts, #{now => Now, async => true}) of
+	{ok, PCF1, S1, _Events} ->
+	    Data#{pcf := PCF1, aaa_session := S1};
+	_ ->
+	    Data
+    end.
+
+%% Reverse-map a failed bearer's {QCI, ARP} to the installed PCC rule name(s)
+%% that triggered it.
+affected_pcc_rules(QCI, ARP, #pcc_ctx{rules = Rules}) ->
+    maps:fold(
+      fun(Name, Def, Acc) ->
+	      case smf_gsn_lib:get_rule_qci_arp(Def) of
+		  {QCI, ARP} -> [Name | Acc];
+		  _          -> Acc
+	      end
+      end, [], Rules).
 
 terminate(_Reason, _State, #{pfcp := PCtx, context := Context}) ->
     smf_pfcp_context:delete_session(terminate, PCtx),
