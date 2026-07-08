@@ -512,7 +512,7 @@ handle_response({create_bearer, PgwFTEID},
 		  pending_bearers := Pending0} = Data0)
   when ?CAUSE_OK(Cause) ->
     case maps:take(PgwFTEID, Pending0) of
-	{{QCI, ARP, AccessBearer0}, Pending} ->
+	{{QCI, ARP, AccessBearer0, _ChId}, Pending} ->
 	    #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} = BearerCtxGroup,
 	    AccessBearer = update_bearer_from_response(BearerCtxGroup, AccessBearer0),
 	    PgwBI = <<EBI:8>>,
@@ -745,12 +745,13 @@ install_additional_bearer(BearerGroup, _AccessTunnel,
             Data
     end.
 
-create_dedicated_bearer(PTI, LinkedEBI, QoS, TFTBin, AccessBearer, Tunnel) ->
+create_dedicated_bearer(PTI, LinkedEBI, QoS, TFTBin, ChId, AccessBearer, Tunnel) ->
     BearerCtx =
 	[#v2_eps_bearer_id{eps_bearer_id = 0},
 	 encode_bearer_level_qos(QoS),
 	 #v2_eps_bearer_level_traffic_flow_template{value = TFTBin},
-	 s5s8_pgw_gtp_u_tei(1, AccessBearer)],
+	 s5s8_pgw_gtp_u_tei(1, AccessBearer),
+	 #v2_charging_id{id = <<ChId:32>>}],
     RequestIEs0 = [#v2_eps_bearer_id{eps_bearer_id = LinkedEBI},
 		   #v2_bearer_context{group = BearerCtx}],
     RequestIEs1 = case PTI of
@@ -801,9 +802,10 @@ initiate_create_dedicated_bearer(PTI, QCI, ARP, QoS, FlowInfo, DefaultEBI, Acces
 					   vrf = VRF,
 					   local = #fq_teid{ip = PgwUIP, teid = DataTEI}},
 		    TFTBin = smf_tft:flow_info_to_tft(FlowInfo),
-		    create_dedicated_bearer(PTI, DefaultEBI, QoS, TFTBin, AccessBearer, AccessTunnel),
+		    ChId = smf_gtp_c_socket:get_uniq_id(AccessTunnel#tunnel.socket),
+		    create_dedicated_bearer(PTI, DefaultEBI, QoS, TFTBin, ChId, AccessBearer, AccessTunnel),
 		    PgwFTEID = AccessBearer#bearer.local,
-		    Pending = Pending0#{PgwFTEID => {QCI, ARP, AccessBearer}},
+		    Pending = Pending0#{PgwFTEID => {QCI, ARP, AccessBearer, ChId}},
 		    Data#{pending_bearers := Pending};
 		_ ->
 		    Data

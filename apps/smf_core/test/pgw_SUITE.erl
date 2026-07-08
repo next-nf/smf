@@ -5593,7 +5593,8 @@ gx_rar_dedicated_bearer_create(Config) ->
                                         interface_type = ?'S5/S8-U PGW',
                                         key = PgwUTEI,
                                         ipv4 = PgwUIP4,
-                                        ipv6 = PgwUIP6}
+                                        ipv6 = PgwUIP6},
+                                 {v2_charging_id, 0} := #v2_charging_id{}
                                 }
                       }}} = CBReq,
 
@@ -5704,7 +5705,8 @@ bearer_resource_command_create(Config) ->
                                         interface_type = ?'S5/S8-U PGW',
                                         key = PgwUTEI,
                                         ipv4 = PgwUIP4,
-                                        ipv6 = PgwUIP6}
+                                        ipv6 = PgwUIP6},
+                                 {v2_charging_id, 0} := #v2_charging_id{}
                                 }
                       }}} = CBReq,
 
@@ -5817,7 +5819,8 @@ dedicated_bearer_session_delete(Config) ->
                                         interface_type = ?'S5/S8-U PGW',
                                         key = PgwUTEI,
                                         ipv4 = PgwUIP4,
-                                        ipv6 = PgwUIP6}
+                                        ipv6 = PgwUIP6},
+                                 {v2_charging_id, 0} := #v2_charging_id{}
                                 }
                       }}} = CBReq,
 
