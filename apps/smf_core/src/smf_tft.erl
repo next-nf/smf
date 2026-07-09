@@ -39,7 +39,7 @@ encode(#{operation := Operation, filters := Filters, parameters := Parameters}) 
 
 %% flow_info_to_tft/1 — [map()] -> binary()
 flow_info_to_tft(FlowInfoList) ->
-    Filters0 = flow_info_list_to_filters(FlowInfoList, 0, 255),
+    Filters0 = flow_info_list_to_filters(FlowInfoList, [], 255),
     Filters = ensure_uplink_filter(Filters0),
     encode(#{operation => create_new_tft, filters => Filters, parameters => []}).
 
@@ -68,7 +68,10 @@ disallow_uplink_filter(Filters) ->
       components => [{ipv4_remote, <<0, 0, 0, 0>>, <<255, 255, 255, 255>>}]}.
 
 next_filter_id(Filters) ->
-    Used = [Id || #{id := Id} <- Filters],
+    lowest_free_id([Id || #{id := Id} <- Filters]).
+
+%% Lowest 4-bit id (0..15) not present in Used.
+lowest_free_id(Used) ->
     hd([N || N <- lists:seq(0, 15), not lists:member(N, Used)]).
 
 disallow_precedence(Filters) ->
@@ -261,26 +264,43 @@ encode_parameters(Params) ->
 %%% Internal — flow info conversion
 %%%===================================================================
 
-flow_info_list_to_filters([], _, _) -> [];
-flow_info_list_to_filters([FlowInfo | Rest], Index, Precedence) ->
-    Filter = flow_info_to_filter(FlowInfo, Index, Precedence),
-    [Filter | flow_info_list_to_filters(Rest, Index + 1, Precedence - 1)].
+%% Build filters threading the set of already-used packet filter ids so every
+%% filter in the resultant TFT gets a unique identifier. Per TS 24.301
+%% §6.4.2.4 d)1), two filters with identical packet filter identifiers in a
+%% "Create new TFT" make a conformant UE reject the activation with ESM cause
+%% #45 "syntactical errors in packet filter(s)".
+flow_info_list_to_filters([], _Used, _Precedence) -> [];
+flow_info_list_to_filters([FlowInfo | Rest], Used, Precedence) ->
+    Id = assign_filter_id(FlowInfo, Used),
+    Filter = flow_info_to_filter(FlowInfo, Id, Precedence),
+    [Filter | flow_info_list_to_filters(Rest, [Id | Used], Precedence - 1)].
 
-flow_info_to_filter(FlowInfo, Index, Precedence) ->
-    Id = get_filter_id(FlowInfo, Index),
+flow_info_to_filter(FlowInfo, Id, Precedence) ->
     Direction = get_flow_direction(FlowInfo),
     BaseComponents = get_flow_components(FlowInfo),
     ExtraComponents = get_extra_components(FlowInfo),
     Components = BaseComponents ++ ExtraComponents,
     #{id => Id, direction => Direction, precedence => Precedence, components => Components}.
 
-get_filter_id(#{'Packet-Filter-Identifier' := [IdBin | _]}, _Index) when is_binary(IdBin) ->
-    case IdBin of
-	<<Id:8>> -> Id band 16#0F;
-	_        -> 0
-    end;
-get_filter_id(_, Index) ->
-    Index band 16#0F.
+%% Prefer the flow's explicit Packet-Filter-Identifier when it is a valid 4-bit
+%% value not yet used; otherwise (missing, malformed, out-of-range, or already
+%% taken) allocate the lowest free id. Never falls back to a fixed value.
+assign_filter_id(FlowInfo, Used) ->
+    case explicit_filter_id(FlowInfo) of
+	{ok, Id} ->
+	    case lists:member(Id, Used) of
+		false -> Id;
+		true  -> lowest_free_id(Used)
+	    end;
+	none ->
+	    lowest_free_id(Used)
+    end.
+
+explicit_filter_id(#{'Packet-Filter-Identifier' := [<<Id:8>> | _]})
+  when Id >= 0, Id =< 15 ->
+    {ok, Id};
+explicit_filter_id(_) ->
+    none.
 
 get_flow_direction(#{'Flow-Direction' := [Dir | _]}) ->
     case Dir of

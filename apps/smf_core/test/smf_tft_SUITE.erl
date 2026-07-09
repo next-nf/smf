@@ -35,6 +35,7 @@ all() ->
      flow_info_to_tft_multi,
      flow_info_to_tft_downlink_only_adds_uplink,
      flow_info_to_tft_uplink_present_unchanged,
+     flow_info_to_tft_unique_ids,
      tft_to_flow_info_roundtrip].
 
 init_per_suite(Config) -> Config.
@@ -353,6 +354,50 @@ flow_info_to_tft_uplink_present_unchanged(_Config) ->
     BinBi = smf_tft:flow_info_to_tft([FlowInfoBi]),
     #{filters := FiltersBi} = smf_tft:decode(BinBi),
     ?assertEqual(1, length(FiltersBi)).
+
+%%--------------------------------------------------------------------
+flow_info_to_tft_unique_ids() ->
+    [{doc, "Packet filter ids are unique within the TFT even when explicit "
+      "identifiers and positional indices would previously collide "
+      "(TS 24.301 6.4.2.4 d)1) — duplicate ids make a UE reject with #45)"}].
+flow_info_to_tft_unique_ids(_Config) ->
+    %% Collision cases under the old positional scheme:
+    %%  - explicit <<3>> (A) vs a no-id flow at positional index 3 (D)
+    %%  - out-of-range explicit <<17>> masked to 1 (E) vs no-id index 1 (B)
+    %%  - malformed non-8-bit identifier fell to a fixed 0 (F)
+    Dl = fun(Dst) ->
+		 <<"permit out 6 from ", Dst/binary, " to assigned 80">>
+	 end,
+    FlowA = #{'Flow-Description' => [Dl(<<"10.0.0.1">>)],
+	      'Flow-Direction' => [1],
+	      'Packet-Filter-Identifier' => [<<3>>]},
+    FlowB = #{'Flow-Description' => [Dl(<<"10.0.0.2">>)],
+	      'Flow-Direction' => [1]},
+    FlowC = #{'Flow-Description' => [Dl(<<"10.0.0.3">>)],
+	      'Flow-Direction' => [1]},
+    FlowD = #{'Flow-Description' => [Dl(<<"10.0.0.4">>)],
+	      'Flow-Direction' => [1]},
+    FlowE = #{'Flow-Description' => [Dl(<<"10.0.0.5">>)],
+	      'Flow-Direction' => [1],
+	      'Packet-Filter-Identifier' => [<<17>>]},
+    FlowF = #{'Flow-Description' => [Dl(<<"10.0.0.6">>)],
+	      'Flow-Direction' => [1],
+	      'Packet-Filter-Identifier' => [<<1, 2>>]},
+    %% One uplink flow so no disallow filter is appended (deterministic count)
+    FlowG = #{'Flow-Description' =>
+		  [<<"permit in 17 from assigned to 10.0.0.7 53">>],
+	      'Flow-Direction' => [2]},
+    FlowInfo = [FlowA, FlowB, FlowC, FlowD, FlowE, FlowF, FlowG],
+    Bin = smf_tft:flow_info_to_tft(FlowInfo),
+    #{filters := Filters} = smf_tft:decode(Bin),
+    ?assertEqual(7, length(Filters)),
+    Ids = [maps:get(id, F) || F <- Filters],
+    %% every id is a valid 4-bit value
+    ?assert(lists:all(fun(N) -> N >= 0 andalso N =< 15 end, Ids)),
+    %% all ids distinct — the core conformance property
+    ?assertEqual(lists:usort(Ids), lists:sort(Ids)),
+    %% the valid explicit identifier <<3>> is honored
+    ?assert(lists:member(3, Ids)).
 
 %%--------------------------------------------------------------------
 tft_to_flow_info_roundtrip() ->
