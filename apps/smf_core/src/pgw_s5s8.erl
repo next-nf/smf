@@ -436,7 +436,7 @@ handle_request(ReqKey,
 handle_request(ReqKey,
 	       #gtp{type = bearer_resource_command,
 		    ie = #{?'Linked EPS Bearer ID' :=
-			       #v2_eps_bearer_id{eps_bearer_id = _LinkedEBI},
+			       #v2_eps_bearer_id{eps_bearer_id = LinkedEBI},
 			   ?'Procedure Transaction Id' :=
 			       #v2_procedure_transaction_id{pti = PTI},
 			   ?'Traffic Aggregate Description' :=
@@ -469,7 +469,9 @@ handle_request(ReqKey,
 	    Actions = context_idle_action([], Context),
 	    {keep_state, Data1, Actions};
        true ->
-	    ResponseIEs = [#v2_cause{v2_cause = request_rejected}],
+	    ResponseIEs = [#v2_cause{v2_cause = request_rejected},
+			   #v2_eps_bearer_id{eps_bearer_id = LinkedEBI},
+			   #v2_procedure_transaction_id{pti = PTI}],
 	    Response = response(bearer_resource_failure_indication,
 				AccessTunnel, ResponseIEs, Request),
 	    gtp_context:send_response(ReqKey, Request, Response),

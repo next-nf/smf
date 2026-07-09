@@ -755,6 +755,7 @@ common() ->
      gx_dedicated_bearer_create_partial_reject,
      gx_dedicated_bearer_create_power_saving_retry,
      bearer_resource_command_create,
+     bearer_resource_command_reject,
      dedicated_bearer_session_delete,
      gy_asr,
      gy_async_stop,
@@ -6152,6 +6153,40 @@ bearer_resource_command_create(Config) ->
 
     #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
     ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap),
+
+    delete_session(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+bearer_resource_command_reject() ->
+    [{doc, "Check that a rejected Bearer Resource Command returns a "
+      "Bearer Resource Failure Indication carrying Cause, LBI and PTI"}].
+bearer_resource_command_reject(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+
+    %% Default session BCM is UE_ONLY, so the UE-requested new bearer is rejected
+    {GtpC2, BRCReq} = bearer_resource_command(simple, GtpC),
+
+    %% The PGW must answer with a Bearer Resource Failure Indication that
+    %% carries the mandatory Cause, Linked EPS Bearer ID and PTI (TS 29.274 7.2.6)
+    Resp = recv_pdu(GtpC2, BRCReq#gtp.seq_no, 5000, ok),
+    ?match(#gtp{type = bearer_resource_failure_indication,
+		ie = #{{v2_cause, 0} :=
+			   #v2_cause{v2_cause = request_rejected},
+		       {v2_eps_bearer_id, 0} :=
+			   #v2_eps_bearer_id{eps_bearer_id = 5},
+		       {v2_procedure_transaction_id, 0} :=
+			   #v2_procedure_transaction_id{pti = 1}}}, Resp),
 
     delete_session(GtpC2),
 
