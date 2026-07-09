@@ -39,8 +39,40 @@ encode(#{operation := Operation, filters := Filters, parameters := Parameters}) 
 
 %% flow_info_to_tft/1 — [map()] -> binary()
 flow_info_to_tft(FlowInfoList) ->
-    Filters = flow_info_list_to_filters(FlowInfoList, 0, 255),
+    Filters0 = flow_info_list_to_filters(FlowInfoList, 0, 255),
+    Filters = ensure_uplink_filter(Filters0),
     encode(#{operation => create_new_tft, filters => Filters, parameters => []}).
+
+%% TS 23.401 §5.4.5 / TS 23.060 §15.3.3.4: if after all operations a dedicated
+%% bearer TFT contains only downlink packet filters, the PDN GW shall add an
+%% uplink filter that effectively disallows any useful uplink traffic. Without
+%% it a conformant UE rejects the ACTIVATE DEDICATED EPS BEARER CONTEXT REQUEST
+%% with ESM cause #44 (TS 24.301 §6.4.2.4).
+ensure_uplink_filter([]) -> [];
+ensure_uplink_filter(Filters) ->
+    case lists:any(fun is_uplink_applicable/1, Filters) of
+	true  -> Filters;
+	false -> Filters ++ [disallow_uplink_filter(Filters)]
+    end.
+
+is_uplink_applicable(#{direction := uplink})        -> true;
+is_uplink_applicable(#{direction := bidirectional}) -> true;
+is_uplink_applicable(_)                             -> false.
+
+%% Uplink filter matching remote address 0.0.0.0/32 — no real destination — so
+%% it admits no useful uplink traffic (TS 23.060 §15.3.3.4 example).
+disallow_uplink_filter(Filters) ->
+    #{id => next_filter_id(Filters),
+      direction => uplink,
+      precedence => disallow_precedence(Filters),
+      components => [{ipv4_remote, <<0, 0, 0, 0>>, <<255, 255, 255, 255>>}]}.
+
+next_filter_id(Filters) ->
+    Used = [Id || #{id := Id} <- Filters],
+    hd([N || N <- lists:seq(0, 15), not lists:member(N, Used)]).
+
+disallow_precedence(Filters) ->
+    max(0, lists:min([P || #{precedence := P} <- Filters]) - 1).
 
 %% tft_to_flow_info/1 — binary() -> [map()]
 tft_to_flow_info(Bin) ->
