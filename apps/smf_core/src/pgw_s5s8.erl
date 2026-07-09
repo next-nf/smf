@@ -122,7 +122,7 @@ init(_Opts, Data0) ->
     PCC = #pcc_ctx{offline_charging_profile = OCPcfg},
     Data = Data0#{'Version' => v2, aaa_session => AAASession, pcf => PCF,
 		  charging => Charging, aaa_auth => AAAAuth, pcc => PCC,
-		  pending_bearers => #{}},
+		  pending_bearers => #{}, retry_bearers => #{}},
     {ok, smf_context:init_state(), Data}.
 
 handle_event(Type, Content, State, #{'Version' := v1} = Data) ->
@@ -330,7 +330,8 @@ handle_request(ReqKey,
     Response = response(modify_bearer_response, AccessTunnel, ResponseIEs, Request),
     gtp_context:send_response(ReqKey, Request, Response),
 
-    DataNew = Data#{pfcp => PCtx, tunnels => Tunnels#{'Access' => AccessTunnel}, bearers => BearerMap, aaa_session => S2},
+    DataNew0 = Data#{pfcp => PCtx, tunnels => Tunnels#{'Access' => AccessTunnel}, bearers => BearerMap, aaa_session => S2},
+    DataNew = retry_pending_bearers(AccessTunnel, DataNew0),
     Actions = context_idle_action([], Context),
     {keep_state, DataNew, Actions};
 
@@ -359,7 +360,8 @@ handle_request(ReqKey,
     Response = response(modify_bearer_response, AccessTunnel, ResponseIEs, Request),
     gtp_context:send_response(ReqKey, Request, Response),
 
-    DataNew = Data#{pfcp => PCtx, tunnels => Tunnels#{'Access' => AccessTunnel}, aaa_session => S1},
+    DataNew0 = Data#{pfcp => PCtx, tunnels => Tunnels#{'Access' => AccessTunnel}, aaa_session => S1},
+    DataNew = retry_pending_bearers(AccessTunnel, DataNew0),
     Actions = context_idle_action([], Context),
     {keep_state, DataNew, Actions};
 
@@ -530,7 +532,10 @@ handle_response({create_bearer, PgwFTEID},
 			       {error, _}         -> PCtx0
 			   end,
 		    Data1 = Data0#{bearers := BearerMap, pfcp := PCtx,
-				   pending_bearers := Pending},
+				   pending_bearers := Pending,
+				   retry_bearers :=
+				       maps:remove(PgwFTEID,
+						   maps:get(retry_bearers, Data0, #{}))},
 		    Data = report_bearer_establishment(PgwBI, QCI, ARP, Data1),
 		    {keep_state, Data};
 		error ->
@@ -539,6 +544,18 @@ handle_response({create_bearer, PgwFTEID},
 	false ->
 	    handle_create_bearer_failure(PgwFTEID, Data0)
     end;
+
+handle_response({create_bearer, PgwFTEID},
+		#gtp{type = create_bearer_response,
+		     ie = #{?'Cause' :=
+				#v2_cause{v2_cause =
+					      ue_is_temporarily_not_reachable_due_to_power_saving}}},
+		_Request, _State, Data0) ->
+    %% Temporary condition (TS 29.274 8.4, TS 23.401 5.4.1 step 12): the UE is
+    %% not reachable due to power saving. Do NOT remove the PCC rule or report a
+    %% failure to the PCRF; hold the procedure and re-attempt the Create Bearer
+    %% Request once the UE is reachable again (next Modify Bearer Request).
+    handle_create_bearer_power_saving(PgwFTEID, Data0);
 
 handle_response({create_bearer, PgwFTEID},
 		#gtp{type = create_bearer_response},
@@ -814,7 +831,13 @@ initiate_create_dedicated_bearer(PTI, QCI, ARP, QoS, FlowInfo, DefaultEBI, Acces
 		    create_dedicated_bearer(PTI, DefaultEBI, QoS, TFTBin, ChId, AccessBearer, AccessTunnel),
 		    PgwFTEID = AccessBearer#bearer.local,
 		    Pending = Pending0#{PgwFTEID => {QCI, ARP, AccessBearer, ChId}},
-		    Data#{pending_bearers := Pending};
+		    %% Retain the original request params so the Create Bearer
+		    %% Request can be re-issued verbatim if the UE is temporarily
+		    %% unreachable due to power saving (TS 23.401 5.4.1 step 12).
+		    Retry0 = maps:get(retry_bearers, Data, #{}),
+		    Retry = Retry0#{PgwFTEID =>
+					{PTI, DefaultEBI, QoS, TFTBin, AccessBearer, ChId}},
+		    Data#{pending_bearers := Pending, retry_bearers => Retry};
 		_ ->
 		    Data
 	    end;
@@ -877,7 +900,10 @@ report_bearer_failure(RuleNames,
 %% INACTIVE and Rule-Failure-Code RESOURCE_ALLOCATION_FAILURE.
 handle_create_bearer_failure(PgwFTEID,
 			     #{bearers := BearerMap, pfcp := PCtx0, pcc := PCC,
-			       pending_bearers := Pending0} = Data0) ->
+			       pending_bearers := Pending0} = Data00) ->
+    %% Terminal failure: drop any retained retry params for this bearer.
+    Data0 = Data00#{retry_bearers =>
+			maps:remove(PgwFTEID, maps:get(retry_bearers, Data00, #{}))},
     case maps:take(PgwFTEID, Pending0) of
 	{{QCI, ARP, _AccessBearer, _ChId}, Pending} ->
 	    case affected_pcc_rules(QCI, ARP, PCC) of
@@ -900,6 +926,34 @@ handle_create_bearer_failure(PgwFTEID,
 	error ->
 	    {keep_state, Data0}
     end.
+
+%% Handle a Create Bearer Response rejected with cause
+%% ue_is_temporarily_not_reachable_due_to_power_saving. This is a *temporary*
+%% condition, not a resource failure: per TS 29.274 8.4 and TS 23.401 5.4.1
+%% step 12 the PGW must hold the network initiated procedure and re-attempt the
+%% same Create Bearer Request once the UE is reachable again. The pending_bearers
+%% and retry_bearers entries are therefore left intact so the retry (fired on the
+%% next Modify Bearer Request) can proceed; no rule is removed and no failure is
+%% reported to the PCRF.
+handle_create_bearer_power_saving(PgwFTEID, Data) ->
+    ?LOG(warning, "Create Bearer rejected: UE temporarily not reachable due to "
+	 "power saving; holding bearer ~p for retry on next Modify Bearer Request",
+	 [PgwFTEID]),
+    {keep_state, Data}.
+
+%% A Modify Bearer Request signals the UE is reachable again (TS 23.401 5.4.1
+%% step 12). Re-issue any Create Bearer Request that was held because the UE was
+%% temporarily unreachable due to power saving, then clear the retry set. The
+%% matching pending_bearers entry is left in place so the retry response installs
+%% the bearer as usual.
+retry_pending_bearers(AccessTunnel, Data) ->
+    Retry = maps:get(retry_bearers, Data, #{}),
+    maps:foreach(
+      fun(_PgwFTEID, {PTI, DefaultEBI, QoS, TFTBin, AccessBearer, ChId}) ->
+	      create_dedicated_bearer(PTI, DefaultEBI, QoS, TFTBin, ChId,
+				      AccessBearer, AccessTunnel)
+      end, Retry),
+    Data#{retry_bearers => #{}}.
 
 %% Extract the per-bearer Cause from a Bearer Context group. The Cause is
 %% mandatory in a Create Bearer Response (TS 29.274 Table 7.2.4-2); default to
