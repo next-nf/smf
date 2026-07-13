@@ -755,6 +755,8 @@ common() ->
      gx_dedicated_bearer_create_partial_reject,
      gx_dedicated_bearer_create_power_saving_retry,
      bearer_resource_command_create,
+     bearer_resource_command_reject,
+     bearer_resource_command_delete,
      dedicated_bearer_session_delete,
      gy_asr,
      gy_async_stop,
@@ -1035,6 +1037,10 @@ init_per_testcase(gx_dedicated_bearer_create_power_saving_retry, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(bearer_resource_command_create, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(bearer_resource_command_delete, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -6154,6 +6160,150 @@ bearer_resource_command_create(Config) ->
     ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap),
 
     delete_session(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+bearer_resource_command_reject() ->
+    [{doc, "Check that a rejected Bearer Resource Command returns a "
+      "Bearer Resource Failure Indication carrying Cause, LBI and PTI"}].
+bearer_resource_command_reject(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+
+    %% Default session BCM is UE_ONLY, so the UE-requested new bearer is rejected
+    {GtpC2, BRCReq} = bearer_resource_command(simple, GtpC),
+
+    %% The PGW must answer with a Bearer Resource Failure Indication that
+    %% carries the mandatory Cause, Linked EPS Bearer ID and PTI (TS 29.274 7.2.6)
+    Resp = recv_pdu(GtpC2, BRCReq#gtp.seq_no, 5000, ok),
+    ?match(#gtp{type = bearer_resource_failure_indication,
+		ie = #{{v2_cause, 0} :=
+			   #v2_cause{v2_cause = request_rejected},
+		       {v2_eps_bearer_id, 0} :=
+			   #v2_eps_bearer_id{eps_bearer_id = 5},
+		       {v2_procedure_transaction_id, 0} :=
+			   #v2_procedure_transaction_id{pti = 1}}}, Resp),
+
+    delete_session(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+bearer_resource_command_delete() ->
+    [{doc, "Check that a Bearer Resource Command whose TAD deletes the TFT of an "
+      "existing dedicated bearer triggers a PGW-initiated Delete Bearer Request "
+      "carrying that EBI and the echoed PTI"}].
+bearer_resource_command_delete(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+
+    %% First establish a dedicated bearer via a UE-requested Bearer Resource
+    %% Command (BCM = UE_NW), mirroring bearer_resource_command_create.
+    {GtpC2, _BRCReq} = bearer_resource_command(simple, GtpC),
+
+    CBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = create_bearer_request}, CBReq),
+    #gtp{seq_no = CBSeqNo,
+         ie = #{{v2_bearer_context, 0} :=
+                    #v2_bearer_context{
+                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 1} :=
+                                     #v2_fully_qualified_tunnel_endpoint_identifier{
+                                        interface_type = ?'S5/S8-U PGW',
+                                        key = PgwUTEI,
+                                        ipv4 = PgwUIP4,
+                                        ipv6 = PgwUIP6},
+                                 {v2_charging_id, 0} := #v2_charging_id{}
+                                }
+                      }}} = CBReq,
+
+    GtpCDed = gtp_context_new_teids(GtpC2),
+    #gtpc{local_ip = LocalIP,
+          local_data_tei = SgwUTEI,
+          remote_control_tei = RemoteCntlTEI} = GtpCDed,
+    DedEBI = 7,
+
+    PgwUFTEID =
+        if PgwUIP4 /= undefined, size(PgwUIP4) =:= 4 ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI, ipv4 = PgwUIP4};
+           PgwUIP6 /= undefined, size(PgwUIP6) =:= 16 ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI, ipv6 = PgwUIP6};
+           true ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI}
+        end,
+    SgwUFTEID =
+        case LocalIP of
+            {_,_,_,_} ->
+                #v2_fully_qualified_tunnel_endpoint_identifier{
+                   instance = 3, interface_type = ?'S5/S8-U SGW',
+                   key = SgwUTEI, ipv4 = smf_inet:ip2bin(LocalIP)};
+            {_,_,_,_,_,_,_,_} ->
+                #v2_fully_qualified_tunnel_endpoint_identifier{
+                   instance = 3, interface_type = ?'S5/S8-U SGW',
+                   key = SgwUTEI, ipv6 = smf_inet:ip2bin(LocalIP)}
+        end,
+    CBRespIEs = [#v2_cause{v2_cause = request_accepted},
+                 #v2_bearer_context{
+                    group = [#v2_cause{v2_cause = request_accepted},
+                             #v2_eps_bearer_id{eps_bearer_id = DedEBI},
+                             PgwUFTEID,
+                             SgwUFTEID]}],
+    CBResp = #gtp{version = v2, type = create_bearer_response,
+                  tei = RemoteCntlTEI, seq_no = CBSeqNo, ie = CBRespIEs},
+    send_pdu(Cntl, GtpCDed, CBResp),
+
+    ct:sleep(200),
+
+    #{bearers := BearerMap0} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap0),
+
+    %% The UE now requests removal of the whole TFT of that dedicated bearer.
+    %% BCM = UE_NW + delete_existing_tft on an existing dedicated EBI must run
+    %% the PGW Initiated Bearer Deactivation Procedure.
+    {GtpC3, _BRCReq2} = bearer_resource_command({delete_tft, DedEBI}, GtpC2),
+
+    %% The PGW sends a Delete Bearer Request on the control socket carrying the
+    %% dedicated EBI at instance 1 and echoing the UE PTI (1).
+    DBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = delete_bearer_request,
+                ie = #{{v2_eps_bearer_id, 1} :=
+                           #v2_eps_bearer_id{eps_bearer_id = DedEBI},
+                       {v2_procedure_transaction_id, 0} :=
+                           #v2_procedure_transaction_id{pti = 1}}}, DBReq),
+
+    DBResp = make_response(DBReq, simple, GtpCDed),
+    send_pdu(Cntl, GtpCDed, DBResp),
+
+    ct:sleep(200),
+
+    %% After the response the dedicated bearer is gone from the context.
+    #{bearers := BearerMap1} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?equal(false, is_map_key({'Access', DedEBI}, BearerMap1)),
+
+    delete_session(GtpC3),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4tunnels(?TIMEOUT),

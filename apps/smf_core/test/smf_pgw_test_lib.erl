@@ -608,6 +608,26 @@ make_request(bearer_resource_command, simple,
     #gtp{version = v2, type = bearer_resource_command, tei = RemoteCntlTEI,
 	 seq_no = SeqNo bor 16#800000, ie = IEs};
 
+make_request(bearer_resource_command, {delete_tft, TargetEBI},
+	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
+		   local_ip = LocalIP,
+		   local_control_tei = LocalCntlTEI,
+		   remote_control_tei = RemoteCntlTEI}) ->
+    %% UE requests removal of the whole TFT of an existing dedicated bearer
+    TADBin = smf_tft:encode(#{operation => delete_existing_tft,
+			      filters => [], parameters => []}),
+    IEs = [#v2_recovery{restart_counter = RCnt},
+	   %% Linked EPS Bearer ID (instance 0)
+	   #v2_eps_bearer_id{instance = 0, eps_bearer_id = 5},
+	   #v2_procedure_transaction_id{pti = 1},
+	   #v2_traffic_aggregation_description{value = TADBin},
+	   %% EPS Bearer ID for the targeted dedicated bearer (instance 1)
+	   #v2_eps_bearer_id{instance = 1, eps_bearer_id = TargetEBI},
+	   fq_teid(0, ?'S5/S8-C SGW', LocalCntlTEI, LocalIP)
+	  ],
+    #gtp{version = v2, type = bearer_resource_command, tei = RemoteCntlTEI,
+	 seq_no = SeqNo bor 16#800000, ie = IEs};
+
 make_request(change_notification_request, simple,
 	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
 		   remote_control_tei = RemoteCntlTEI,

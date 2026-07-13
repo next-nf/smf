@@ -8,10 +8,10 @@
 -module(smf_tft).
 
 -export([encode/1, decode/1,
-	 flow_info_to_tft/1, tft_to_flow_info/1,
+	 flow_info_to_tft/1, tft_to_flow_info/1, decode_tad/1,
 	 parse_flow_description/1, format_flow_description/1]).
 -ignore_xref([encode/1, decode/1,
-	      flow_info_to_tft/1, tft_to_flow_info/1,
+	      flow_info_to_tft/1, tft_to_flow_info/1, decode_tad/1,
 	      parse_flow_description/1, format_flow_description/1]).
 
 %%%===================================================================
@@ -96,6 +96,30 @@ disallow_precedence(Filters) ->
 tft_to_flow_info(Bin) ->
     #{filters := Filters} = decode(Bin),
     [filter_to_flow_info(F) || F <- Filters].
+
+%% decode_tad/1 — binary() -> {Operation, Contents}
+%%
+%% Decode a Traffic Aggregate Description / TFT (TS 24.008 §10.5.6.12) keeping
+%% the operation code so a caller (e.g. the Bearer Resource Command handler in
+%% pgw_s5s8) can apply the requested change per TS 23.401 §5.4.5 step 5 — an
+%% add, a replace or a delete — rather than blindly creating.
+%%
+%% The shape of Contents is operation-dependent, mirroring the wire format:
+%%   - delete_packet_filters: the packet-filter list carries only identifiers,
+%%     so Contents is a list of packet filter ids (0..15 integers) to remove.
+%%   - every other operation: the list carries full packet filters, so Contents
+%%     is a list of flow-info maps (same shape tft_to_flow_info/1 yields), ready
+%%     to be created / added / replaced.
+decode_tad(Bin) ->
+    #{operation := Operation, filters := Filters} = decode(Bin),
+    Contents =
+	case Operation of
+	    delete_packet_filters ->
+		[Id || #{id := Id} <- Filters];
+	    _ ->
+		[filter_to_flow_info(F) || F <- Filters]
+	end,
+    {Operation, Contents}.
 
 %% parse_flow_description/1 — binary() -> {Direction, [component()]}
 parse_flow_description(Desc) when is_binary(Desc) ->

@@ -436,7 +436,7 @@ handle_request(ReqKey,
 handle_request(ReqKey,
 	       #gtp{type = bearer_resource_command,
 		    ie = #{?'Linked EPS Bearer ID' :=
-			       #v2_eps_bearer_id{eps_bearer_id = _LinkedEBI},
+			       #v2_eps_bearer_id{eps_bearer_id = LinkedEBI},
 			   ?'Procedure Transaction Id' :=
 			       #v2_procedure_transaction_id{pti = PTI},
 			   ?'Traffic Aggregate Description' :=
@@ -445,8 +445,10 @@ handle_request(ReqKey,
 	       _Resent, #{session := connected} = _State,
 	       #{context := Context,
 		 tunnels := #{'Access' := AccessTunnel},
+		 bearers := BearerMap,
 		 aaa_session := Session} = Data) ->
     FlowInfo = smf_tft:tft_to_flow_info(TADBin),
+    {TADOp, _TADContents} = smf_tft:decode_tad(TADBin),
     EBI = case IEs of
 	      #{{v2_eps_bearer_id, 1} := #v2_eps_bearer_id{eps_bearer_id = E}} -> E;
 	      _ -> 0
@@ -468,8 +470,28 @@ handle_request(ReqKey,
 	    gtp_context:request_finished(ReqKey),
 	    Actions = context_idle_action([], Context),
 	    {keep_state, Data1, Actions};
+       EBI =/= 0, BCM =:= ?'DIAMETER_GX_BEARER-CONTROL-MODE_UE_NW',
+       TADOp =:= delete_existing_tft,
+       is_map_key({'Access', EBI}, BearerMap) ->
+	    %% TS 23.401 5.4.5 step 5: the UE TAD removes the whole TFT of a
+	    %% dedicated bearer, so all packet filters are gone -> run the PGW
+	    %% Initiated Bearer Deactivation Procedure. Echo the PTI so the
+	    %% Delete Bearer Request is tied to this UE-requested procedure
+	    %% (TS 29.274 7.2.9.2, PTI Conditional). Ack the command the same
+	    %% way the create branch does, then initiate the deactivation.
+	    Data1 = initiate_delete_dedicated_bearer(PTI, EBI, AccessTunnel, Data),
+	    gtp_context:request_finished(ReqKey),
+	    Actions = context_idle_action([], Context),
+	    {keep_state, Data1, Actions};
        true ->
-	    ResponseIEs = [#v2_cause{v2_cause = request_rejected}],
+	    %% TODO(#22): UE-requested add_packet_filters / replace_packet_filters /
+	    %% delete_packet_filters on an existing dedicated bearer requires PCRF
+	    %% re-authorization (Gx CCR-U with the TAD translated to SDF filter
+	    %% identifiers) plus per-bearer SDF/packet-filter-id state this module
+	    %% does not yet track (see #21); deferred to follow-up #22. Reject for now.
+	    ResponseIEs = [#v2_cause{v2_cause = request_rejected},
+			   #v2_eps_bearer_id{eps_bearer_id = LinkedEBI},
+			   #v2_procedure_transaction_id{pti = PTI}],
 	    Response = response(bearer_resource_failure_indication,
 				AccessTunnel, ResponseIEs, Request),
 	    gtp_context:send_response(ReqKey, Request, Response),
@@ -788,9 +810,15 @@ create_dedicated_bearer(PTI, LinkedEBI, QoS, TFTBin, ChId, AccessBearer, Tunnel)
     send_request(Tunnel, ?T3, ?N3, create_bearer_request, RequestIEs,
 		 {create_bearer, PgwFTEID}).
 
-delete_dedicated_bearer(EBI, Tunnel) ->
+delete_dedicated_bearer(PTI, EBI, Tunnel) ->
     RequestIEs0 = [#v2_eps_bearer_id{instance = 1, eps_bearer_id = EBI}],
-    RequestIEs = gtp_v2_c:build_recovery(delete_bearer_request, Tunnel, false, RequestIEs0),
+    %% PTI is Conditional (TS 29.274 7.2.9.2): echo it only for a UE-requested
+    %% deactivation; the network-initiated path passes undefined and omits it.
+    RequestIEs1 = case PTI of
+		      undefined -> RequestIEs0;
+		      _ -> [#v2_procedure_transaction_id{pti = PTI} | RequestIEs0]
+		  end,
+    RequestIEs = gtp_v2_c:build_recovery(delete_bearer_request, Tunnel, false, RequestIEs1),
     send_request(Tunnel, ?T3, ?N3, delete_bearer_request, RequestIEs,
 		 {delete_dedicated_bearer, EBI}).
 
@@ -847,7 +875,10 @@ initiate_create_dedicated_bearer(PTI, QCI, ARP, QoS, FlowInfo, DefaultEBI, Acces
 
 
 initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data) ->
-    delete_dedicated_bearer(EBI, AccessTunnel),
+    initiate_delete_dedicated_bearer(undefined, EBI, AccessTunnel, Data).
+
+initiate_delete_dedicated_bearer(PTI, EBI, AccessTunnel, Data) ->
+    delete_dedicated_bearer(PTI, EBI, AccessTunnel),
     Data.
 
 %% Report new dedicated bearer to PCRF via Gx CCR-Update

@@ -36,7 +36,8 @@ all() ->
      flow_info_to_tft_downlink_only_adds_uplink,
      flow_info_to_tft_uplink_present_unchanged,
      flow_info_to_tft_unique_ids,
-     tft_to_flow_info_roundtrip].
+     tft_to_flow_info_roundtrip,
+     decode_tad_operations].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -427,3 +428,47 @@ tft_to_flow_info_roundtrip(_Config) ->
 	      ?assert(is_binary(Desc)),
 	      ?assert(byte_size(Desc) > 0)
       end, FlowInfoOut).
+
+%%--------------------------------------------------------------------
+decode_tad_operations() ->
+    [{doc, "decode_tad/1 exposes the operation code and the operation-dependent "
+      "contents shape (TS 23.401 5.4.5 step 5): full-filter operations yield "
+      "flow-info maps, delete_packet_filters yields packet filter ids"}].
+decode_tad_operations(_Config) ->
+    Filter1 = #{id => 2,
+		direction => downlink,
+		precedence => 100,
+		components => [{ipv4_remote, <<10, 0, 0, 1>>, <<255, 255, 255, 255>>},
+			       {protocol, 6},
+			       {remote_port, 80}]},
+    Filter2 = #{id => 5,
+		direction => uplink,
+		precedence => 90,
+		components => [{ipv4_local, <<192, 168, 1, 1>>, <<255, 255, 255, 255>>},
+			       {protocol, 17}]},
+
+    %% create_new_tft — full filters come back as flow-info maps
+    CreateBin = smf_tft:encode(#{operation => create_new_tft,
+				 filters => [Filter1], parameters => []}),
+    {create_new_tft, CreateContents} = smf_tft:decode_tad(CreateBin),
+    ?assertEqual(1, length(CreateContents)),
+    [CreateFlow] = CreateContents,
+    ?assert(is_map(CreateFlow)),
+    ?assertEqual([<<2>>], maps:get('Packet-Filter-Identifier', CreateFlow)),
+    ?assertEqual([1], maps:get('Flow-Direction', CreateFlow)),
+    ?assertMatch([_], maps:get('Flow-Description', CreateFlow)),
+
+    %% add_packet_filters — also full filters -> flow-info maps
+    AddBin = smf_tft:encode(#{operation => add_packet_filters,
+			      filters => [Filter1, Filter2], parameters => []}),
+    {add_packet_filters, AddContents} = smf_tft:decode_tad(AddBin),
+    ?assertEqual(2, length(AddContents)),
+    ?assert(lists:all(fun is_map/1, AddContents)),
+
+    %% delete_packet_filters — contents are packet filter ids, not maps
+    DelFilters = [#{id => 2, direction => bidirectional, precedence => 0, components => []},
+		  #{id => 5, direction => bidirectional, precedence => 0, components => []}],
+    DelBin = smf_tft:encode(#{operation => delete_packet_filters,
+			      filters => DelFilters, parameters => []}),
+    {delete_packet_filters, DelContents} = smf_tft:decode_tad(DelBin),
+    ?assertEqual([2, 5], DelContents).
