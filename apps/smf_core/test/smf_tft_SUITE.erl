@@ -33,6 +33,9 @@ all() ->
      format_flow_description_roundtrip,
      flow_info_to_tft_single,
      flow_info_to_tft_multi,
+     flow_info_to_tft_downlink_only_adds_uplink,
+     flow_info_to_tft_uplink_present_unchanged,
+     flow_info_to_tft_unique_ids,
      tft_to_flow_info_roundtrip].
 
 init_per_suite(Config) -> Config.
@@ -269,9 +272,9 @@ flow_info_to_tft_single(_Config) ->
     %% Decode and verify structure
     #{operation := Op, filters := Filters} = smf_tft:decode(Bin),
     ?assertEqual(create_new_tft, Op),
-    ?assertEqual(1, length(Filters)),
-    [#{direction := Dir, components := Comps}] = Filters,
-    ?assertEqual(downlink, Dir),
+    %% Downlink-only input gains an appended uplink disallow filter
+    ?assertEqual(2, length(Filters)),
+    [#{components := Comps}] = [F || #{direction := downlink} = F <- Filters],
     ?assert(lists:member({protocol, 6}, Comps)),
     ?assert(lists:member({ipv4_remote, <<10, 0, 0, 1>>, <<255, 255, 255, 255>>}, Comps)).
 
@@ -288,11 +291,111 @@ flow_info_to_tft_multi(_Config) ->
     Bin = smf_tft:flow_info_to_tft([FlowInfo1, FlowInfo2]),
     #{operation := Op, filters := Filters} = smf_tft:decode(Bin),
     ?assertEqual(create_new_tft, Op),
-    ?assertEqual(2, length(Filters)),
-    [F1, F2] = Filters,
+    %% Two downlink filters plus the appended uplink disallow filter
+    ?assertEqual(3, length(Filters)),
+    [F1, F2, _Uplink] = Filters,
     %% Precedence decrements: first = 255, second = 254
     ?assertEqual(255, maps:get(precedence, F1)),
     ?assertEqual(254, maps:get(precedence, F2)).
+
+%%--------------------------------------------------------------------
+flow_info_to_tft_downlink_only_adds_uplink() ->
+    [{doc, "Downlink-only flow info gets an uplink disallow filter appended "
+      "(TS 23.401 5.4.5 / TS 23.060 15.3.3.4)"}].
+flow_info_to_tft_downlink_only_adds_uplink(_Config) ->
+    FlowInfo1 = #{'Flow-Description' =>
+		      [<<"permit out 6 from 10.0.0.1 to assigned 80">>],
+		  'Flow-Direction' => [1]},
+    FlowInfo2 = #{'Flow-Description' =>
+		      [<<"permit out 17 from 10.0.0.2 to assigned 53">>],
+		  'Flow-Direction' => [1]},
+    Bin = smf_tft:flow_info_to_tft([FlowInfo1, FlowInfo2]),
+    #{operation := Op, filters := Filters} = smf_tft:decode(Bin),
+    ?assertEqual(create_new_tft, Op),
+    %% Two downlink filters plus the appended uplink disallow filter
+    ?assertEqual(3, length(Filters)),
+    UplinkFilters = [F || #{direction := D} = F <- Filters,
+			  D =:= uplink orelse D =:= bidirectional],
+    ?assertEqual(1, length(UplinkFilters)),
+    [Uplink] = UplinkFilters,
+    ?assertEqual(uplink, maps:get(direction, Uplink)),
+    %% remote port 9 (discard) — TS 23.060 §15.3.3.4, independent of IP version
+    ?assertEqual([{remote_port, 9}], maps:get(components, Uplink)),
+    %% id must not collide with the two downlink filters (ids 0 and 1)
+    Ids = [maps:get(id, F) || F <- Filters],
+    ?assertEqual(lists:usort(Ids), lists:sort(Ids)).
+
+%%--------------------------------------------------------------------
+flow_info_to_tft_uplink_present_unchanged() ->
+    [{doc, "A TFT already containing an uplink/bidirectional filter gets no "
+      "spurious extra filter"}].
+flow_info_to_tft_uplink_present_unchanged(_Config) ->
+    %% One downlink, one uplink flow — already uplink-applicable
+    FlowInfoDl = #{'Flow-Description' =>
+		       [<<"permit out 6 from 10.0.0.1 to assigned 80">>],
+		   'Flow-Direction' => [1]},
+    FlowInfoUl = #{'Flow-Description' =>
+		       [<<"permit in 17 from assigned to 10.0.0.2 53">>],
+		   'Flow-Direction' => [2]},
+    Bin = smf_tft:flow_info_to_tft([FlowInfoDl, FlowInfoUl]),
+    #{filters := Filters} = smf_tft:decode(Bin),
+    ?assertEqual(2, length(Filters)),
+    %% no disallow filter (remote port 9) was added
+    ?assertNot(lists:any(
+		 fun(#{components := Comps}) ->
+			 lists:member({remote_port, 9}, Comps)
+		 end, Filters)),
+    %% a bidirectional-only flow is also uplink-applicable — no extra filter
+    FlowInfoBi = #{'Flow-Description' =>
+		       [<<"permit out 6 from 10.0.0.3 to assigned 22">>],
+		   'Flow-Direction' => [3]},
+    BinBi = smf_tft:flow_info_to_tft([FlowInfoBi]),
+    #{filters := FiltersBi} = smf_tft:decode(BinBi),
+    ?assertEqual(1, length(FiltersBi)).
+
+%%--------------------------------------------------------------------
+flow_info_to_tft_unique_ids() ->
+    [{doc, "The PGW assigns the TFT packet filter ids itself, unique within "
+      "the TFT (TS 23.401 5.4.5), ignoring any Gx Packet-Filter-Identifier in "
+      "the flow info (TS 29.212 5.3.55 — a separate per-UE SDF handle). Ensures "
+      "no duplicate ids, which a UE would reject with #45 (TS 24.301 6.4.2.4)"}].
+flow_info_to_tft_unique_ids(_Config) ->
+    %% Flows carry assorted (and colliding/malformed) Gx Packet-Filter-Identifier
+    %% values; the PGW must ignore them and assign its own unique 4-bit ids.
+    Dl = fun(Dst) ->
+		 <<"permit out 6 from ", Dst/binary, " to assigned 80">>
+	 end,
+    FlowA = #{'Flow-Description' => [Dl(<<"10.0.0.1">>)],
+	      'Flow-Direction' => [1],
+	      'Packet-Filter-Identifier' => [<<3>>]},
+    FlowB = #{'Flow-Description' => [Dl(<<"10.0.0.2">>)],
+	      'Flow-Direction' => [1]},
+    FlowC = #{'Flow-Description' => [Dl(<<"10.0.0.3">>)],
+	      'Flow-Direction' => [1]},
+    FlowD = #{'Flow-Description' => [Dl(<<"10.0.0.4">>)],
+	      'Flow-Direction' => [1]},
+    FlowE = #{'Flow-Description' => [Dl(<<"10.0.0.5">>)],
+	      'Flow-Direction' => [1],
+	      'Packet-Filter-Identifier' => [<<17>>]},
+    FlowF = #{'Flow-Description' => [Dl(<<"10.0.0.6">>)],
+	      'Flow-Direction' => [1],
+	      'Packet-Filter-Identifier' => [<<1, 2>>]},
+    %% One uplink flow so no disallow filter is appended (deterministic count)
+    FlowG = #{'Flow-Description' =>
+		  [<<"permit in 17 from assigned to 10.0.0.7 53">>],
+	      'Flow-Direction' => [2]},
+    FlowInfo = [FlowA, FlowB, FlowC, FlowD, FlowE, FlowF, FlowG],
+    Bin = smf_tft:flow_info_to_tft(FlowInfo),
+    #{filters := Filters} = smf_tft:decode(Bin),
+    ?assertEqual(7, length(Filters)),
+    Ids = [maps:get(id, F) || F <- Filters],
+    %% every id is a valid 4-bit value
+    ?assert(lists:all(fun(N) -> N >= 0 andalso N =< 15 end, Ids)),
+    %% all ids distinct — the core conformance property
+    ?assertEqual(lists:usort(Ids), lists:sort(Ids)),
+    %% PGW-assigned in order, ignoring the Gx Packet-Filter-Identifier values
+    %% (<<3>>, out-of-range <<17>>, malformed <<1,2>>) present in the input
+    ?assertEqual([0, 1, 2, 3, 4, 5, 6], Ids).
 
 %%--------------------------------------------------------------------
 tft_to_flow_info_roundtrip() ->
@@ -310,12 +413,13 @@ tft_to_flow_info_roundtrip(_Config) ->
     ],
     Bin = smf_tft:flow_info_to_tft(FlowInfoIn),
     FlowInfoOut = smf_tft:tft_to_flow_info(Bin),
-    ?assertEqual(length(FlowInfoIn), length(FlowInfoOut)),
-    %% Check that Flow-Direction is preserved
-    lists:foreach(
-      fun(FI) ->
-	      ?assertEqual([1], maps:get('Flow-Direction', FI))
-      end, FlowInfoOut),
+    %% Two downlink inputs plus the appended uplink disallow filter
+    ?assertEqual(length(FlowInfoIn) + 1, length(FlowInfoOut)),
+    %% The two original downlink flows are preserved, plus one uplink flow
+    DlFlows = [FI || FI <- FlowInfoOut, maps:get('Flow-Direction', FI) =:= [1]],
+    UlFlows = [FI || FI <- FlowInfoOut, maps:get('Flow-Direction', FI) =:= [2]],
+    ?assertEqual(2, length(DlFlows)),
+    ?assertEqual(1, length(UlFlows)),
     %% Check that Flow-Description is present and non-empty
     lists:foreach(
       fun(FI) ->

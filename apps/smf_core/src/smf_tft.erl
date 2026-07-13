@@ -39,8 +39,58 @@ encode(#{operation := Operation, filters := Filters, parameters := Parameters}) 
 
 %% flow_info_to_tft/1 — [map()] -> binary()
 flow_info_to_tft(FlowInfoList) ->
-    Filters = flow_info_list_to_filters(FlowInfoList, 0, 255),
+    Filters0 = flow_info_list_to_filters(FlowInfoList, 0, 255),
+    Filters = ensure_uplink_filter(Filters0),
     encode(#{operation => create_new_tft, filters => Filters, parameters => []}).
+
+%% TS 23.401 §5.4.5 / TS 23.060 §15.3.3.4: if after all operations a dedicated
+%% bearer TFT contains only downlink packet filters, the PDN GW shall add an
+%% uplink filter that effectively disallows any useful uplink traffic. Without
+%% it a conformant UE rejects the ACTIVATE DEDICATED EPS BEARER CONTEXT REQUEST
+%% with ESM cause #44 (TS 24.301 §6.4.2.4).
+ensure_uplink_filter([]) -> [];
+ensure_uplink_filter(Filters) ->
+    case lists:any(fun is_uplink_applicable/1, Filters) of
+	true  -> Filters;
+	false -> Filters ++ [disallow_uplink_filter(Filters)]
+    end.
+
+is_uplink_applicable(#{direction := uplink})        -> true;
+is_uplink_applicable(#{direction := bidirectional}) -> true;
+is_uplink_applicable(_)                             -> false.
+
+%% Uplink filter using the "discard" port (remote port 9) — exactly the example
+%% in TS 23.060 §15.3.3.4. It admits no useful uplink traffic, and a port
+%% component carries no address family, so this single filter is correct for
+%% IPv4, IPv6 and dual-stack dedicated bearers (an address-based filter such as
+%% 0.0.0.0/32 would only be valid for one IP version).
+disallow_uplink_filter(Filters) ->
+    #{id => next_filter_id(Filters),
+      direction => uplink,
+      precedence => disallow_precedence(Filters),
+      components => [{remote_port, 9}]}.
+
+next_filter_id(Filters) ->
+    lowest_free_id(used_ids(Filters)).
+
+%% Used-id set as a 16-bit bitmask (bit N set = id N in use).
+used_ids(Filters) ->
+    lists:foldl(fun(#{id := Id}, Used) -> Used bor (1 bsl Id) end, 0, Filters).
+
+%% Lowest 4-bit id (0..15) not in the used-id bitmask. Each test is O(1), so
+%% filling a whole TFT is O(16) rather than the O(16 * 16) of a linear scan over
+%% a used-id list.
+lowest_free_id(Used) ->
+    lowest_free_id(0, Used).
+
+lowest_free_id(N, Used) when N =< 15 ->
+    case Used band (1 bsl N) of
+	0 -> N;
+	_ -> lowest_free_id(N + 1, Used)
+    end.
+
+disallow_precedence(Filters) ->
+    max(0, lists:min([P || #{precedence := P} <- Filters]) - 1).
 
 %% tft_to_flow_info/1 — binary() -> [map()]
 tft_to_flow_info(Bin) ->
@@ -229,26 +279,28 @@ encode_parameters(Params) ->
 %%% Internal — flow info conversion
 %%%===================================================================
 
-flow_info_list_to_filters([], _, _) -> [];
-flow_info_list_to_filters([FlowInfo | Rest], Index, Precedence) ->
-    Filter = flow_info_to_filter(FlowInfo, Index, Precedence),
-    [Filter | flow_info_list_to_filters(Rest, Index + 1, Precedence - 1)].
+%% Build filters threading the set of already-used packet filter ids so every
+%% filter in the resultant TFT gets a unique identifier. The PGW assigns the
+%% TFT packet filter identifier itself, unique within the TFT (TS 23.401
+%% §5.4.5). This is NOT the Gx Packet-Filter-Identifier (TS 29.212 §5.3.55):
+%% that one is a PCRF-assigned, per-UE SDF-filter handle of type OctetString,
+%% a different value space that cannot be reused as the 4-bit per-TFT id (the
+%% PGW maintains the SDF-id <-> TFT-id relation per §5.4.5). Per TS 24.301
+%% §6.4.2.4 d)1), two filters with identical identifiers in a "Create new TFT"
+%% make a conformant UE reject the activation with ESM cause #45.
+flow_info_list_to_filters([], _Used, _Precedence) -> [];
+flow_info_list_to_filters([FlowInfo | Rest], Used, Precedence) ->
+    Id = lowest_free_id(Used),
+    Filter = flow_info_to_filter(FlowInfo, Id, Precedence),
+    Used1 = Used bor (1 bsl Id),
+    [Filter | flow_info_list_to_filters(Rest, Used1, Precedence - 1)].
 
-flow_info_to_filter(FlowInfo, Index, Precedence) ->
-    Id = get_filter_id(FlowInfo, Index),
+flow_info_to_filter(FlowInfo, Id, Precedence) ->
     Direction = get_flow_direction(FlowInfo),
     BaseComponents = get_flow_components(FlowInfo),
     ExtraComponents = get_extra_components(FlowInfo),
     Components = BaseComponents ++ ExtraComponents,
     #{id => Id, direction => Direction, precedence => Precedence, components => Components}.
-
-get_filter_id(#{'Packet-Filter-Identifier' := [IdBin | _]}, _Index) when is_binary(IdBin) ->
-    case IdBin of
-	<<Id:8>> -> Id band 16#0F;
-	_        -> 0
-    end;
-get_filter_id(_, Index) ->
-    Index band 16#0F.
 
 get_flow_direction(#{'Flow-Direction' := [Dir | _]}) ->
     case Dir of
