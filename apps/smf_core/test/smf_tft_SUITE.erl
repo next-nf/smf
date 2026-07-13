@@ -357,14 +357,13 @@ flow_info_to_tft_uplink_present_unchanged(_Config) ->
 
 %%--------------------------------------------------------------------
 flow_info_to_tft_unique_ids() ->
-    [{doc, "Packet filter ids are unique within the TFT even when explicit "
-      "identifiers and positional indices would previously collide "
-      "(TS 24.301 6.4.2.4 d)1) — duplicate ids make a UE reject with #45)"}].
+    [{doc, "The PGW assigns the TFT packet filter ids itself, unique within "
+      "the TFT (TS 23.401 5.4.5), ignoring any Gx Packet-Filter-Identifier in "
+      "the flow info (TS 29.212 5.3.55 — a separate per-UE SDF handle). Ensures "
+      "no duplicate ids, which a UE would reject with #45 (TS 24.301 6.4.2.4)"}].
 flow_info_to_tft_unique_ids(_Config) ->
-    %% Collision cases under the old positional scheme:
-    %%  - explicit <<3>> (A) vs a no-id flow at positional index 3 (D)
-    %%  - out-of-range explicit <<17>> masked to 1 (E) vs no-id index 1 (B)
-    %%  - malformed non-8-bit identifier fell to a fixed 0 (F)
+    %% Flows carry assorted (and colliding/malformed) Gx Packet-Filter-Identifier
+    %% values; the PGW must ignore them and assign its own unique 4-bit ids.
     Dl = fun(Dst) ->
 		 <<"permit out 6 from ", Dst/binary, " to assigned 80">>
 	 end,
@@ -396,8 +395,9 @@ flow_info_to_tft_unique_ids(_Config) ->
     ?assert(lists:all(fun(N) -> N >= 0 andalso N =< 15 end, Ids)),
     %% all ids distinct — the core conformance property
     ?assertEqual(lists:usort(Ids), lists:sort(Ids)),
-    %% the valid explicit identifier <<3>> is honored
-    ?assert(lists:member(3, Ids)).
+    %% PGW-assigned in order, ignoring the Gx Packet-Filter-Identifier values
+    %% (<<3>>, out-of-range <<17>>, malformed <<1,2>>) present in the input
+    ?assertEqual([0, 1, 2, 3, 4, 5, 6], Ids).
 
 %%--------------------------------------------------------------------
 tft_to_flow_info_roundtrip() ->

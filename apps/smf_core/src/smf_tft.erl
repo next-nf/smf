@@ -265,13 +265,17 @@ encode_parameters(Params) ->
 %%%===================================================================
 
 %% Build filters threading the set of already-used packet filter ids so every
-%% filter in the resultant TFT gets a unique identifier. Per TS 24.301
-%% §6.4.2.4 d)1), two filters with identical packet filter identifiers in a
-%% "Create new TFT" make a conformant UE reject the activation with ESM cause
-%% #45 "syntactical errors in packet filter(s)".
+%% filter in the resultant TFT gets a unique identifier. The PGW assigns the
+%% TFT packet filter identifier itself, unique within the TFT (TS 23.401
+%% §5.4.5). This is NOT the Gx Packet-Filter-Identifier (TS 29.212 §5.3.55):
+%% that one is a PCRF-assigned, per-UE SDF-filter handle of type OctetString,
+%% a different value space that cannot be reused as the 4-bit per-TFT id (the
+%% PGW maintains the SDF-id <-> TFT-id relation per §5.4.5). Per TS 24.301
+%% §6.4.2.4 d)1), two filters with identical identifiers in a "Create new TFT"
+%% make a conformant UE reject the activation with ESM cause #45.
 flow_info_list_to_filters([], _Used, _Precedence) -> [];
 flow_info_list_to_filters([FlowInfo | Rest], Used, Precedence) ->
-    Id = assign_filter_id(FlowInfo, Used),
+    Id = lowest_free_id(Used),
     Filter = flow_info_to_filter(FlowInfo, Id, Precedence),
     [Filter | flow_info_list_to_filters(Rest, [Id | Used], Precedence - 1)].
 
@@ -281,26 +285,6 @@ flow_info_to_filter(FlowInfo, Id, Precedence) ->
     ExtraComponents = get_extra_components(FlowInfo),
     Components = BaseComponents ++ ExtraComponents,
     #{id => Id, direction => Direction, precedence => Precedence, components => Components}.
-
-%% Prefer the flow's explicit Packet-Filter-Identifier when it is a valid 4-bit
-%% value not yet used; otherwise (missing, malformed, out-of-range, or already
-%% taken) allocate the lowest free id. Never falls back to a fixed value.
-assign_filter_id(FlowInfo, Used) ->
-    case explicit_filter_id(FlowInfo) of
-	{ok, Id} ->
-	    case lists:member(Id, Used) of
-		false -> Id;
-		true  -> lowest_free_id(Used)
-	    end;
-	none ->
-	    lowest_free_id(Used)
-    end.
-
-explicit_filter_id(#{'Packet-Filter-Identifier' := [<<Id:8>> | _]})
-  when Id >= 0, Id =< 15 ->
-    {ok, Id};
-explicit_filter_id(_) ->
-    none.
 
 get_flow_direction(#{'Flow-Direction' := [Dir | _]}) ->
     case Dir of
