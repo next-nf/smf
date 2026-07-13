@@ -1050,16 +1050,31 @@ detect_new_bearers(#pcc_ctx{rules = OldRules},
     NewQCIs =
 	maps:fold(
 	  fun(Name, Rule, Acc) ->
-	      case {maps:is_key(Name, OldRules), get_rule_qci_arp(Rule)} of
-		  {false, {QCI, ARP}}
+	      %% A rule needs a new bearer when its current {QCI,ARP} is not
+	      %% bound to any existing bearer (nor already accumulated) AND the
+	      %% rule is brand-new OR its {QCI,ARP} was re-authorized to a value
+	      %% that changed from its old one (TS 29.213 5.4: bearer bindings
+	      %% shall be re-evaluated on QoS re-authorization).
+	      case get_rule_qci_arp(Rule) of
+		  {QCI, ARP}
 		    when not is_map_key({qci_arp, QCI, ARP}, BearerMap),
 			 not is_map_key({QCI, ARP}, Acc) ->
-		      QoS = case maps:get('QoS-Information', Rule, undefined) of
-				[Q] -> Q;
-				Q   -> Q
-			    end,
-		      FlowInfo = maps:get('Flow-Information', Rule, []),
-		      Acc#{{QCI, ARP} => {QoS, FlowInfo}};
+		      Reeval = case maps:find(Name, OldRules) of
+			       error         -> true;
+			       {ok, OldRule} ->
+				   get_rule_qci_arp(OldRule) =/= {QCI, ARP}
+			   end,
+		      case Reeval of
+			  true ->
+			      QoS = case maps:get('QoS-Information', Rule, undefined) of
+					[Q] -> Q;
+					Q   -> Q
+				    end,
+			      FlowInfo = maps:get('Flow-Information', Rule, []),
+			      Acc#{{QCI, ARP} => {QoS, FlowInfo}};
+			  false ->
+			      Acc
+		      end;
 		  _ ->
 		      Acc
 	      end
