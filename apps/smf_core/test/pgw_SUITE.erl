@@ -2298,6 +2298,27 @@ modify_bearer_command(Config) ->
 
     Req1 = recv_pdu(GtpC2, Req0#gtp.seq_no, ?TIMEOUT, ok),
     validate_response(modify_bearer_command, simple, Req1, GtpC2),
+
+    %% TS 23.401 5.4.2.2 step 4: the PGW must inform the PCRF of the updated
+    %% default-bearer EPS Bearer QoS / APN-AMBR via a Gx CCR-Update carrying the
+    %% updated 'QoS-Information' and a DEFAULT_EPS_BEARER_QOS_CHANGE event trigger.
+    QoSModCCRU =
+	lists:filter(
+	  fun({_, {smf_aaa_pcf, ccr_update, [_, _, SOpts, _]}, _}) ->
+		  case SOpts of
+		      #{'QoS-Information' := QoS,
+			'Event-Trigger' :=
+			    ?'DIAMETER_GX_EVENT-TRIGGER_DEFAULT_EPS_BEARER_QOS_CHANGE'}
+			when is_map(QoS) ->
+			  true;
+		      _ ->
+			  false
+		  end;
+	     (_) ->
+		  false
+	  end, meck:history(smf_aaa_pcf)),
+    ?match([_], QoSModCCRU),
+
     Response = make_response(Req1, simple, GtpC2),
     send_pdu(GtpC2, Response),
 

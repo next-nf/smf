@@ -382,6 +382,15 @@ handle_request(#request{src = Src, ip = IP, port = Port} = ReqKey,
     AccessBearer = smf_gsn_lib:get_access_default_bearer(BearerMap),
     {_URRActions, S1} = update_session_from_gtp_req(IEs, S0, AccessTunnel, AccessBearer),
 
+    %% TS 23.401 5.4.2.2 steps 4-5: a Modify Bearer Command is an HSS-initiated
+    %% Subscribed QoS Modification for the default bearer. If PCC is deployed the
+    %% PGW must inform the PCRF of the updated EPS Bearer QoS / APN-AMBR (a
+    %% PCEF-initiated IP-CAN Session Modification, i.e. a Gx CCR-Update) before
+    %% sending the Update Bearer Request. update_session_from_gtp_req/4 has
+    %% already folded the command's APN-AMBR + Bearer Level QoS into the session's
+    %% 'QoS-Information'; report it to the PCRF here.
+    DataNew = report_default_bearer_qos_modification(Data#{aaa_session => S1}),
+
     Type = update_bearer_request,
     RequestIEs0 =
 	[AMBR,
@@ -393,7 +402,7 @@ handle_request(#request{src = Src, ip = IP, port = Port} = ReqKey,
       AccessTunnel, Src, IP, Port, ?T3, ?N3, Msg#gtp{seq_no = SeqNo}, {ReqKey, OldSOpts}),
 
     Actions = context_idle_action([], Context),
-    {keep_state, Data#{aaa_session => S1}, Actions};
+    {keep_state, DataNew, Actions};
 
 handle_request(ReqKey,
 	       #gtp{type = change_notification_request, ie = IEs} = Request,
@@ -989,6 +998,30 @@ report_bearer_establishment(PgwBI, QCI, {PL, PCI, PVI},
 	      'QoS-Information' =>
 		  #{'QoS-Class-Identifier' => QCI,
 		    'Allocation-Retention-Priority' => ARP}},
+    Now = erlang:monotonic_time(),
+    case smf_aaa_pcf:ccr_update(PCF0, S0, SOpts, #{now => Now, async => true}) of
+	{ok, PCF1, S1, _Events} ->
+	    Data#{pcf := PCF1, aaa_session := S1};
+	_ ->
+	    Data
+    end.
+
+%% Inform the PCRF of an updated default-bearer EPS Bearer QoS / APN-AMBR
+%% carried in a Modify Bearer Command (HSS Initiated Subscribed QoS
+%% Modification, TS 23.401 5.4.2.2 step 4). This is a PCEF-initiated IP-CAN
+%% Session Modification: a Gx CCR-Update reporting the updated 'QoS-Information'
+%% (already folded into the session by update_session_from_gtp_req/4) with a
+%% DEFAULT_EPS_BEARER_QOS_CHANGE event trigger.
+%%
+%% TODO: step 4 also allows the PCRF to return an *overriding* PCC decision
+%% (a Default-EPS-Bearer-QoS reshaping the APN-AMBR/QCI/ARP) that the PGW should
+%% enforce in the Update Bearer Request. Consuming that reply requires the async
+%% Gx-reply pipeline (replies arrive as events, not inline here), so for now we
+%% report the change and proceed with the QoS taken from the command itself.
+report_default_bearer_qos_modification(#{pcf := PCF0, aaa_session := S0} = Data) ->
+    SOpts0 = maps:with(['QoS-Information'], S0),
+    SOpts = SOpts0#{'Event-Trigger' =>
+			?'DIAMETER_GX_EVENT-TRIGGER_DEFAULT_EPS_BEARER_QOS_CHANGE'},
     Now = erlang:monotonic_time(),
     case smf_aaa_pcf:ccr_update(PCF0, S0, SOpts, #{now => Now, async => true}) of
 	{ok, PCF1, S1, _Events} ->
