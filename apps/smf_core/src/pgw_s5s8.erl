@@ -1151,7 +1151,7 @@ report_bearer_establishment(PgwBI, QCI, {PL, PCI, PVI},
 %% (already folded into the session by update_session_from_gtp_req/4) with a
 %% DEFAULT_EPS_BEARER_QOS_CHANGE event trigger.
 %%
-%% TODO: step 4 also allows the PCRF to return an *overriding* PCC decision
+%% TODO(#23): step 4 also allows the PCRF to return an *overriding* PCC decision
 %% (a Default-EPS-Bearer-QoS reshaping the APN-AMBR/QCI/ARP) that the PGW should
 %% enforce in the Update Bearer Request. Consuming that reply requires the async
 %% Gx-reply pipeline (replies arrive as events, not inline here), so for now we
