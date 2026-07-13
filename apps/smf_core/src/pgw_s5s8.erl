@@ -436,7 +436,7 @@ handle_request(ReqKey,
 		    ie = #{?'Linked EPS Bearer ID' :=
 			       #v2_eps_bearer_id{eps_bearer_id = _LinkedEBI},
 			   ?'Procedure Transaction Id' :=
-			       #v2_procedure_transaction_id{pti = _PTI},
+			       #v2_procedure_transaction_id{pti = PTI},
 			   ?'Traffic Aggregate Description' :=
 			       #v2_traffic_aggregation_description{value = TADBin}
 			  } = IEs} = Request,
@@ -461,7 +461,7 @@ handle_request(ReqKey,
 	    ARP = {PL, PCI0, PVI},
 	    DefaultEBI = Context#context.default_bearer_id,
 	    Data1 = initiate_create_dedicated_bearer(
-		      QCI, ARP, QoS, FlowInfo,
+		      PTI, QCI, ARP, QoS, FlowInfo,
 		      DefaultEBI, AccessTunnel, Data),
 	    gtp_context:request_finished(ReqKey),
 	    Actions = context_idle_action([], Context),
@@ -512,7 +512,7 @@ handle_response({create_bearer, PgwFTEID},
 		  pending_bearers := Pending0} = Data0)
   when ?CAUSE_OK(Cause) ->
     case maps:take(PgwFTEID, Pending0) of
-	{{QCI, ARP, AccessBearer0}, Pending} ->
+	{{QCI, ARP, AccessBearer0, _ChId}, Pending} ->
 	    #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} = BearerCtxGroup,
 	    AccessBearer = update_bearer_from_response(BearerCtxGroup, AccessBearer0),
 	    PgwBI = <<EBI:8>>,
@@ -745,24 +745,26 @@ install_additional_bearer(BearerGroup, _AccessTunnel,
             Data
     end.
 
-create_dedicated_bearer(LinkedEBI, QoS, TFTBin, AccessBearer, Tunnel) ->
+create_dedicated_bearer(PTI, LinkedEBI, QoS, TFTBin, ChId, AccessBearer, Tunnel) ->
     BearerCtx =
 	[#v2_eps_bearer_id{eps_bearer_id = 0},
 	 encode_bearer_level_qos(QoS),
 	 #v2_eps_bearer_level_traffic_flow_template{value = TFTBin},
-	 s5s8_pgw_gtp_u_tei(AccessBearer)],
+	 s5s8_pgw_gtp_u_tei(1, AccessBearer),
+	 #v2_charging_id{id = <<ChId:32>>}],
     RequestIEs0 = [#v2_eps_bearer_id{eps_bearer_id = LinkedEBI},
 		   #v2_bearer_context{group = BearerCtx}],
-    RequestIEs = gtp_v2_c:build_recovery(create_bearer_request, Tunnel, false, RequestIEs0),
+    RequestIEs1 = case PTI of
+		      undefined -> RequestIEs0;
+		      _ -> [#v2_procedure_transaction_id{pti = PTI} | RequestIEs0]
+		  end,
+    RequestIEs = gtp_v2_c:build_recovery(create_bearer_request, Tunnel, false, RequestIEs1),
     PgwFTEID = AccessBearer#bearer.local,
     send_request(Tunnel, ?T3, ?N3, create_bearer_request, RequestIEs,
 		 {create_bearer, PgwFTEID}).
 
-delete_dedicated_bearer(EBI, DefaultEBI, Tunnel) ->
-    BearerCtx = [#v2_eps_bearer_id{eps_bearer_id = EBI},
-		 #v2_cause{v2_cause = reactivation_requested}],
-    RequestIEs0 = [#v2_eps_bearer_id{eps_bearer_id = DefaultEBI},
-		   #v2_bearer_context{group = BearerCtx}],
+delete_dedicated_bearer(EBI, Tunnel) ->
+    RequestIEs0 = [#v2_eps_bearer_id{instance = 1, eps_bearer_id = EBI}],
     RequestIEs = gtp_v2_c:build_recovery(delete_bearer_request, Tunnel, false, RequestIEs0),
     send_request(Tunnel, ?T3, ?N3, delete_bearer_request, RequestIEs,
 		 {delete_dedicated_bearer, EBI}).
@@ -777,16 +779,16 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
     NewBearers = smf_gsn_lib:detect_new_bearers(OldPCC, NewPCC, BearerMap, BCM),
     Data1 = lists:foldl(
 	      fun({QCI, ARP, QoS, FlowInfo}, D) ->
-		  initiate_create_dedicated_bearer(QCI, ARP, QoS, FlowInfo,
+		  initiate_create_dedicated_bearer(undefined, QCI, ARP, QoS, FlowInfo,
 						   DefaultEBI, AccessTunnel, D)
 	      end, Data, NewBearers),
     RemovedEBIs = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
     lists:foldl(
       fun(EBI, D) ->
-	  initiate_delete_dedicated_bearer(EBI, DefaultEBI, AccessTunnel, D)
+	  initiate_delete_dedicated_bearer(EBI, AccessTunnel, D)
       end, Data1, RemovedEBIs).
 
-initiate_create_dedicated_bearer(QCI, ARP, QoS, FlowInfo, DefaultEBI, AccessTunnel,
+initiate_create_dedicated_bearer(PTI, QCI, ARP, QoS, FlowInfo, DefaultEBI, AccessTunnel,
 				 #{bearers := BearerMap0, pfcp := PCtx0,
 				   pending_bearers := Pending0} = Data) ->
     %% Derive PGW GTP-U IP and VRF from the existing default Access bearer
@@ -800,9 +802,10 @@ initiate_create_dedicated_bearer(QCI, ARP, QoS, FlowInfo, DefaultEBI, AccessTunn
 					   vrf = VRF,
 					   local = #fq_teid{ip = PgwUIP, teid = DataTEI}},
 		    TFTBin = smf_tft:flow_info_to_tft(FlowInfo),
-		    create_dedicated_bearer(DefaultEBI, QoS, TFTBin, AccessBearer, AccessTunnel),
+		    ChId = smf_gtp_c_socket:get_uniq_id(AccessTunnel#tunnel.socket),
+		    create_dedicated_bearer(PTI, DefaultEBI, QoS, TFTBin, ChId, AccessBearer, AccessTunnel),
 		    PgwFTEID = AccessBearer#bearer.local,
-		    Pending = Pending0#{PgwFTEID => {QCI, ARP, AccessBearer}},
+		    Pending = Pending0#{PgwFTEID => {QCI, ARP, AccessBearer, ChId}},
 		    Data#{pending_bearers := Pending};
 		_ ->
 		    Data
@@ -812,8 +815,8 @@ initiate_create_dedicated_bearer(QCI, ARP, QoS, FlowInfo, DefaultEBI, AccessTunn
     end.
 
 
-initiate_delete_dedicated_bearer(EBI, DefaultEBI, AccessTunnel, Data) ->
-    delete_dedicated_bearer(EBI, DefaultEBI, AccessTunnel),
+initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data) ->
+    delete_dedicated_bearer(EBI, AccessTunnel),
     Data.
 
 %% Report new dedicated bearer to PCRF via Gx CCR-Update
@@ -1429,8 +1432,11 @@ s5s8_pgw_gtp_c_tei(#tunnel{local = #fq_teid{ip = IP, teid = TEI}}) ->
     %% or for GTP based Control Plane interface
     fq_teid(1, ?'S5/S8-C PGW', TEI, IP).
 
-s5s8_pgw_gtp_u_tei(#bearer{local = #fq_teid{ip = IP, teid = TEI}}) ->
-    fq_teid(2,  ?'S5/S8-U PGW', TEI, IP).
+s5s8_pgw_gtp_u_tei(Bearer) ->
+    s5s8_pgw_gtp_u_tei(2, Bearer).
+
+s5s8_pgw_gtp_u_tei(Instance, #bearer{local = #fq_teid{ip = IP, teid = TEI}}) ->
+    fq_teid(Instance, ?'S5/S8-U PGW', TEI, IP).
 
 cr_ran_type(1)  -> 'UTRAN';
 cr_ran_type(2)  -> 'UTRAN';

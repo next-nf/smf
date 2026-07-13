@@ -5588,12 +5588,13 @@ gx_rar_dedicated_bearer_create(Config) ->
     #gtp{seq_no = CBSeqNo,
          ie = #{{v2_bearer_context, 0} :=
                     #v2_bearer_context{
-                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 2} :=
+                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 1} :=
                                      #v2_fully_qualified_tunnel_endpoint_identifier{
                                         interface_type = ?'S5/S8-U PGW',
                                         key = PgwUTEI,
                                         ipv4 = PgwUIP4,
-                                        ipv6 = PgwUIP6}
+                                        ipv6 = PgwUIP6},
+                                 {v2_charging_id, 0} := #v2_charging_id{}
                                 }
                       }}} = CBReq,
 
@@ -5693,15 +5694,19 @@ bearer_resource_command_create(Config) ->
     %% The PGW should now send a Create Bearer Request
     CBReq = recv_pdu(Cntl, 5000),
     ?match(#gtp{type = create_bearer_request}, CBReq),
+    %% UE-requested procedure: PTI from the Bearer Resource Command must be echoed
+    ?match(#gtp{ie = #{{v2_procedure_transaction_id, 0} :=
+                           #v2_procedure_transaction_id{pti = 1}}}, CBReq),
     #gtp{seq_no = CBSeqNo,
          ie = #{{v2_bearer_context, 0} :=
                     #v2_bearer_context{
-                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 2} :=
+                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 1} :=
                                      #v2_fully_qualified_tunnel_endpoint_identifier{
                                         interface_type = ?'S5/S8-U PGW',
                                         key = PgwUTEI,
                                         ipv4 = PgwUIP4,
-                                        ipv6 = PgwUIP6}
+                                        ipv6 = PgwUIP6},
+                                 {v2_charging_id, 0} := #v2_charging_id{}
                                 }
                       }}} = CBReq,
 
@@ -5809,12 +5814,13 @@ dedicated_bearer_session_delete(Config) ->
     #gtp{seq_no = CBSeqNo,
          ie = #{{v2_bearer_context, 0} :=
                     #v2_bearer_context{
-                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 2} :=
+                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 1} :=
                                      #v2_fully_qualified_tunnel_endpoint_identifier{
                                         interface_type = ?'S5/S8-U PGW',
                                         key = PgwUTEI,
                                         ipv4 = PgwUIP4,
-                                        ipv6 = PgwUIP6}
+                                        ipv6 = PgwUIP6},
+                                 {v2_charging_id, 0} := #v2_charging_id{}
                                 }
                       }}} = CBReq,
 
