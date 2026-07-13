@@ -552,11 +552,10 @@ handle_request(ReqKey,
     %% issues a network-initiated Delete Bearer Request. Default bearers are
     %% never deleted this way.
     DefaultEBI = Context#context.default_bearer_id,
-    EBIs = command_bearer_ebis(BearerContexts),
-    Data = lists:foldl(
-	     fun(EBI, D) ->
-		     deactivate_commanded_bearer(EBI, DefaultEBI, AccessTunnel, D)
-	     end, Data0, EBIs),
+    Data = ie_foldl(
+	     fun(BearerContext, D) ->
+		     deactivate_commanded_bearer(BearerContext, DefaultEBI, AccessTunnel, D)
+	     end, Data0, BearerContexts),
     %% Like modify_bearer_command, no direct response is sent; the follow-on
     %% Delete Bearer Request(s) carry the procedure forward.
     gtp_context:request_finished(ReqKey),
@@ -1058,38 +1057,27 @@ initiate_delete_dedicated_bearer(PTI, EBI, AccessTunnel, Data) ->
 %% Extract the dedicated EPS Bearer ID(s) named in a Delete Bearer Command
 %% Bearer Context IE (TS 29.274 7.2.17.1-2). gtplib may surface a single
 %% Bearer Context or a list; handle both.
-command_bearer_ebis(#v2_bearer_context{} = BC) ->
-    command_bearer_ebis([BC]);
-command_bearer_ebis(BearerContexts) when is_list(BearerContexts) ->
-    lists:foldr(
-      fun(#v2_bearer_context{group = Group}, Acc) ->
-	      case bearer_group_ebi(Group) of
-		  undefined -> Acc;
-		  EBI       -> [EBI | Acc]
-	      end;
-	 (_, Acc) ->
-	      Acc
-      end, [], BearerContexts).
-
-bearer_group_ebi(#{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}}) ->
-    EBI;
-bearer_group_ebi(Group) when is_list(Group) ->
-    case lists:keyfind(v2_eps_bearer_id, 1, Group) of
-	#v2_eps_bearer_id{eps_bearer_id = EBI} -> EBI;
-	false                                  -> undefined
-    end;
-bearer_group_ebi(_) ->
-    undefined.
+%% Fold Fun(Elem, Acc) over a grouped IE. gtplib decodes a grouped IE as a
+%% single record when there is one instance at that instance id, and as a list
+%% when there are several — this collapsing is decode-only, unlike encode.
+ie_foldl(Fun, Acc, IEs) when is_list(IEs) ->
+    lists:foldl(Fun, Acc, IEs);
+ie_foldl(Fun, Acc, IE) ->
+    Fun(IE, Acc).
 
 %% Deactivate one dedicated bearer named in a Delete Bearer Command: report the
 %% affected PCC rule(s) to the PCRF as INACTIVE, remove them from the PCC
 %% context and re-provision PFCP, then issue a network-initiated Delete Bearer
 %% Request. The default bearer and unknown bearers are left untouched.
-deactivate_commanded_bearer(EBI, DefaultEBI, _AccessTunnel, Data)
+deactivate_commanded_bearer(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
+				    #v2_eps_bearer_id{eps_bearer_id = EBI}}},
+			    DefaultEBI, _AccessTunnel, Data)
   when EBI =:= DefaultEBI ->
     ?LOG(warning, "Delete Bearer Command targeted the default bearer ~p; ignored", [EBI]),
     Data;
-deactivate_commanded_bearer(EBI, _DefaultEBI, AccessTunnel,
+deactivate_commanded_bearer(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
+				    #v2_eps_bearer_id{eps_bearer_id = EBI}}},
+			    _DefaultEBI, AccessTunnel,
 			    #{bearers := BearerMap, pfcp := PCtx0, pcc := PCC} = Data0) ->
     case maps:is_key({'Access', EBI}, BearerMap) of
 	false ->
@@ -1113,7 +1101,10 @@ deactivate_commanded_bearer(EBI, _DefaultEBI, AccessTunnel,
 		   end,
 	    %% Network-initiated: no PTI.
 	    initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data)
-    end.
+    end;
+deactivate_commanded_bearer(_BearerContext, _DefaultEBI, _AccessTunnel, Data) ->
+    %% A Bearer Context without an EPS Bearer ID: nothing to deactivate.
+    Data.
 
 %% Reverse lookup of a bearer's {QCI, ARP} from its EBI via the bearer map's
 %% {qci_arp, QCI, ARP} => EBI entries.
