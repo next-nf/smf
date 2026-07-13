@@ -760,6 +760,7 @@ common() ->
      mme_delete_bearer_command,
      dedicated_bearer_session_delete,
      modify_bearer_command_arp_fanout,
+     gx_rar_dedicated_bearer_modify,
      gy_asr,
      gy_async_stop,
      gx_invalid_charging_rulebase,
@@ -1055,6 +1056,10 @@ init_per_testcase(mme_delete_bearer_command, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(modify_bearer_command_arp_fanout, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(gx_rar_dedicated_bearer_modify, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -5877,6 +5882,183 @@ modify_bearer_command_arp_fanout(Config) ->
     ?equal([], outstanding_requests()),
 
     delete_session(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gx_rar_dedicated_bearer_modify() ->
+    [{doc, "TS 23.401 5.4.2.1 / 5.4.3: a second Gx RAR that binds an additional "
+	   "PCC rule onto an existing dedicated bearer must emit a network-initiated "
+	   "Update Bearer Request (not a Create/Delete) with the aggregated QoS and "
+	   "merged TFT for that bearer's EBI"}].
+gx_rar_dedicated_bearer_modify(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun =
+	fun(Request, Result, Avps, SOpts) ->
+		Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SessionOpts, events = []},
+
+    %% First RAR: install a GBR rule with a QCI/ARP different from the default
+    %% bearer, creating a dedicated bearer (QCI 1, ARP PL=2).
+    Rule1 = #{'Charging-Rule-Definition' =>
+		  [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+		     'Flow-Information' =>
+			 [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+			    'Flow-Direction' => [2]}],
+		     'QoS-Information' =>
+			 [#{'QoS-Class-Identifier' => 1,
+			    'Max-Requested-Bandwidth-UL' => 6000,
+			    'Max-Requested-Bandwidth-DL' => 8000,
+			    'Guaranteed-Bitrate-UL' => 6000,
+			    'Guaranteed-Bitrate-DL' => 8000,
+			    'Allocation-Retention-Priority' =>
+				#{'Priority-Level' => 2,
+				  'Pre-emption-Capability' => 1,
+				  'Pre-emption-Vulnerability' => 0}}],
+		     'Metering-Method' => [1],
+		     'Precedence' => [100],
+		     'Online' => [0],
+		     'Offline' => [0]}]},
+    Server ! AAAReq#aaa_request{events = [{pcc, install, [Rule1]}]},
+
+    {_, Resp0, _, _} =
+	receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp0),
+
+    %% Complete the Create Bearer exchange to install the dedicated bearer.
+    CBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = create_bearer_request}, CBReq),
+    #gtp{seq_no = CBSeqNo,
+	 ie = #{{v2_bearer_context, 0} :=
+		    #v2_bearer_context{
+		       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 1} :=
+				     #v2_fully_qualified_tunnel_endpoint_identifier{
+					key = PgwUTEI,
+					ipv4 = PgwUIP4,
+					ipv6 = PgwUIP6}}}}} = CBReq,
+
+    GtpCDed = gtp_context_new_teids(GtpC),
+    #gtpc{local_ip = LocalIP,
+	  local_data_tei = SgwUTEI,
+	  remote_control_tei = RemoteCntlTEI} = GtpCDed,
+    DedEBI = 6,
+
+    PgwUFTEID =
+	if PgwUIP4 /= undefined, size(PgwUIP4) =:= 4 ->
+	       #v2_fully_qualified_tunnel_endpoint_identifier{
+		  instance = 2, interface_type = ?'S5/S8-U PGW',
+		  key = PgwUTEI, ipv4 = PgwUIP4};
+	   PgwUIP6 /= undefined, size(PgwUIP6) =:= 16 ->
+	       #v2_fully_qualified_tunnel_endpoint_identifier{
+		  instance = 2, interface_type = ?'S5/S8-U PGW',
+		  key = PgwUTEI, ipv6 = PgwUIP6};
+	   true ->
+	       #v2_fully_qualified_tunnel_endpoint_identifier{
+		  instance = 2, interface_type = ?'S5/S8-U PGW',
+		  key = PgwUTEI}
+	end,
+    SgwUFTEID =
+	case LocalIP of
+	    {_,_,_,_} ->
+		#v2_fully_qualified_tunnel_endpoint_identifier{
+		   instance = 3, interface_type = ?'S5/S8-U SGW',
+		   key = SgwUTEI, ipv4 = smf_inet:ip2bin(LocalIP)};
+	    {_,_,_,_,_,_,_,_} ->
+		#v2_fully_qualified_tunnel_endpoint_identifier{
+		   instance = 3, interface_type = ?'S5/S8-U SGW',
+		   key = SgwUTEI, ipv6 = smf_inet:ip2bin(LocalIP)}
+	end,
+    CBRespIEs = [#v2_cause{v2_cause = request_accepted},
+		 #v2_bearer_context{
+		    group = [#v2_cause{v2_cause = request_accepted},
+			     #v2_eps_bearer_id{eps_bearer_id = DedEBI},
+			     PgwUFTEID,
+			     SgwUFTEID]}],
+    CBResp = #gtp{version = v2, type = create_bearer_response,
+		  tei = RemoteCntlTEI, seq_no = CBSeqNo, ie = CBRespIEs},
+    send_pdu(Cntl, GtpC, CBResp),
+    ct:sleep(200),
+
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 1, {2, 1, 0}} := DedEBI}, BearerMap),
+
+    %% Second RAR: install ANOTHER rule bound to the SAME (QCI 1, ARP PL=2)
+    %% bearer. This must NOT create/delete a bearer but modify the existing one:
+    %% the PGW aggregates GBR/MBR (Σ) and merges the TFT into an Update Bearer
+    %% Request for DedEBI.
+    #{aaa_session := SessionOpts2} = smf_context:test_cmd(gtp, CtxKey, info),
+    Rule2 = #{'Charging-Rule-Definition' =>
+		  [#{'Charging-Rule-Name' => [<<"ded-rule-2">>],
+		     'Flow-Information' =>
+			 [#{'Flow-Description' =>
+				[<<"permit out ip from any to assigned">>],
+			    'Flow-Direction' => [2]}],
+		     'QoS-Information' =>
+			 [#{'QoS-Class-Identifier' => 1,
+			    'Max-Requested-Bandwidth-UL' => 4000,
+			    'Max-Requested-Bandwidth-DL' => 5000,
+			    'Guaranteed-Bitrate-UL' => 4000,
+			    'Guaranteed-Bitrate-DL' => 5000,
+			    'Allocation-Retention-Priority' =>
+				#{'Priority-Level' => 2,
+				  'Pre-emption-Capability' => 1,
+				  'Pre-emption-Vulnerability' => 0}}],
+		     'Metering-Method' => [1],
+		     'Precedence' => [110],
+		     'Online' => [0],
+		     'Offline' => [0]}]},
+    AAAReq2 = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			   session = SessionOpts2, events = [{pcc, install, [Rule2]}]},
+    Server ! AAAReq2,
+
+    {_, Resp1, _, _} =
+	receive {'$response', _, _, _, _} = R1 -> erlang:delete_element(1, R1)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp1),
+
+    %% Expect a network-initiated Update Bearer Request for DedEBI with the
+    %% aggregated GBR/MBR (6+4=10 UL, 8+5=13 DL) and a TFT.
+    UBRDed = recv_pdu(Cntl, ?TIMEOUT),
+    #gtp{type = update_bearer_request,
+	 ie = #{{v2_bearer_context, 0} :=
+		    #v2_bearer_context{
+		       group = #{{v2_eps_bearer_id, 0} :=
+				     #v2_eps_bearer_id{eps_bearer_id = DedEBI},
+				 {v2_bearer_level_quality_of_service, 0} :=
+				     #v2_bearer_level_quality_of_service{
+					pl = 2, label = 1,
+					guaranteed_bit_rate_for_uplink = 10,
+					guaranteed_bit_rate_for_downlink = 13,
+					maximum_bit_rate_for_uplink = 10,
+					maximum_bit_rate_for_downlink = 13},
+				 {v2_eps_bearer_level_traffic_flow_template, 0} :=
+				     #v2_eps_bearer_level_traffic_flow_template{}}}}} =
+	UBRDed,
+
+    %% Answer the Update Bearer Request to complete the exchange.
+    send_pdu(Cntl, GtpC, make_response(UBRDed, simple, GtpCDed)),
+    ct:sleep(200),
+    ?equal([], outstanding_requests()),
+
+    delete_session(GtpC),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4tunnels(?TIMEOUT),

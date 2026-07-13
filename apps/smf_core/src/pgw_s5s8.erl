@@ -785,12 +785,35 @@ send_dedicated_bearer_arp_update(EBI, QCI, OldARP, NewARP, AMBR, PCC, AccessTunn
 	       undefined        -> #{'QoS-Class-Identifier' => QCI}
 	   end,
     QoS = QoS0#{'Allocation-Retention-Priority' => arp_to_map(NewARP)},
+    %% ARP-only change: no TFT, but carry the APN-AMBR from the command.
+    send_dedicated_bearer_update(EBI, QoS, undefined, [AMBR], AccessTunnel).
+
+%% TS 23.401 5.4.2.1 (with QoS update) / 5.4.3 (without): when a Gx PCC-rule
+%% change adds/removes a rule on an existing dedicated bearer or re-authorizes a
+%% bound rule so the bearer's aggregate QoS or TFT changes, the PGW emits a
+%% network-initiated Update Bearer Request (no PTI) carrying the new QoS and TFT.
+initiate_update_dedicated_bearer(EBI, QoS, FlowInfo, AccessTunnel, Data) ->
+    send_dedicated_bearer_update(EBI, QoS, FlowInfo, [], AccessTunnel),
+    Data.
+
+%% Emit one network-initiated Update Bearer Request for a dedicated bearer
+%% (TS 29.274 7.2.15). Carries the updated bearer-level QoS and, when FlowInfo is
+%% a non-empty list, the updated TFT. ExtraIEs prepend message-level IEs such as
+%% APN-AMBR. Tagged {update_dedicated_bearer, EBI} for the response machinery.
+send_dedicated_bearer_update(EBI, QoS, FlowInfo, ExtraIEs, AccessTunnel) ->
+    BearerGroup0 = [#v2_eps_bearer_id{eps_bearer_id = EBI},
+		    encode_bearer_level_qos(QoS)],
+    BearerGroup =
+	case FlowInfo of
+	    [_ | _] ->
+		TFTBin = smf_tft:flow_info_to_tft(FlowInfo),
+		BearerGroup0 ++
+		    [#v2_eps_bearer_level_traffic_flow_template{value = TFTBin}];
+	    _ ->
+		BearerGroup0
+	end,
     Type = update_bearer_request,
-    RequestIEs0 =
-	[AMBR,
-	 #v2_bearer_context{
-	    group = [#v2_eps_bearer_id{eps_bearer_id = EBI},
-		     encode_bearer_level_qos(QoS)]}],
+    RequestIEs0 = ExtraIEs ++ [#v2_bearer_context{group = BearerGroup}],
     RequestIEs = gtp_v2_c:build_recovery(Type, AccessTunnel, false, RequestIEs0),
     send_request(AccessTunnel, ?T3, ?N3, Type, RequestIEs, {update_dedicated_bearer, EBI}).
 
@@ -981,11 +1004,16 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
 		  initiate_create_dedicated_bearer(undefined, QCI, ARP, QoS, FlowInfo,
 						   DefaultEBI, AccessTunnel, D)
 	      end, Data, NewBearers),
+    ModifiedBearers = smf_gsn_lib:detect_modified_bearers(OldPCC, NewPCC, BearerMap),
+    Data2 = lists:foldl(
+	      fun({EBI, _QCI, _ARP, QoS, FlowInfo}, D) ->
+		  initiate_update_dedicated_bearer(EBI, QoS, FlowInfo, AccessTunnel, D)
+	      end, Data1, ModifiedBearers),
     RemovedEBIs = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
     lists:foldl(
       fun(EBI, D) ->
 	  initiate_delete_dedicated_bearer(EBI, AccessTunnel, D)
-      end, Data1, RemovedEBIs).
+      end, Data2, RemovedEBIs).
 
 initiate_create_dedicated_bearer(PTI, QCI, ARP, QoS, FlowInfo, DefaultEBI, AccessTunnel,
 				 #{bearers := BearerMap0, pfcp := PCtx0,
