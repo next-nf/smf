@@ -484,11 +484,11 @@ handle_request(ReqKey,
 	    Actions = context_idle_action([], Context),
 	    {keep_state, Data1, Actions};
        true ->
-	    %% TODO: UE-requested add_packet_filters / replace_packet_filters /
+	    %% TODO(#22): UE-requested add_packet_filters / replace_packet_filters /
 	    %% delete_packet_filters on an existing dedicated bearer requires PCRF
 	    %% re-authorization (Gx CCR-U with the TAD translated to SDF filter
 	    %% identifiers) plus per-bearer SDF/packet-filter-id state this module
-	    %% does not yet track; deferred to a follow-up. Reject for now.
+	    %% does not yet track (see #21); deferred to follow-up #22. Reject for now.
 	    ResponseIEs = [#v2_cause{v2_cause = request_rejected},
 			   #v2_eps_bearer_id{eps_bearer_id = LinkedEBI},
 			   #v2_procedure_transaction_id{pti = PTI}],
