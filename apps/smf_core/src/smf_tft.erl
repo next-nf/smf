@@ -39,7 +39,7 @@ encode(#{operation := Operation, filters := Filters, parameters := Parameters}) 
 
 %% flow_info_to_tft/1 — [map()] -> binary()
 flow_info_to_tft(FlowInfoList) ->
-    Filters0 = flow_info_list_to_filters(FlowInfoList, [], 255),
+    Filters0 = flow_info_list_to_filters(FlowInfoList, 0, 255),
     Filters = ensure_uplink_filter(Filters0),
     encode(#{operation => create_new_tft, filters => Filters, parameters => []}).
 
@@ -71,11 +71,23 @@ disallow_uplink_filter(Filters) ->
       components => [{remote_port, 9}]}.
 
 next_filter_id(Filters) ->
-    lowest_free_id([Id || #{id := Id} <- Filters]).
+    lowest_free_id(used_ids(Filters)).
 
-%% Lowest 4-bit id (0..15) not present in Used.
+%% Used-id set as a 16-bit bitmask (bit N set = id N in use).
+used_ids(Filters) ->
+    lists:foldl(fun(#{id := Id}, Used) -> Used bor (1 bsl Id) end, 0, Filters).
+
+%% Lowest 4-bit id (0..15) not in the used-id bitmask. Each test is O(1), so
+%% filling a whole TFT is O(16) rather than the O(16 * 16) of a linear scan over
+%% a used-id list.
 lowest_free_id(Used) ->
-    hd([N || N <- lists:seq(0, 15), not lists:member(N, Used)]).
+    lowest_free_id(0, Used).
+
+lowest_free_id(N, Used) when N =< 15 ->
+    case Used band (1 bsl N) of
+	0 -> N;
+	_ -> lowest_free_id(N + 1, Used)
+    end.
 
 disallow_precedence(Filters) ->
     max(0, lists:min([P || #{precedence := P} <- Filters]) - 1).
@@ -280,7 +292,8 @@ flow_info_list_to_filters([], _Used, _Precedence) -> [];
 flow_info_list_to_filters([FlowInfo | Rest], Used, Precedence) ->
     Id = lowest_free_id(Used),
     Filter = flow_info_to_filter(FlowInfo, Id, Precedence),
-    [Filter | flow_info_list_to_filters(Rest, [Id | Used], Precedence - 1)].
+    Used1 = Used bor (1 bsl Id),
+    [Filter | flow_info_list_to_filters(Rest, Used1, Precedence - 1)].
 
 flow_info_to_filter(FlowInfo, Id, Precedence) ->
     Direction = get_flow_direction(FlowInfo),
