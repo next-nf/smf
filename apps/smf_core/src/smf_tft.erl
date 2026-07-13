@@ -59,13 +59,16 @@ is_uplink_applicable(#{direction := uplink})        -> true;
 is_uplink_applicable(#{direction := bidirectional}) -> true;
 is_uplink_applicable(_)                             -> false.
 
-%% Uplink filter matching remote address 0.0.0.0/32 — no real destination — so
-%% it admits no useful uplink traffic (TS 23.060 §15.3.3.4 example).
+%% Uplink filter using the "discard" port (remote port 9) — exactly the example
+%% in TS 23.060 §15.3.3.4. It admits no useful uplink traffic, and a port
+%% component carries no address family, so this single filter is correct for
+%% IPv4, IPv6 and dual-stack dedicated bearers (an address-based filter such as
+%% 0.0.0.0/32 would only be valid for one IP version).
 disallow_uplink_filter(Filters) ->
     #{id => next_filter_id(Filters),
       direction => uplink,
       precedence => disallow_precedence(Filters),
-      components => [{ipv4_remote, <<0, 0, 0, 0>>, <<255, 255, 255, 255>>}]}.
+      components => [{remote_port, 9}]}.
 
 next_filter_id(Filters) ->
     lowest_free_id([Id || #{id := Id} <- Filters]).

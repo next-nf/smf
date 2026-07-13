@@ -319,9 +319,8 @@ flow_info_to_tft_downlink_only_adds_uplink(_Config) ->
     ?assertEqual(1, length(UplinkFilters)),
     [Uplink] = UplinkFilters,
     ?assertEqual(uplink, maps:get(direction, Uplink)),
-    %% remote 0.0.0.0/32 — matches no real destination
-    ?assertEqual([{ipv4_remote, <<0, 0, 0, 0>>, <<255, 255, 255, 255>>}],
-		 maps:get(components, Uplink)),
+    %% remote port 9 (discard) — TS 23.060 §15.3.3.4, independent of IP version
+    ?assertEqual([{remote_port, 9}], maps:get(components, Uplink)),
     %% id must not collide with the two downlink filters (ids 0 and 1)
     Ids = [maps:get(id, F) || F <- Filters],
     ?assertEqual(lists:usort(Ids), lists:sort(Ids)).
@@ -341,11 +340,10 @@ flow_info_to_tft_uplink_present_unchanged(_Config) ->
     Bin = smf_tft:flow_info_to_tft([FlowInfoDl, FlowInfoUl]),
     #{filters := Filters} = smf_tft:decode(Bin),
     ?assertEqual(2, length(Filters)),
-    %% no disallow filter with remote 0.0.0.0/32 was added
+    %% no disallow filter (remote port 9) was added
     ?assertNot(lists:any(
 		 fun(#{components := Comps}) ->
-			 lists:member({ipv4_remote, <<0, 0, 0, 0>>,
-				       <<255, 255, 255, 255>>}, Comps)
+			 lists:member({remote_port, 9}, Comps)
 		 end, Filters)),
     %% a bidirectional-only flow is also uplink-applicable — no extra filter
     FlowInfoBi = #{'Flow-Description' =>
