@@ -751,6 +751,9 @@ common() ->
      gx_asr,
      gx_rar,
      gx_rar_dedicated_bearer_create,
+     gx_dedicated_bearer_create_failure,
+     gx_dedicated_bearer_create_partial_reject,
+     gx_dedicated_bearer_create_power_saving_retry,
      bearer_resource_command_create,
      dedicated_bearer_session_delete,
      gy_asr,
@@ -1016,6 +1019,18 @@ init_per_testcase(create_session_multi_bearer, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(gx_rar_dedicated_bearer_create, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(gx_dedicated_bearer_create_failure, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(gx_dedicated_bearer_create_partial_reject, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(gx_dedicated_bearer_create_power_saving_retry, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -5667,6 +5682,388 @@ gx_rar_dedicated_bearer_create(Config) ->
 		  false
 	  end, meck:history(smf_aaa_pcf)),
     ?match([_], BearerCCRU),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gx_dedicated_bearer_create_failure() ->
+    [{doc, "Check that a failed Create Bearer Response removes the PCC rule and "
+	    "reports it to the PCRF with Rule-Failure-Code RESOURCE_ALLOCATION_FAILURE"}].
+gx_dedicated_bearer_create_failure(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun =
+        fun(Request, Result, Avps, SOpts) ->
+                Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+                          session = SessionOpts, events = []},
+
+    %% Install a PCC rule with a QCI/ARP different from the default bearer
+    %% to trigger dedicated bearer creation (BCM = UE_NW set in init_per_testcase)
+    DedRule = #{'Charging-Rule-Definition' =>
+                    [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+                       'Flow-Information' =>
+                           [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+                              'Flow-Direction' => [2]}],
+                       'QoS-Information' =>
+                           [#{'QoS-Class-Identifier' => 1,
+                              'Allocation-Retention-Priority' =>
+                                  #{'Priority-Level' => 2,
+                                    'Pre-emption-Capability' => 1,
+                                    'Pre-emption-Vulnerability' => 0}}],
+                       'Metering-Method' => [1],
+                       'Precedence' => [100],
+                       'Online' => [0],
+                       'Offline' => [0]}]},
+    InstCR = [{pcc, install, [DedRule]}],
+    Server ! AAAReq#aaa_request{events = InstCR},
+
+    %% Wait for RAR reply — should be ok
+    {_, Resp0, _, _} =
+        receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+        after 5000 -> ct:fail(rar_timeout)
+        end,
+    ?equal(ok, Resp0),
+
+    %% The PGW should now send a Create Bearer Request
+    CBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = create_bearer_request}, CBReq),
+    #gtp{seq_no = CBSeqNo} = CBReq,
+
+    GtpCDed = gtp_context_new_teids(GtpC),
+    #gtpc{remote_control_tei = RemoteCntlTEI} = GtpCDed,
+    DedEBI = 6,
+
+    %% Respond with a failure cause: the dedicated bearer could not be activated
+    CBRespIEs = [#v2_cause{v2_cause = no_resources_available},
+                 #v2_bearer_context{
+                    group = [#v2_cause{v2_cause = no_resources_available},
+                             #v2_eps_bearer_id{eps_bearer_id = DedEBI}]}],
+    CBResp = #gtp{version = v2, type = create_bearer_response,
+                  tei = RemoteCntlTEI, seq_no = CBSeqNo, ie = CBRespIEs},
+    send_pdu(Cntl, GtpC, CBResp),
+
+    %% Allow response to be processed
+    ct:sleep(200),
+
+    %% The bearer must NOT have been installed
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?equal(false, maps:is_key({qci_arp, 1, {2, 1, 0}}, BearerMap)),
+    ?equal(false, maps:is_key({'Access', DedEBI}, BearerMap)),
+
+    %% A Gx CCR-Update must have been sent reporting the failed rule as INACTIVE
+    %% with Rule-Failure-Code RESOURCE_ALLOCATION_FAILURE (10).
+    FailCCRU =
+	lists:filter(
+	  fun({_, {smf_aaa_pcf, ccr_update, [_, _, SOpts, _]}, _}) ->
+		  case SOpts of
+		      #{'Charging-Rule-Report' :=
+			    [#{'Charging-Rule-Name' :=
+				   [<<"ded-rule-1">>],
+			       'PCC-Rule-Status' :=
+				   [?'DIAMETER_GX_PCC-RULE-STATUS_INACTIVE'],
+			       'Rule-Failure-Code' :=
+				   [?'DIAMETER_GX_RULE-FAILURE-CODE_RESOURCE_ALLOCATION_FAILURE']}]} ->
+			  true;
+		      _ ->
+			  false
+		  end;
+	     (_) ->
+		  false
+	  end, meck:history(smf_aaa_pcf)),
+    ?match([_], FailCCRU),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gx_dedicated_bearer_create_power_saving_retry() ->
+    [{doc, "Check that a Create Bearer Response rejected with cause "
+	    "ue_is_temporarily_not_reachable_due_to_power_saving does NOT remove "
+	    "the PCC rule and does NOT report a failure to the PCRF, and that the "
+	    "held Create Bearer Request is re-attempted on the next Modify Bearer "
+	    "Request (TS 23.401 5.4.1 step 12)"}].
+gx_dedicated_bearer_create_power_saving_retry(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun =
+        fun(Request, Result, Avps, SOpts) ->
+                Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+                          session = SessionOpts, events = []},
+
+    %% Install a PCC rule with a QCI/ARP different from the default bearer
+    %% to trigger dedicated bearer creation (BCM = UE_NW set in init_per_testcase)
+    DedRule = #{'Charging-Rule-Definition' =>
+                    [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+                       'Flow-Information' =>
+                           [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+                              'Flow-Direction' => [2]}],
+                       'QoS-Information' =>
+                           [#{'QoS-Class-Identifier' => 1,
+                              'Allocation-Retention-Priority' =>
+                                  #{'Priority-Level' => 2,
+                                    'Pre-emption-Capability' => 1,
+                                    'Pre-emption-Vulnerability' => 0}}],
+                       'Metering-Method' => [1],
+                       'Precedence' => [100],
+                       'Online' => [0],
+                       'Offline' => [0]}]},
+    InstCR = [{pcc, install, [DedRule]}],
+    Server ! AAAReq#aaa_request{events = InstCR},
+
+    %% Wait for RAR reply — should be ok
+    {_, Resp0, _, _} =
+        receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+        after 5000 -> ct:fail(rar_timeout)
+        end,
+    ?equal(ok, Resp0),
+
+    %% The PGW should now send a Create Bearer Request
+    CBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = create_bearer_request}, CBReq),
+    #gtp{seq_no = CBSeqNo} = CBReq,
+
+    GtpCDed = gtp_context_new_teids(GtpC),
+    #gtpc{remote_control_tei = RemoteCntlTEI} = GtpCDed,
+    DedEBI = 6,
+
+    %% Reject with the temporary power-saving cause (message-level + per-bearer)
+    CBRespIEs = [#v2_cause{v2_cause = ue_is_temporarily_not_reachable_due_to_power_saving},
+                 #v2_bearer_context{
+                    group = [#v2_cause{v2_cause = ue_is_temporarily_not_reachable_due_to_power_saving},
+                             #v2_eps_bearer_id{eps_bearer_id = DedEBI}]}],
+    CBResp = #gtp{version = v2, type = create_bearer_response,
+                  tei = RemoteCntlTEI, seq_no = CBSeqNo, ie = CBRespIEs},
+    send_pdu(Cntl, GtpC, CBResp),
+
+    %% Allow response to be processed
+    ct:sleep(200),
+
+    %% The bearer must NOT have been installed (procedure is held, not failed)
+    #{bearers := BearerMap0} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?equal(false, maps:is_key({qci_arp, 1, {2, 1, 0}}, BearerMap0)),
+    ?equal(false, maps:is_key({'Access', DedEBI}, BearerMap0)),
+
+    %% NO Gx CCR-Update reporting the rule as INACTIVE / RESOURCE_ALLOCATION_FAILURE
+    %% must have been sent (contrast with gx_dedicated_bearer_create_failure).
+    FailCCRU =
+	lists:filter(
+	  fun({_, {smf_aaa_pcf, ccr_update, [_, _, SOpts, _]}, _}) ->
+		  case SOpts of
+		      #{'Charging-Rule-Report' :=
+			    [#{'PCC-Rule-Status' :=
+				   [?'DIAMETER_GX_PCC-RULE-STATUS_INACTIVE'],
+			       'Rule-Failure-Code' :=
+				   [?'DIAMETER_GX_RULE-FAILURE-CODE_RESOURCE_ALLOCATION_FAILURE']}]} ->
+			  true;
+		      _ ->
+			  false
+		  end;
+	     (_) ->
+		  false
+	  end, meck:history(smf_aaa_pcf)),
+    ?equal([], FailCCRU),
+
+    %% A Modify Bearer Request signals the UE is reachable again; the PGW must
+    %% re-attempt the held Create Bearer Request.
+    {GtpC1, _, _} = modify_bearer(ra_update, GtpC),
+
+    CBReq2 = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = create_bearer_request}, CBReq2),
+    #gtp{seq_no = CBSeqNo2,
+         ie = #{{v2_bearer_context, 0} :=
+                    #v2_bearer_context{
+                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 1} :=
+                                     #v2_fully_qualified_tunnel_endpoint_identifier{
+                                        interface_type = ?'S5/S8-U PGW',
+                                        key = PgwUTEI,
+                                        ipv4 = PgwUIP4,
+                                        ipv6 = PgwUIP6}}}}} = CBReq2,
+
+    %% Complete the re-attempt successfully and confirm the bearer installs.
+    GtpCDed2 = gtp_context_new_teids(GtpC1),
+    #gtpc{local_ip = LocalIP,
+          local_data_tei = SgwUTEI,
+          remote_control_tei = RemoteCntlTEI2} = GtpCDed2,
+
+    PgwUFTEID =
+        if PgwUIP4 /= undefined, size(PgwUIP4) =:= 4 ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI, ipv4 = PgwUIP4};
+           PgwUIP6 /= undefined, size(PgwUIP6) =:= 16 ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI, ipv6 = PgwUIP6};
+           true ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI}
+        end,
+    SgwUFTEID =
+        case LocalIP of
+            {_,_,_,_} ->
+                #v2_fully_qualified_tunnel_endpoint_identifier{
+                   instance = 3, interface_type = ?'S5/S8-U SGW',
+                   key = SgwUTEI, ipv4 = smf_inet:ip2bin(LocalIP)};
+            {_,_,_,_,_,_,_,_} ->
+                #v2_fully_qualified_tunnel_endpoint_identifier{
+                   instance = 3, interface_type = ?'S5/S8-U SGW',
+                   key = SgwUTEI, ipv6 = smf_inet:ip2bin(LocalIP)}
+        end,
+    CBResp2IEs = [#v2_cause{v2_cause = request_accepted},
+                  #v2_bearer_context{
+                     group = [#v2_cause{v2_cause = request_accepted},
+                              #v2_eps_bearer_id{eps_bearer_id = DedEBI},
+                              PgwUFTEID,
+                              SgwUFTEID]}],
+    CBResp2 = #gtp{version = v2, type = create_bearer_response,
+                   tei = RemoteCntlTEI2, seq_no = CBSeqNo2, ie = CBResp2IEs},
+    send_pdu(Cntl, GtpC1, CBResp2),
+
+    ct:sleep(200),
+
+    #{bearers := BearerMap1} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 1, {2, 1, 0}} := DedEBI}, BearerMap1),
+    ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap1),
+
+    delete_session(GtpC1),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gx_dedicated_bearer_create_partial_reject() ->
+    [{doc, "Check that a Create Bearer Response with message Cause "
+	    "request_accepted_partially but a per-bearer rejection cause does "
+	    "NOT install the bearer and reports the PCC rule to the PCRF with "
+	    "Rule-Failure-Code RESOURCE_ALLOCATION_FAILURE"}].
+gx_dedicated_bearer_create_partial_reject(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun =
+        fun(Request, Result, Avps, SOpts) ->
+                Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+                          session = SessionOpts, events = []},
+
+    %% Install a PCC rule with a QCI/ARP different from the default bearer
+    %% to trigger dedicated bearer creation (BCM = UE_NW set in init_per_testcase)
+    DedRule = #{'Charging-Rule-Definition' =>
+                    [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+                       'Flow-Information' =>
+                           [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+                              'Flow-Direction' => [2]}],
+                       'QoS-Information' =>
+                           [#{'QoS-Class-Identifier' => 1,
+                              'Allocation-Retention-Priority' =>
+                                  #{'Priority-Level' => 2,
+                                    'Pre-emption-Capability' => 1,
+                                    'Pre-emption-Vulnerability' => 0}}],
+                       'Metering-Method' => [1],
+                       'Precedence' => [100],
+                       'Online' => [0],
+                       'Offline' => [0]}]},
+    InstCR = [{pcc, install, [DedRule]}],
+    Server ! AAAReq#aaa_request{events = InstCR},
+
+    %% Wait for RAR reply — should be ok
+    {_, Resp0, _, _} =
+        receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+        after 5000 -> ct:fail(rar_timeout)
+        end,
+    ?equal(ok, Resp0),
+
+    %% The PGW should now send a Create Bearer Request
+    CBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = create_bearer_request}, CBReq),
+    #gtp{seq_no = CBSeqNo} = CBReq,
+
+    GtpCDed = gtp_context_new_teids(GtpC),
+    #gtpc{remote_control_tei = RemoteCntlTEI} = GtpCDed,
+    DedEBI = 6,
+
+    %% Message-level Cause accepts partially, but the per-bearer Cause rejects
+    %% this bearer. The per-bearer Cause is authoritative (TS 29.274 7.2.4).
+    CBRespIEs = [#v2_cause{v2_cause = request_accepted_partially},
+                 #v2_bearer_context{
+                    group = [#v2_cause{v2_cause = no_resources_available},
+                             #v2_eps_bearer_id{eps_bearer_id = DedEBI}]}],
+    CBResp = #gtp{version = v2, type = create_bearer_response,
+                  tei = RemoteCntlTEI, seq_no = CBSeqNo, ie = CBRespIEs},
+    send_pdu(Cntl, GtpC, CBResp),
+
+    %% Allow response to be processed
+    ct:sleep(200),
+
+    %% The bearer must NOT have been installed
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?equal(false, maps:is_key({qci_arp, 1, {2, 1, 0}}, BearerMap)),
+    ?equal(false, maps:is_key({'Access', DedEBI}, BearerMap)),
+
+    %% A Gx CCR-Update must have been sent reporting the failed rule as INACTIVE
+    %% with Rule-Failure-Code RESOURCE_ALLOCATION_FAILURE (10).
+    FailCCRU =
+	lists:filter(
+	  fun({_, {smf_aaa_pcf, ccr_update, [_, _, SOpts, _]}, _}) ->
+		  case SOpts of
+		      #{'Charging-Rule-Report' :=
+			    [#{'Charging-Rule-Name' :=
+				   [<<"ded-rule-1">>],
+			       'PCC-Rule-Status' :=
+				   [?'DIAMETER_GX_PCC-RULE-STATUS_INACTIVE'],
+			       'Rule-Failure-Code' :=
+				   [?'DIAMETER_GX_RULE-FAILURE-CODE_RESOURCE_ALLOCATION_FAILURE']}]} ->
+			  true;
+		      _ ->
+			  false
+		  end;
+	     (_) ->
+		  false
+	  end, meck:history(smf_aaa_pcf)),
+    ?match([_], FailCCRU),
 
     delete_session(GtpC),
 
