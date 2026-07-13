@@ -51,6 +51,7 @@
 -define('Access Point Name',				{v2_access_point_name, 0}).
 -define('Bearer Contexts to be created',		{v2_bearer_context, 0}).
 -define('Bearer Contexts to be modified',		{v2_bearer_context, 0}).
+-define('Bearer Contexts',				{v2_bearer_context, 0}).
 -define('Protocol Configuration Options',		{v2_protocol_configuration_options, 0}).
 -define('ME Identity',					{v2_mobile_equipment_identity, 0}).
 -define('APN-AMBR',					{v2_aggregate_maximum_bit_rate, 0}).
@@ -91,6 +92,8 @@ request_spec(v2, modify_bearer_request, _) ->
 request_spec(v2, modify_bearer_command, _) ->
     [{?'APN-AMBR' ,						mandatory},
      {?'Bearer Contexts to be modified',			mandatory}];
+request_spec(v2, delete_bearer_command, _) ->
+    [{?'Bearer Contexts',					mandatory}];
 request_spec(v2, resume_notification, _) ->
     [{?'IMSI',							mandatory}];
 request_spec(v2, create_bearer_response, _) ->
@@ -519,6 +522,30 @@ handle_request(ReqKey,
 	    keep_state_and_data
     end;
 
+handle_request(ReqKey,
+	       #gtp{type = delete_bearer_command,
+		    ie = #{?'Bearer Contexts' := BearerContexts}},
+	       _Resent, #{session := connected},
+	       #{context := Context, tunnels := #{'Access' := AccessTunnel}} = Data0) ->
+    %% MME-Initiated Dedicated Bearer Deactivation (TS 23.401 5.4.4.2,
+    %% TS 29.274 7.2.17). The PGW does not delete immediately: for each
+    %% commanded dedicated bearer it runs a PCEF-initiated IP-CAN Session
+    %% Modification (Gx CCR-Update reporting the affected PCC rule(s) as
+    %% INACTIVE), removes the rule(s) from the PCC context, and only then
+    %% issues a network-initiated Delete Bearer Request. Default bearers are
+    %% never deleted this way.
+    DefaultEBI = Context#context.default_bearer_id,
+    EBIs = command_bearer_ebis(BearerContexts),
+    Data = lists:foldl(
+	     fun(EBI, D) ->
+		     deactivate_commanded_bearer(EBI, DefaultEBI, AccessTunnel, D)
+	     end, Data0, EBIs),
+    %% Like modify_bearer_command, no direct response is sent; the follow-on
+    %% Delete Bearer Request(s) carry the procedure forward.
+    gtp_context:request_finished(ReqKey),
+    Actions = context_idle_action([], Context),
+    {keep_state, Data, Actions};
+
 handle_request(ReqKey, _Msg, _Resent, _State, _Data) ->
     gtp_context:request_finished(ReqKey),
     keep_state_and_data.
@@ -881,6 +908,74 @@ initiate_delete_dedicated_bearer(PTI, EBI, AccessTunnel, Data) ->
     delete_dedicated_bearer(PTI, EBI, AccessTunnel),
     Data.
 
+%% Extract the dedicated EPS Bearer ID(s) named in a Delete Bearer Command
+%% Bearer Context IE (TS 29.274 7.2.17.1-2). gtplib may surface a single
+%% Bearer Context or a list; handle both.
+command_bearer_ebis(#v2_bearer_context{} = BC) ->
+    command_bearer_ebis([BC]);
+command_bearer_ebis(BearerContexts) when is_list(BearerContexts) ->
+    lists:foldr(
+      fun(#v2_bearer_context{group = Group}, Acc) ->
+	      case bearer_group_ebi(Group) of
+		  undefined -> Acc;
+		  EBI       -> [EBI | Acc]
+	      end;
+	 (_, Acc) ->
+	      Acc
+      end, [], BearerContexts).
+
+bearer_group_ebi(#{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}}) ->
+    EBI;
+bearer_group_ebi(Group) when is_list(Group) ->
+    case lists:keyfind(v2_eps_bearer_id, 1, Group) of
+	#v2_eps_bearer_id{eps_bearer_id = EBI} -> EBI;
+	false                                  -> undefined
+    end;
+bearer_group_ebi(_) ->
+    undefined.
+
+%% Deactivate one dedicated bearer named in a Delete Bearer Command: report the
+%% affected PCC rule(s) to the PCRF as INACTIVE, remove them from the PCC
+%% context and re-provision PFCP, then issue a network-initiated Delete Bearer
+%% Request. The default bearer and unknown bearers are left untouched.
+deactivate_commanded_bearer(EBI, DefaultEBI, _AccessTunnel, Data)
+  when EBI =:= DefaultEBI ->
+    ?LOG(warning, "Delete Bearer Command targeted the default bearer ~p; ignored", [EBI]),
+    Data;
+deactivate_commanded_bearer(EBI, _DefaultEBI, AccessTunnel,
+			    #{bearers := BearerMap, pfcp := PCtx0, pcc := PCC} = Data0) ->
+    case maps:is_key({'Access', EBI}, BearerMap) of
+	false ->
+	    ?LOG(warning, "Delete Bearer Command for unknown bearer ~p; ignored", [EBI]),
+	    Data0;
+	true ->
+	    RuleNames =
+		case ebi_qci_arp(EBI, BearerMap) of
+		    {QCI, ARP} -> affected_pcc_rules(QCI, ARP, PCC);
+		    undefined  -> []
+		end,
+	    PCC1 = PCC#pcc_ctx{rules = maps:without(RuleNames, PCC#pcc_ctx.rules)},
+	    Data1 =
+		case smf_pfcp_context:modify_session(PCC1, [], #{}, BearerMap, PCtx0) of
+		    {ok, {PCtx, _, _}} -> Data0#{pcc := PCC1, pfcp := PCtx};
+		    {error, _}         -> Data0#{pcc := PCC1}
+		end,
+	    Data = case RuleNames of
+		       [] -> Data1;
+		       _  -> report_rules_inactive(RuleNames, Data1)
+		   end,
+	    %% Network-initiated: no PTI.
+	    initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data)
+    end.
+
+%% Reverse lookup of a bearer's {QCI, ARP} from its EBI via the bearer map's
+%% {qci_arp, QCI, ARP} => EBI entries.
+ebi_qci_arp(EBI, BearerMap) ->
+    maps:fold(
+      fun({qci_arp, QCI, ARP}, V, _Acc) when V =:= EBI -> {QCI, ARP};
+	 (_, _, Acc)                                   -> Acc
+      end, undefined, BearerMap).
+
 %% Report new dedicated bearer to PCRF via Gx CCR-Update
 %% with Bearer-Operation = ESTABLISHMENT and the PGW-assigned Bearer-Identifier.
 report_bearer_establishment(PgwBI, QCI, {PL, PCI, PVI},
@@ -915,6 +1010,25 @@ report_bearer_failure(RuleNames,
 		   [?'DIAMETER_GX_PCC-RULE-STATUS_INACTIVE'],
 	       'Rule-Failure-Code'  =>
 		   [?'DIAMETER_GX_RULE-FAILURE-CODE_RESOURCE_ALLOCATION_FAILURE']},
+    SOpts = #{'Charging-Rule-Report' => [Report]},
+    Now = erlang:monotonic_time(),
+    case smf_aaa_pcf:ccr_update(PCF0, S0, SOpts, #{now => Now, async => true}) of
+	{ok, PCF1, S1, _Events} ->
+	    Data#{pcf := PCF1, aaa_session := S1};
+	_ ->
+	    Data
+    end.
+
+%% Report PCC rule(s) to the PCRF as INACTIVE via a Gx CCR-Update, without a
+%% Rule-Failure-Code. Used when a bearer is deactivated on network request
+%% (MME-Initiated Dedicated Bearer Deactivation, TS 23.401 5.4.4.2 /
+%% TS 29.212 4.5.6) rather than because of a resource allocation failure.
+report_rules_inactive(RuleNames,
+		      #{pcf := PCF0, aaa_session := S0} = Data) ->
+    Names = lists:flatmap(fun(N) when is_list(N) -> N; (N) -> [N] end, RuleNames),
+    Report = #{'Charging-Rule-Name' => Names,
+	       'PCC-Rule-Status'    =>
+		   [?'DIAMETER_GX_PCC-RULE-STATUS_INACTIVE']},
     SOpts = #{'Charging-Rule-Report' => [Report]},
     Now = erlang:monotonic_time(),
     case smf_aaa_pcf:ccr_update(PCF0, S0, SOpts, #{now => Now, async => true}) of

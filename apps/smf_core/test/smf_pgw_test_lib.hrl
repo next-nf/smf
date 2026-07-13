@@ -13,6 +13,7 @@
 			      modify_bearer/2,
 			      modify_bearer_command/2,
 			      bearer_resource_command/2,
+			      delete_bearer_command/2,
 			      change_notification/2,
 			      suspend_notification/2,
 			      resume_notification/2]).

@@ -16,6 +16,7 @@
 	 modify_bearer/2,
 	 modify_bearer_command/2,
 	 bearer_resource_command/2,
+	 delete_bearer_command/2,
 	 change_notification/2,
 	 suspend_notification/2,
 	 resume_notification/2]).
@@ -69,6 +70,9 @@ modify_bearer_command(SubType, GtpC) ->
 
 bearer_resource_command(SubType, GtpC) ->
     execute_command(bearer_resource_command, SubType, GtpC).
+
+delete_bearer_command(SubType, GtpC) ->
+    execute_command(delete_bearer_command, SubType, GtpC).
 
 change_notification(SubType, GtpC) ->
     execute_request(change_notification_request, SubType, GtpC).
@@ -581,6 +585,21 @@ make_request(modify_bearer_command, SubType,
 	   fq_teid(0, ?'S5/S8-C SGW',LocalCntlTEI, LocalIP)
 	  ],
     #gtp{version = v2, type = modify_bearer_command, tei = RemoteCntlTEI,
+	 seq_no = SeqNo bor 16#800000, ie = IEs};
+
+make_request(delete_bearer_command, {ebi, TargetEBI},
+	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
+		   local_ip = LocalIP,
+		   local_control_tei = LocalCntlTEI,
+		   remote_control_tei = RemoteCntlTEI}) ->
+    %% MME-Initiated Dedicated Bearer Deactivation: the Bearer Context names the
+    %% dedicated EBI to be released (TS 29.274 7.2.17.1-2).
+    IEs = [#v2_recovery{restart_counter = RCnt},
+	   #v2_bearer_context{
+	      group = [#v2_eps_bearer_id{eps_bearer_id = TargetEBI}]},
+	   fq_teid(0, ?'S5/S8-C SGW', LocalCntlTEI, LocalIP)
+	  ],
+    #gtp{version = v2, type = delete_bearer_command, tei = RemoteCntlTEI,
 	 seq_no = SeqNo bor 16#800000, ie = IEs};
 
 make_request(bearer_resource_command, simple,
