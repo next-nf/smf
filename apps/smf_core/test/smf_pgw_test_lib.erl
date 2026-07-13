@@ -587,6 +587,29 @@ make_request(modify_bearer_command, SubType,
     #gtp{version = v2, type = modify_bearer_command, tei = RemoteCntlTEI,
 	 seq_no = SeqNo bor 16#800000, ie = IEs};
 
+make_request(modify_bearer_command, {arp_change, PL},
+	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
+		   local_ip = LocalIP,
+		   local_control_tei = LocalCntlTEI,
+		   remote_control_tei = RemoteCntlTEI}) ->
+    %% HSS Initiated Subscribed QoS Modification changing the default bearer's
+    %% subscribed ARP to Priority-Level PL (TS 23.401 5.4.2.2).
+    IEs = [#v2_recovery{restart_counter = RCnt},
+	   #v2_aggregate_maximum_bit_rate{uplink = 48128, downlink = 1704125},
+	   #v2_bearer_context{
+	      group = [#v2_eps_bearer_id{eps_bearer_id = 5},
+		       #v2_bearer_level_quality_of_service{
+			  pci = 1, pl = PL, pvi = 0, label = 8,
+			  maximum_bit_rate_for_uplink      = 0,
+			  maximum_bit_rate_for_downlink    = 0,
+			  guaranteed_bit_rate_for_uplink   = 0,
+			  guaranteed_bit_rate_for_downlink = 0}
+		      ]},
+	   fq_teid(0, ?'S5/S8-C SGW', LocalCntlTEI, LocalIP)
+	  ],
+    #gtp{version = v2, type = modify_bearer_command, tei = RemoteCntlTEI,
+	 seq_no = SeqNo bor 16#800000, ie = IEs};
+
 make_request(delete_bearer_command, {ebi, TargetEBI},
 	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
 		   local_ip = LocalIP,

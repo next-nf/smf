@@ -401,6 +401,14 @@ handle_request(#request{src = Src, ip = IP, port = Port} = ReqKey,
     send_request(
       AccessTunnel, Src, IP, Port, ?T3, ?N3, Msg#gtp{seq_no = SeqNo}, {ReqKey, OldSOpts}),
 
+    %% TS 23.401 5.4.2.2 step 5: "If the subscribed ARP parameter has been
+    %% changed, the PDN GW shall also modify all dedicated EPS bearers having
+    %% the previously subscribed ARP value unless superseded by PCRF decision."
+    %% Fan the ARP change out to every dedicated bearer that still carries the
+    %% old subscribed ARP; each gets its own network-initiated Update Bearer
+    %% Request with QCI/GBR/MBR unchanged but the new ARP.
+    fan_out_subscribed_arp_change(OldSOpts, Bearer, AMBR, Context, AccessTunnel, DataNew),
+
     Actions = context_idle_action([], Context),
     {keep_state, DataNew, Actions};
 
@@ -645,6 +653,26 @@ handle_response({delete_dedicated_bearer, _EBI}, timeout,
     ?LOG(error, "Delete Dedicated Bearer Request timed out"),
     keep_state_and_data;
 
+handle_response({update_dedicated_bearer, EBI},
+		#gtp{type = update_bearer_response,
+		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause}}},
+		_Request, #{session := connected}, Data) ->
+    %% Response to a fan-out Update Bearer Request emitted for a dedicated bearer
+    %% during an HSS Initiated Subscribed QoS Modification (TS 23.401 5.4.2.2
+    %% step 5/7). Network-initiated, so there is no command ReqKey to finish; the
+    %% default-bearer exchange carries the procedure. Just log a failure.
+    case Cause of
+	request_accepted -> ok;
+	_ -> ?LOG(warning, "ARP fan-out Update Bearer Request for bearer ~p "
+			   "failed with ~p", [EBI, Cause])
+    end,
+    {keep_state, Data};
+
+handle_response({update_dedicated_bearer, EBI}, timeout,
+		#gtp{type = update_bearer_request}, #{session := connected}, Data) ->
+    ?LOG(error, "ARP fan-out Update Bearer Request for bearer ~p timed out", [EBI]),
+    {keep_state, Data};
+
 handle_response({CommandReqKey, OldSOpts},
 		#gtp{type = update_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause},
@@ -702,6 +730,88 @@ handle_response(_CommandReqKey, _Response, _Request, #{session := SState}, _Data
 %%%===================================================================
 %%% Dedicated Bearer helpers
 %%%===================================================================
+
+%% TS 23.401 5.4.2.2 step 5: when a Modify Bearer Command (HSS Initiated
+%% Subscribed QoS Modification) changes the default bearer's subscribed ARP, the
+%% PGW must also modify every dedicated bearer that still carries the previously
+%% subscribed ARP. Compare the old subscribed ARP (from the session as it stood
+%% before the command was folded in) with the new ARP from the command's Bearer
+%% Level QoS; if they differ, emit a network-initiated Update Bearer Request per
+%% affected dedicated bearer with QCI/GBR/MBR unchanged but the new ARP.
+fan_out_subscribed_arp_change(OldSOpts, CommandBearer, AMBR, Context, AccessTunnel,
+			      #{bearers := BearerMap, pcc := PCC}) ->
+    NewARP = command_bearer_arp(CommandBearer),
+    OldARP = session_default_arp(OldSOpts),
+    DefaultEBI = Context#context.default_bearer_id,
+    case NewARP =/= undefined andalso OldARP =/= undefined andalso NewARP =/= OldARP of
+	true ->
+	    maps:foreach(
+	      fun({qci_arp, QCI, ARP}, EBI)
+		    when ARP =:= OldARP, EBI =/= DefaultEBI ->
+		      send_dedicated_bearer_arp_update(
+			EBI, QCI, ARP, NewARP, AMBR, PCC, AccessTunnel);
+		 (_, _) ->
+		      ok
+	      end, BearerMap);
+	false ->
+	    ok
+    end.
+
+%% New ARP carried in the command's Bearer Level QoS, as a {PL, PCI, PVI} tuple.
+command_bearer_arp(#{?'Bearer Level QoS' :=
+			 #v2_bearer_level_quality_of_service{pl = PL, pci = PCI, pvi = PVI}})
+  when is_integer(PL) ->
+    {PL, PCI, PVI};
+command_bearer_arp(_) ->
+    undefined.
+
+%% Old subscribed ARP of the default bearer, read from the session's
+%% 'QoS-Information' before the command was applied, as a {PL, PCI, PVI} tuple.
+session_default_arp(#{'QoS-Information' := #{'Allocation-Retention-Priority' := ARP}})
+  when is_map(ARP) ->
+    {maps:get('Priority-Level', ARP, 1),
+     maps:get('Pre-emption-Capability', ARP, 1),
+     maps:get('Pre-emption-Vulnerability', ARP, 0)};
+session_default_arp(_) ->
+    undefined.
+
+%% Emit one Update Bearer Request for a dedicated bearer, keeping its QCI/GBR/MBR
+%% but replacing the ARP. The QCI/GBR/MBR are taken from the bearer's bound PCC
+%% rule when available; if none can be resolved, fall back to the QCI stored in
+%% the bearer map with zero bitrates (still conveying the new ARP).
+send_dedicated_bearer_arp_update(EBI, QCI, OldARP, NewARP, AMBR, PCC, AccessTunnel) ->
+    QoS0 = case dedicated_bearer_rule_qos(QCI, OldARP, PCC) of
+	       Q when is_map(Q) -> Q;
+	       undefined        -> #{'QoS-Class-Identifier' => QCI}
+	   end,
+    QoS = QoS0#{'Allocation-Retention-Priority' => arp_to_map(NewARP)},
+    Type = update_bearer_request,
+    RequestIEs0 =
+	[AMBR,
+	 #v2_bearer_context{
+	    group = [#v2_eps_bearer_id{eps_bearer_id = EBI},
+		     encode_bearer_level_qos(QoS)]}],
+    RequestIEs = gtp_v2_c:build_recovery(Type, AccessTunnel, false, RequestIEs0),
+    send_request(AccessTunnel, ?T3, ?N3, Type, RequestIEs, {update_dedicated_bearer, EBI}).
+
+%% Resolve a dedicated bearer's QoS-Information map from the PCC rule(s) bound to
+%% its {QCI, ARP}. Returns the rule's QoS-Information map or undefined.
+dedicated_bearer_rule_qos(QCI, ARP, #pcc_ctx{rules = Rules} = PCC) ->
+    case affected_pcc_rules(QCI, ARP, PCC) of
+	[Name | _] ->
+	    case maps:get(Name, Rules, undefined) of
+		#{'QoS-Information' := [Q]} when is_map(Q) -> Q;
+		#{'QoS-Information' := Q} when is_map(Q)   -> Q;
+		_                                          -> undefined
+	    end;
+	[] ->
+	    undefined
+    end.
+
+arp_to_map({PL, PCI, PVI}) ->
+    #{'Priority-Level' => PL,
+      'Pre-emption-Capability' => PCI,
+      'Pre-emption-Vulnerability' => PVI}.
 
 encode_bearer_level_qos(#{'QoS-Class-Identifier' := QCI} = QoS) ->
     MBR4ul = maps:get('Max-Requested-Bandwidth-UL', QoS, 0),
