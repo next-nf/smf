@@ -1811,8 +1811,15 @@ create_session_multi_bearer(Config) ->
     %% detection cover it. The default bearer (EBI 5) is not a dedicated bearer.
     CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
     #{dedicated := Dedicated} = smf_context:test_cmd(gtp, CtxKey, info),
+    %% CSR Bearer Level QoS for EBI 6 is 1000/2000 kbps MBR, 500/1000 kbps GBR;
+    %% the descriptor stores bps, so the map must carry the *1000 values.
     ?match(#{6 := #ded_bearer{ebi = 6, qci = 1, arp = {2, 1, 0},
-			      qos = #{'QoS-Class-Identifier' := 1}}}, Dedicated),
+			      qos = #{'QoS-Class-Identifier' := 1,
+				      'Max-Requested-Bandwidth-UL' := 1000000,
+				      'Max-Requested-Bandwidth-DL' := 2000000,
+				      'Guaranteed-Bitrate-UL' := 500000,
+				      'Guaranteed-Bitrate-DL' := 1000000}}},
+	   Dedicated),
     ?assertNot(maps:is_key(5, Dedicated)),
 
     delete_session(GtpC),

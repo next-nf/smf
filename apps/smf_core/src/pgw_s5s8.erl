@@ -952,10 +952,9 @@ install_additional_bearer(BearerGroup, _AccessTunnel,
                     Ded0 = maps:get(dedicated, Data, #{}),
                     {BearerMap, Dedicated} = case BearerGroup of
                         #{?'Bearer Level QoS' :=
-                              #v2_bearer_level_quality_of_service{
-                                 pl = PL, pci = PCI, pvi = PVI, label = QCI} = BLQoS} ->
-                            ARP = {PL, PCI, PVI},
-                            Desc = ded_bearer_from_blqos(EBI, BLQoS),
+                              #v2_bearer_level_quality_of_service{} = BLQoS} ->
+                            #ded_bearer{qci = QCI, arp = ARP} = Desc =
+                                ded_bearer_from_blqos(EBI, BLQoS),
                             {BearerMap1#{{qci_arp, QCI, ARP} => EBI},
                              Ded0#{EBI => Desc}};
                         _ ->
@@ -1088,12 +1087,15 @@ ded_bearer_from_blqos(EBI,
 			 guaranteed_bit_rate_for_uplink   = GBRul,
 			 guaranteed_bit_rate_for_downlink = GBRdl}) ->
     ARP = {PL, PCI, PVI},
+    %% The Bearer Level QoS record carries bit-rates in kbps; the QoS map keys are
+    %% bps (as encode_bearer_level_qos/1 div-1000s back and extract_flow_qos/1
+    %% *1000s), so scale up on the way in.
     QoS = #{'QoS-Class-Identifier'       => QCI,
 	    'Allocation-Retention-Priority' => arp_to_map(ARP),
-	    'Max-Requested-Bandwidth-UL'   => MBRul,
-	    'Max-Requested-Bandwidth-DL'   => MBRdl,
-	    'Guaranteed-Bitrate-UL'        => GBRul,
-	    'Guaranteed-Bitrate-DL'        => GBRdl},
+	    'Max-Requested-Bandwidth-UL'   => MBRul * 1000,
+	    'Max-Requested-Bandwidth-DL'   => MBRdl * 1000,
+	    'Guaranteed-Bitrate-UL'        => GBRul * 1000,
+	    'Guaranteed-Bitrate-DL'        => GBRdl * 1000},
     #ded_bearer{ebi = EBI, qci = QCI, arp = ARP, qos = QoS,
 		rules = [], tft = [], sdf_to_pf = #{}, charging_id = undefined}.
 
