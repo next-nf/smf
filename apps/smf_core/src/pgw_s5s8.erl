@@ -949,20 +949,24 @@ install_additional_bearer(BearerGroup, _AccessTunnel,
                                             local = #fq_teid{ip = PgwUIP, teid = DataTEI}},
                     AccessBearer = update_bearer_from_response(BearerGroup, AccessBearer0),
                     BearerMap1 = BearerMap0#{{'Access', EBI} => AccessBearer},
-                    BearerMap = case BearerGroup of
+                    Ded0 = maps:get(dedicated, Data, #{}),
+                    {BearerMap, Dedicated} = case BearerGroup of
                         #{?'Bearer Level QoS' :=
                               #v2_bearer_level_quality_of_service{
-                                 pci = PCI, pl = PL, pvi = PVI, label = QCI}} ->
+                                 pl = PL, pci = PCI, pvi = PVI, label = QCI} = BLQoS} ->
                             ARP = {PL, PCI, PVI},
-                            BearerMap1#{{qci_arp, QCI, ARP} => EBI};
+                            Desc = ded_bearer_from_blqos(EBI, BLQoS),
+                            {BearerMap1#{{qci_arp, QCI, ARP} => EBI},
+                             Ded0#{EBI => Desc}};
                         _ ->
-                            BearerMap1
+                            {BearerMap1, Ded0}
                     end,
                     case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
                         {ok, {PCtx, _, _}} ->
-                            Data#{bearers := BearerMap, pfcp := PCtx};
+                            Data#{bearers := BearerMap, pfcp := PCtx,
+                                  dedicated := Dedicated};
                         {error, _} ->
-                            Data#{bearers := BearerMap}
+                            Data#{bearers := BearerMap, dedicated := Dedicated}
                     end;
                 _ ->
                     Data
@@ -1069,6 +1073,29 @@ initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data) ->
 initiate_delete_dedicated_bearer(PTI, EBI, AccessTunnel, Data) ->
     delete_dedicated_bearer(PTI, EBI, AccessTunnel),
     Data.
+
+%% Build a descriptor for a dedicated bearer established directly from a Create
+%% Session Request bearer context (TS 29.274 7.2.1). Its QoS is the Bearer Level
+%% QoS carried in the CSR — there is no bound PCC rule and no TFT — so it is taken
+%% straight from that IE rather than via smf_gsn_lib:normalize_bearer/5, which
+%% derives from PCC. This keeps such bearers visible to the ARP fan-out (M5) and
+%% modified-bearer detection (M3), which iterate the stored descriptors.
+ded_bearer_from_blqos(EBI,
+		      #v2_bearer_level_quality_of_service{
+			 pl = PL, pci = PCI, pvi = PVI, label = QCI,
+			 maximum_bit_rate_for_uplink      = MBRul,
+			 maximum_bit_rate_for_downlink    = MBRdl,
+			 guaranteed_bit_rate_for_uplink   = GBRul,
+			 guaranteed_bit_rate_for_downlink = GBRdl}) ->
+    ARP = {PL, PCI, PVI},
+    QoS = #{'QoS-Class-Identifier'       => QCI,
+	    'Allocation-Retention-Priority' => arp_to_map(ARP),
+	    'Max-Requested-Bandwidth-UL'   => MBRul,
+	    'Max-Requested-Bandwidth-DL'   => MBRdl,
+	    'Guaranteed-Bitrate-UL'        => GBRul,
+	    'Guaranteed-Bitrate-DL'        => GBRdl},
+    #ded_bearer{ebi = EBI, qci = QCI, arp = ARP, qos = QoS,
+		rules = [], tft = [], sdf_to_pf = #{}, charging_id = undefined}.
 
 %% Extract the dedicated EPS Bearer ID(s) named in a Delete Bearer Command
 %% Bearer Context IE (TS 29.274 7.2.17.1-2). gtplib may surface a single

@@ -1806,6 +1806,15 @@ create_session_multi_bearer(Config) ->
 	    ie = #{{v2_bearer_context, 0} := [_,_]}},
        Response),
 
+    %% The additional (non-default) bearer EBI 6 must get a canonical descriptor
+    %% built from its CSR Bearer Level QoS, so ARP fan-out / modified-bearer
+    %% detection cover it. The default bearer (EBI 5) is not a dedicated bearer.
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+    #{dedicated := Dedicated} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{6 := #ded_bearer{ebi = 6, qci = 1, arp = {2, 1, 0},
+			      qos = #{'QoS-Class-Identifier' := 1}}}, Dedicated),
+    ?assertNot(maps:is_key(5, Dedicated)),
+
     delete_session(GtpC),
 
     ?equal([], outstanding_requests()),
