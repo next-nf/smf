@@ -21,6 +21,7 @@
 -include("smf_test_lib.hrl").
 -include("smf_pgw_test_lib.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 -define(TIMEOUT, 2000).
 -define(HUT, pgw_s5s8).				%% Handler Under Test
@@ -7034,6 +7035,9 @@ mme_delete_bearer_command(Config) ->
 
     #{bearers := BearerMap1} = smf_context:test_cmd(gtp, CtxKey, info),
     ?equal(false, is_map_key({'Access', DedEBI}, BearerMap1)),
+
+    #{dedicated := DedicatedAfter} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?assertNot(maps:is_key(DedEBI, DedicatedAfter)),
 
     delete_session(GtpC2),
 

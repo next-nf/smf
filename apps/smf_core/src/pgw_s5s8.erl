@@ -643,14 +643,16 @@ handle_response({delete_dedicated_bearer, EBI},
 		#gtp{type = delete_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = _Cause}}},
 		_Request, _State,
-		#{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC} = Data0) ->
+		#{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC,
+		  dedicated := Ded0} = Data0) ->
     BearerMap1 = maps:remove({'Access', EBI}, BearerMap0),
     BearerMap = smf_gsn_lib:remove_bearer_metadata_for_ebi(EBI, BearerMap1),
+    Data1 = Data0#{dedicated := maps:remove(EBI, Ded0)},
     case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
 	{ok, {PCtx, _, _}} ->
-	    {keep_state, Data0#{bearers := BearerMap, pfcp := PCtx}};
+	    {keep_state, Data1#{bearers := BearerMap, pfcp := PCtx}};
 	{error, _} ->
-	    {keep_state, Data0#{bearers := BearerMap}}
+	    {keep_state, Data1#{bearers := BearerMap}}
     end;
 
 handle_response({delete_dedicated_bearer, _EBI}, timeout,
