@@ -43,7 +43,7 @@
 -export([get_sgi_default_bearer/1, put_sgi_default_bearer/2]).
 -export([resolve_access_bearer/2]).
 -export([detect_new_bearers/4, detect_removed_bearers/3,
-	 detect_modified_bearers/3,
+	 detect_modified_bearers/3, normalize_bearer/5,
 	 remove_bearer_metadata_for_ebi/2, get_rule_qci_arp/1]).
 -ignore_xref([put_sgi_default_bearer/2]).
 -ignore_xref([access_default_bearer_key/1]).
@@ -1134,6 +1134,21 @@ detect_modified_bearers(#pcc_ctx{rules = OldRules},
 	      Acc
       end, [], BearerMap).
 
+%% Build the canonical per-dedicated-bearer descriptor from the PCC rules bound
+%% to {QCI, ARP}. The same construction runs at establishment and on every
+%% re-authorization, so a stored descriptor can be compared field-for-field
+%% against a freshly built one (TS 23.401 §5.4.5). ChId is allocated once at
+%% establishment and carried forward on recompute (not derivable from PCC).
+normalize_bearer(EBI, QCI, ARP, #pcc_ctx{rules = Rules}, ChId) ->
+    BoundRules = bound_rules(QCI, ARP, Rules),
+    RuleNames = [Name || {Name, _} <- BoundRules],
+    QoS = aggregate_bearer_qos(QCI, BoundRules),
+    FlowInfo = merge_bound_flow_info(BoundRules),
+    {_TFTBin, Filters, SdfToPf} = smf_tft:flow_info_to_tft_map(FlowInfo),
+    #ded_bearer{ebi = EBI, qci = QCI, arp = ARP, qos = QoS,
+                rules = RuleNames, tft = Filters,
+                sdf_to_pf = SdfToPf, charging_id = ChId}.
+
 %% PCC rules bound to a {QCI, ARP}, as [{Name, Definition}] sorted by name for
 %% deterministic aggregation.
 bound_rules(QCI, ARP, Rules) ->
@@ -1196,3 +1211,50 @@ remove_bearer_metadata_for_ebi(EBI, BearerMap) ->
 	 ({bearer_id, _},   V) -> V /= EBI;
 	 (_, _)                -> true
       end, BearerMap).
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+normalize_bearer_gbr_aggregates_test() ->
+    Rules = #{<<"r1">> => #{'QoS-Information' =>
+                                [#{'QoS-Class-Identifier' => 1,
+                                   'Max-Requested-Bandwidth-UL' => 100,
+                                   'Max-Requested-Bandwidth-DL' => 200,
+                                   'Guaranteed-Bitrate-UL' => 100,
+                                   'Guaranteed-Bitrate-DL' => 200}],
+                            'Flow-Information' =>
+                                [#{'Flow-Description' =>
+                                       [<<"permit out ip from any to assigned">>],
+                                   'Flow-Direction' => [2],
+                                   'Packet-Filter-Identifier' => [<<"sdf-1">>]}]},
+              <<"r2">> => #{'QoS-Information' =>
+                                [#{'QoS-Class-Identifier' => 1,
+                                   'Max-Requested-Bandwidth-UL' => 50,
+                                   'Max-Requested-Bandwidth-DL' => 50,
+                                   'Guaranteed-Bitrate-UL' => 50,
+                                   'Guaranteed-Bitrate-DL' => 50}]}},
+    PCC = #pcc_ctx{rules = set_qci_arp(Rules, 1, {2, 1, 0})},
+    D = normalize_bearer(7, 1, {2, 1, 0}, PCC, 42),
+    ?assertEqual(7, D#ded_bearer.ebi),
+    ?assertEqual(1, D#ded_bearer.qci),
+    ?assertEqual({2, 1, 0}, D#ded_bearer.arp),
+    ?assertEqual(42, D#ded_bearer.charging_id),
+    ?assertEqual([<<"r1">>, <<"r2">>], D#ded_bearer.rules),
+    %% GBR QCI 1: bitrates summed across the two bound rules
+    ?assertEqual(150, maps:get('Max-Requested-Bandwidth-UL', D#ded_bearer.qos)),
+    ?assertEqual(250, maps:get('Max-Requested-Bandwidth-DL', D#ded_bearer.qos)),
+    %% SDF id from r1's Flow-Information captured against its assigned TFT id
+    ?assertMatch(#{<<"sdf-1">> := _}, D#ded_bearer.sdf_to_pf),
+    ok.
+
+%% helper: tag every rule def with the {QCI, ARP} the binding logic keys on
+set_qci_arp(Rules, QCI, {PL, PCI, PVI}) ->
+    ARP = #{'Priority-Level' => PL,
+            'Pre-emption-Capability' => PCI,
+            'Pre-emption-Vulnerability' => PVI},
+    maps:map(
+      fun(_Name, #{'QoS-Information' := [Q | _]} = Def) ->
+              Def#{'QoS-Information' => [Q#{'QoS-Class-Identifier' => QCI,
+                                           'Allocation-Retention-Priority' => ARP}]}
+      end, Rules).
+-endif.
