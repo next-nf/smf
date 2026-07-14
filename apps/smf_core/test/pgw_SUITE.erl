@@ -5711,6 +5711,10 @@ gx_rar_dedicated_bearer_create(Config) ->
     ?match(#{{qci_arp, 1, {2, 1, 0}} := DedEBI}, BearerMap),
     ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap),
 
+    %% Verify the dedicated bearer descriptor was stored
+    #{dedicated := Dedicated} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{DedEBI := #ded_bearer{ebi = DedEBI, qci = 1, arp = {2, 1, 0}}}, Dedicated),
+
     %% Verify that a Gx CCR-Update was sent to report the new bearer
     %% with Bearer-Operation = ESTABLISHMENT and Bearer-Identifier = <<EBI>>
     BearerCCRU =

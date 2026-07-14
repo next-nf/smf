@@ -125,7 +125,8 @@ init(_Opts, Data0) ->
     PCC = #pcc_ctx{offline_charging_profile = OCPcfg},
     Data = Data0#{'Version' => v2, aaa_session => AAASession, pcf => PCF,
 		  charging => Charging, aaa_auth => AAAAuth, pcc => PCC,
-		  pending_bearers => #{}, retry_bearers => #{}},
+		  pending_bearers => #{}, retry_bearers => #{},
+		  dedicated => #{}, pending_updates => #{}},
     {ok, smf_context:init_state(), Data}.
 
 handle_event(Type, Content, State, #{'Version' := v1} = Data) ->
@@ -587,7 +588,7 @@ handle_response({create_bearer, PgwFTEID},
     case ?CAUSE_OK(bearer_context_cause(BearerCtxGroup)) of
 	true ->
 	    case maps:take(PgwFTEID, Pending0) of
-		{{QCI, ARP, AccessBearer0, _ChId}, Pending} ->
+		{{QCI, ARP, AccessBearer0, ChId}, Pending} ->
 		    #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} = BearerCtxGroup,
 		    AccessBearer = update_bearer_from_response(BearerCtxGroup, AccessBearer0),
 		    PgwBI = <<EBI:8>>,
@@ -598,8 +599,11 @@ handle_response({create_bearer, PgwFTEID},
 			       {ok, {PCtx1, _, _}} -> PCtx1;
 			       {error, _}         -> PCtx0
 			   end,
+		    Desc = smf_gsn_lib:normalize_bearer(EBI, QCI, ARP, PCC, ChId),
+		    Dedicated = maps:get(dedicated, Data0, #{}),
 		    Data1 = Data0#{bearers := BearerMap, pfcp := PCtx,
 				   pending_bearers := Pending,
+				   dedicated := Dedicated#{EBI => Desc},
 				   retry_bearers :=
 				       maps:remove(PgwFTEID,
 						   maps:get(retry_bearers, Data0, #{}))},
