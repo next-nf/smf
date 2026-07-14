@@ -552,6 +552,8 @@ handle_request(ReqKey,
     %% issues a network-initiated Delete Bearer Request. Default bearers are
     %% never deleted this way.
     DefaultEBI = Context#context.default_bearer_id,
+    %% TODO(#27): batch — accumulate the accepted EBIs and emit one Delete Bearer
+    %% Request naming all of them (EPS Bearer IDs list), instead of one per bearer.
     Data = ie_foldl(
 	     fun(BearerContext, D) ->
 		     deactivate_commanded_bearer(BearerContext, DefaultEBI, AccessTunnel, D)
@@ -744,6 +746,8 @@ fan_out_subscribed_arp_change(OldSOpts, CommandBearer, AMBR, Context, AccessTunn
     DefaultEBI = Context#context.default_bearer_id,
     case NewARP =/= undefined andalso OldARP =/= undefined andalso NewARP =/= OldARP of
 	true ->
+	    %% TODO(#27): batch — emit one Update Bearer Request carrying all
+	    %% bearers with the old ARP, not one message per bearer.
 	    maps:foreach(
 	      fun({qci_arp, QCI, ARP}, EBI)
 		    when ARP =:= OldARP, EBI =/= DefaultEBI ->
@@ -1003,6 +1007,9 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
 		  initiate_create_dedicated_bearer(undefined, QCI, ARP, QoS, FlowInfo,
 						   DefaultEBI, AccessTunnel, D)
 	      end, Data, NewBearers),
+    %% TODO(#27): batch these — emit one Update Bearer Request carrying all
+    %% modified bearer contexts, and one Delete Bearer Request carrying all
+    %% removed EBIs, instead of one message per bearer (GTPv2 carries a list).
     ModifiedBearers = smf_gsn_lib:detect_modified_bearers(OldPCC, NewPCC, BearerMap),
     Data2 = lists:foldl(
 	      fun({EBI, _QCI, _ARP, QoS, FlowInfo}, D) ->
