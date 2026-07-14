@@ -408,10 +408,11 @@ handle_request(#request{src = Src, ip = IP, port = Port} = ReqKey,
     %% Fan the ARP change out to every dedicated bearer that still carries the
     %% old subscribed ARP; each gets its own network-initiated Update Bearer
     %% Request with QCI/GBR/MBR unchanged but the new ARP.
-    fan_out_subscribed_arp_change(OldSOpts, Bearer, AMBR, Context, AccessTunnel, DataNew),
+    DataNew1 = fan_out_subscribed_arp_change(OldSOpts, Bearer, AMBR, Context,
+					     AccessTunnel, DataNew),
 
     Actions = context_idle_action([], Context),
-    {keep_state, DataNew, Actions};
+    {keep_state, DataNew1, Actions};
 
 handle_request(ReqKey,
 	       #gtp{type = change_notification_request, ie = IEs} = Request,
@@ -753,7 +754,7 @@ handle_response(_CommandReqKey, _Response, _Request, #{session := SState}, _Data
 %% Level QoS; if they differ, emit a network-initiated Update Bearer Request per
 %% affected dedicated bearer with QCI/GBR/MBR unchanged but the new ARP.
 fan_out_subscribed_arp_change(OldSOpts, CommandBearer, AMBR, Context, AccessTunnel,
-			      #{bearers := BearerMap, pcc := PCC}) ->
+			      #{dedicated := Dedicated} = Data) ->
     NewARP = command_bearer_arp(CommandBearer),
     OldARP = session_default_arp(OldSOpts),
     DefaultEBI = Context#context.default_bearer_id,
@@ -761,16 +762,18 @@ fan_out_subscribed_arp_change(OldSOpts, CommandBearer, AMBR, Context, AccessTunn
 	true ->
 	    %% TODO(#27): batch — emit one Update Bearer Request carrying all
 	    %% bearers with the old ARP, not one message per bearer.
-	    maps:foreach(
-	      fun({qci_arp, QCI, ARP}, EBI)
-		    when ARP =:= OldARP, EBI =/= DefaultEBI ->
-		      send_dedicated_bearer_arp_update(
-			EBI, QCI, ARP, NewARP, AMBR, PCC, AccessTunnel);
-		 (_, _) ->
-		      ok
-	      end, BearerMap);
+	    maps:fold(
+	      fun(EBI, #ded_bearer{arp = ARP, qos = QoS} = Desc, D)
+		    when ARP =:= OldARP, EBI =/= DefaultEBI, is_map(QoS) ->
+		      send_dedicated_bearer_arp_update(EBI, QoS, NewARP, AMBR, AccessTunnel),
+		      NewDesc = Desc#ded_bearer{arp = NewARP,
+						qos = set_qos_arp(QoS, NewARP)},
+		      stage_bearer_update(EBI, NewDesc, D);
+		 (_, _, D) ->
+		      D
+	      end, Data, Dedicated);
 	false ->
-	    ok
+	    Data
     end.
 
 %% New ARP carried in the command's Bearer Level QoS, as a {PL, PCI, PVI} tuple.
@@ -791,18 +794,17 @@ session_default_arp(#{'QoS-Information' := #{'Allocation-Retention-Priority' := 
 session_default_arp(_) ->
     undefined.
 
-%% Emit one Update Bearer Request for a dedicated bearer, keeping its QCI/GBR/MBR
-%% but replacing the ARP. The QCI/GBR/MBR are taken from the bearer's bound PCC
-%% rule when available; if none can be resolved, fall back to the QCI stored in
-%% the bearer map with zero bitrates (still conveying the new ARP).
-send_dedicated_bearer_arp_update(EBI, QCI, OldARP, NewARP, AMBR, PCC, AccessTunnel) ->
-    QoS0 = case dedicated_bearer_rule_qos(QCI, OldARP, PCC) of
-	       Q when is_map(Q) -> Q;
-	       undefined        -> #{'QoS-Class-Identifier' => QCI}
-	   end,
-    QoS = QoS0#{'Allocation-Retention-Priority' => arp_to_map(NewARP)},
-    %% ARP-only change: no TFT, but carry the APN-AMBR from the command.
+%% Emit one Update Bearer Request for a dedicated bearer keeping its QCI/GBR/MBR
+%% but replacing the ARP (TS 23.401 5.4.2.2 step 5). QoS is taken from the stored
+%% descriptor; only the ARP is overwritten. The APN-AMBR from the command rides
+%% along at message level.
+send_dedicated_bearer_arp_update(EBI, QoS0, NewARP, AMBR, AccessTunnel) ->
+    QoS = set_qos_arp(QoS0, NewARP),
     send_dedicated_bearer_update(EBI, QoS, undefined, [AMBR], AccessTunnel).
+
+%% Overwrite the Allocation-Retention-Priority in a QoS-Information map.
+set_qos_arp(QoS, NewARP) ->
+    QoS#{'Allocation-Retention-Priority' => arp_to_map(NewARP)}.
 
 %% TS 23.401 5.4.2.1 (with QoS update) / 5.4.3 (without): when a Gx PCC-rule
 %% change adds/removes a rule on an existing dedicated bearer or re-authorizes a
@@ -838,20 +840,6 @@ send_dedicated_bearer_update(EBI, QoS, FlowInfo, ExtraIEs, AccessTunnel) ->
     RequestIEs0 = ExtraIEs ++ [#v2_bearer_context{group = BearerGroup}],
     RequestIEs = gtp_v2_c:build_recovery(Type, AccessTunnel, false, RequestIEs0),
     send_request(AccessTunnel, ?T3, ?N3, Type, RequestIEs, {update_dedicated_bearer, EBI}).
-
-%% Resolve a dedicated bearer's QoS-Information map from the PCC rule(s) bound to
-%% its {QCI, ARP}. Returns the rule's QoS-Information map or undefined.
-dedicated_bearer_rule_qos(QCI, ARP, #pcc_ctx{rules = Rules} = PCC) ->
-    case affected_pcc_rules(QCI, ARP, PCC) of
-	[Name | _] ->
-	    case maps:get(Name, Rules, undefined) of
-		#{'QoS-Information' := [Q]} when is_map(Q) -> Q;
-		#{'QoS-Information' := Q} when is_map(Q)   -> Q;
-		_                                          -> undefined
-	    end;
-	[] ->
-	    undefined
-    end.
 
 arp_to_map({PL, PCI, PVI}) ->
     #{'Priority-Level' => PL,

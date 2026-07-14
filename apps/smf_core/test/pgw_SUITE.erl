@@ -5891,6 +5891,11 @@ modify_bearer_command_arp_fanout(Config) ->
     ?equal({ok, timeout}, recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok)),
     ?equal([], outstanding_requests()),
 
+    %% The staged descriptor for the dedicated bearer must have committed with
+    %% the new ARP once its Update Bearer Response was processed.
+    #{dedicated := DedicatedA} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{DedEBI := #ded_bearer{arp = {5, _, _}}}, DedicatedA),
+
     delete_session(GtpC2),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
