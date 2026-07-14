@@ -266,7 +266,7 @@ handle_request(ReqKey,
 	    {next_state, State#{session := shutdown}, FinalData1}
     end;
 
-%% TODO:
+%% TODO(#24):
 %%  Only single or no bearer modification is supported by this and the next function.
 %%  Both function are largy identical, only the bearer modification itself is the key
 %%  difference. It should be possible to unify that into one handler
