@@ -43,6 +43,7 @@
 -export([get_sgi_default_bearer/1, put_sgi_default_bearer/2]).
 -export([resolve_access_bearer/2]).
 -export([detect_new_bearers/4, detect_removed_bearers/3,
+	 detect_modified_bearers/3,
 	 remove_bearer_metadata_for_ebi/2, get_rule_qci_arp/1]).
 -ignore_xref([put_sgi_default_bearer/2]).
 -ignore_xref([access_default_bearer_key/1]).
@@ -1083,6 +1084,94 @@ detect_removed_bearers(#pcc_ctx{rules = OldRules},
 	      _                        -> false
 	  end
       end, RemovedQAs).
+
+%% detect_modified_bearers/3
+%% Returns [{EBI, QCI, ARP, NewQoS, NewFlowInfo}] for each existing dedicated
+%% bearer {qci_arp, QCI, ARP} => EBI whose bound PCC-rule set or content changed
+%% between Old and New but that still has >= 1 rule bound in New. The bearer's new
+%% aggregate QoS is computed over all New bound rules — Σ GBR/MBR for a GBR bearer
+%% (TS 29.212 4.5.5.3), the first rule's QoS otherwise — and their Flow-Information
+%% is merged for the TFT. A bearer whose bound-rule set, aggregate QoS and merged
+%% flow-info are byte-for-byte unchanged is skipped so no spurious Update Bearer
+%% Request is emitted (TS 23.401 5.4.2.1 / 5.4.3, TS 29.274 7.2.15).
+detect_modified_bearers(#pcc_ctx{rules = OldRules},
+			#pcc_ctx{rules = NewRules},
+			BearerMap) ->
+    maps:fold(
+      fun({qci_arp, QCI, ARP}, EBI, Acc) when is_integer(EBI) ->
+	      case bound_rules(QCI, ARP, NewRules) of
+		  [] ->
+		      Acc;			% no rule left: removed, handled elsewhere
+		  New ->
+		      Old = bound_rules(QCI, ARP, OldRules),
+		      NewQoS = aggregate_bearer_qos(QCI, New),
+		      NewFlow = merge_bound_flow_info(New),
+		      Same = {[N || {N, _} <- Old],
+			      aggregate_bearer_qos(QCI, Old),
+			      merge_bound_flow_info(Old)}
+			  =:= {[N || {N, _} <- New], NewQoS, NewFlow},
+		      case Same of
+			  true  -> Acc;
+			  false -> [{EBI, QCI, ARP, NewQoS, NewFlow} | Acc]
+		      end
+	      end;
+	 (_, _, Acc) ->
+	      Acc
+      end, [], BearerMap).
+
+%% PCC rules bound to a {QCI, ARP}, as [{Name, Definition}] sorted by name for
+%% deterministic aggregation.
+bound_rules(QCI, ARP, Rules) ->
+    lists:sort(
+      maps:fold(
+	fun(Name, Def, Acc) ->
+		case get_rule_qci_arp(Def) of
+		    {QCI, ARP} -> [{Name, Def} | Acc];
+		    _          -> Acc
+		end
+	end, [], Rules)).
+
+%% Aggregate the bearer-level QoS over the bound rules. For a GBR bearer the
+%% GBR/MBR bitrates are summed across rules (TS 29.212 4.5.5.3); for a non-GBR
+%% bearer the first rule's QoS is representative.
+aggregate_bearer_qos(_QCI, []) ->
+    undefined;
+aggregate_bearer_qos(QCI, [{_, Def0} | _] = Rules) ->
+    Q0 = rule_qos(Def0),
+    case is_gbr_qci(QCI) of
+	true ->
+	    QoSList = [rule_qos(D) || {_, D} <- Rules],
+	    Sum = fun(Key) -> lists:sum([maps:get(Key, Q, 0) || Q <- QoSList]) end,
+	    Q0#{'Max-Requested-Bandwidth-UL' => Sum('Max-Requested-Bandwidth-UL'),
+		'Max-Requested-Bandwidth-DL' => Sum('Max-Requested-Bandwidth-DL'),
+		'Guaranteed-Bitrate-UL'      => Sum('Guaranteed-Bitrate-UL'),
+		'Guaranteed-Bitrate-DL'      => Sum('Guaranteed-Bitrate-DL')};
+	false ->
+	    Q0
+    end.
+
+rule_qos(#{'QoS-Information' := [Q]}) when is_map(Q) -> Q;
+rule_qos(#{'QoS-Information' := Q}) when is_map(Q)   -> Q;
+rule_qos(_)                                          -> #{}.
+
+merge_bound_flow_info(Rules) ->
+    lists:append([maps:get('Flow-Information', Def, []) || {_, Def} <- Rules]).
+
+%% GBR QCIs per TS 23.203 Table 6.1.7.
+is_gbr_qci(1)  -> true;
+is_gbr_qci(2)  -> true;
+is_gbr_qci(3)  -> true;
+is_gbr_qci(4)  -> true;
+is_gbr_qci(65) -> true;
+is_gbr_qci(66) -> true;
+is_gbr_qci(67) -> true;
+is_gbr_qci(71) -> true;
+is_gbr_qci(72) -> true;
+is_gbr_qci(73) -> true;
+is_gbr_qci(74) -> true;
+is_gbr_qci(75) -> true;
+is_gbr_qci(76) -> true;
+is_gbr_qci(_)  -> false.
 
 %% remove_bearer_metadata_for_ebi/2
 %% Remove all {qci_arp, _, _} and {bearer_id, _} entries that map to EBI.
