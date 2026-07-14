@@ -43,7 +43,7 @@
 -export([get_sgi_default_bearer/1, put_sgi_default_bearer/2]).
 -export([resolve_access_bearer/2]).
 -export([detect_new_bearers/4, detect_removed_bearers/3,
-	 detect_modified_bearers/3, normalize_bearer/5,
+	 detect_modified_bearers/2, normalize_bearer/5,
 	 remove_bearer_metadata_for_ebi/2, get_rule_qci_arp/1]).
 -ignore_xref([put_sgi_default_bearer/2]).
 -ignore_xref([access_default_bearer_key/1]).
@@ -1100,39 +1100,35 @@ detect_removed_bearers(#pcc_ctx{rules = OldRules},
 	  end
       end, RemovedQAs).
 
-%% detect_modified_bearers/3
-%% Returns [{EBI, QCI, ARP, NewQoS, NewFlowInfo}] for each existing dedicated
-%% bearer {qci_arp, QCI, ARP} => EBI whose bound PCC-rule set or content changed
-%% between Old and New but that still has >= 1 rule bound in New. The bearer's new
-%% aggregate QoS is computed over all New bound rules — Σ GBR/MBR for a GBR bearer
-%% (TS 29.212 4.5.5.3), the first rule's QoS otherwise — and their Flow-Information
-%% is merged for the TFT. A bearer whose bound-rule set, aggregate QoS and merged
-%% flow-info are byte-for-byte unchanged is skipped so no spurious Update Bearer
-%% Request is emitted (TS 23.401 5.4.2.1 / 5.4.3, TS 29.274 7.2.15).
-detect_modified_bearers(#pcc_ctx{rules = OldRules},
-			#pcc_ctx{rules = NewRules},
-			BearerMap) ->
+%% detect_modified_bearers/2
+%% For each stored dedicated bearer descriptor, build the descriptor the new PCC
+%% would produce and compare {rules, qos, tft}. Returns
+%% [{EBI, NewQoS, NewFlowInfo, NewDesc}] for the changed ones so the caller can
+%% emit the Update Bearer Request and stage NewDesc for commit-on-response. A
+%% bearer whose {QCI, ARP} has no bound rule left in New is skipped (removal is
+%% handled by detect_removed_bearers). TS 23.401 §5.4.2.1/§5.4.3, TS 29.274 §7.2.15.
+detect_modified_bearers(#pcc_ctx{rules = NewRules} = NewPCC, Dedicated) ->
     maps:fold(
-      fun({qci_arp, QCI, ARP}, EBI, Acc) when is_integer(EBI) ->
+      fun(EBI, #ded_bearer{qci = QCI, arp = ARP, charging_id = ChId} = Old, Acc) ->
 	      case bound_rules(QCI, ARP, NewRules) of
 		  [] ->
-		      Acc;			% no rule left: removed, handled elsewhere
-		  New ->
-		      Old = bound_rules(QCI, ARP, OldRules),
-		      NewQoS = aggregate_bearer_qos(QCI, New),
-		      NewFlow = merge_bound_flow_info(New),
-		      Same = {[N || {N, _} <- Old],
-			      aggregate_bearer_qos(QCI, Old),
-			      merge_bound_flow_info(Old)}
-			  =:= {[N || {N, _} <- New], NewQoS, NewFlow},
-		      case Same of
-			  true  -> Acc;
-			  false -> [{EBI, QCI, ARP, NewQoS, NewFlow} | Acc]
+		      Acc;
+		  BoundRules ->
+		      New = normalize_bearer(EBI, QCI, ARP, NewPCC, ChId),
+		      case descriptor_changed(Old, New) of
+			  false -> Acc;
+			  true  ->
+			      FlowInfo = merge_bound_flow_info(BoundRules),
+			      [{EBI, New#ded_bearer.qos, FlowInfo, New} | Acc]
 		      end
-	      end;
-	 (_, _, Acc) ->
-	      Acc
-      end, [], BearerMap).
+	      end
+      end, [], Dedicated).
+
+%% A dedicated bearer’s wire-visible state changed if its bound rule set,
+%% aggregate QoS or TFT filters differ. sdf_to_pf/charging_id are not wire state.
+descriptor_changed(#ded_bearer{rules = R1, qos = Q1, tft = T1},
+		   #ded_bearer{rules = R2, qos = Q2, tft = T2}) ->
+    {R1, Q1, T1} =/= {R2, Q2, T2}.
 
 %% Build the canonical per-dedicated-bearer descriptor from the PCC rules bound
 %% to {QCI, ARP}. The same construction runs at establishment and on every
@@ -1257,4 +1253,41 @@ set_qci_arp(Rules, QCI, {PL, PCI, PVI}) ->
               Def#{'QoS-Information' => [Q#{'QoS-Class-Identifier' => QCI,
                                            'Allocation-Retention-Priority' => ARP}]}
       end, Rules).
+
+detect_modified_bearers_qos_change_test() ->
+    ARP = {2, 1, 0},
+    Old = #ded_bearer{ebi = 5, qci = 1, arp = ARP, charging_id = 9,
+                      qos = #{'QoS-Class-Identifier' => 1,
+                              'Max-Requested-Bandwidth-UL' => 100,
+                              'Max-Requested-Bandwidth-DL' => 100,
+                              'Guaranteed-Bitrate-UL' => 100,
+                              'Guaranteed-Bitrate-DL' => 100},
+                      rules = [<<"r1">>], tft = [], sdf_to_pf = #{}},
+    %% new PCC: same rule name, bigger bitrate -> descriptor changes
+    NewRules = set_qci_arp(
+                 #{<<"r1">> => #{'QoS-Information' =>
+                                     [#{'Max-Requested-Bandwidth-UL' => 300,
+                                        'Max-Requested-Bandwidth-DL' => 300,
+                                        'Guaranteed-Bitrate-UL' => 300,
+                                        'Guaranteed-Bitrate-DL' => 300}]}}, 1, ARP),
+    NewPCC = #pcc_ctx{rules = NewRules},
+    [{5, QoS, _FlowInfo, #ded_bearer{ebi = 5}}] =
+        detect_modified_bearers(NewPCC, #{5 => Old}),
+    ?assertEqual(300, maps:get('Max-Requested-Bandwidth-UL', QoS)),
+    ok.
+
+detect_modified_bearers_unchanged_test() ->
+    ARP = {2, 1, 0},
+    NewRules = set_qci_arp(
+                 #{<<"r1">> => #{'QoS-Information' =>
+                                     [#{'Max-Requested-Bandwidth-UL' => 100,
+                                        'Max-Requested-Bandwidth-DL' => 100,
+                                        'Guaranteed-Bitrate-UL' => 100,
+                                        'Guaranteed-Bitrate-DL' => 100}],
+                                 'Flow-Information' => []}}, 1, ARP),
+    NewPCC = #pcc_ctx{rules = NewRules},
+    %% Build the "stored" descriptor the same way, so it matches exactly.
+    Stored = normalize_bearer(5, 1, ARP, NewPCC, 9),
+    ?assertEqual([], detect_modified_bearers(NewPCC, #{5 => Stored})),
+    ok.
 -endif.

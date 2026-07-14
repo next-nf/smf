@@ -6068,6 +6068,16 @@ gx_rar_dedicated_bearer_modify(Config) ->
     ct:sleep(200),
     ?equal([], outstanding_requests()),
 
+    %% The staged descriptor must have been committed into `dedicated` on the
+    %% Update Bearer Response success, reflecting the aggregated QoS of both
+    %% bound rules (ded-rule-1 6000/8000 + ded-rule-2 4000/5000).
+    #{dedicated := DedicatedM} = smf_context:test_cmd(gtp, CtxKey, info),
+    #{DedEBI := #ded_bearer{qos = NewQoSMap}} = DedicatedM,
+    ?equal(10000, maps:get('Max-Requested-Bandwidth-UL', NewQoSMap)),
+    ?equal(13000, maps:get('Max-Requested-Bandwidth-DL', NewQoSMap)),
+    ?equal(10000, maps:get('Guaranteed-Bitrate-UL', NewQoSMap)),
+    ?equal(13000, maps:get('Guaranteed-Bitrate-DL', NewQoSMap)),
+
     delete_session(GtpC),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),

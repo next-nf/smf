@@ -663,22 +663,29 @@ handle_response({delete_dedicated_bearer, _EBI}, timeout,
 handle_response({update_dedicated_bearer, EBI},
 		#gtp{type = update_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause}}},
-		_Request, #{session := connected}, Data) ->
-    %% Response to a fan-out Update Bearer Request emitted for a dedicated bearer
-    %% during an HSS Initiated Subscribed QoS Modification (TS 23.401 5.4.2.2
-    %% step 5/7). Network-initiated, so there is no command ReqKey to finish; the
-    %% default-bearer exchange carries the procedure. Just log a failure.
-    case Cause of
-	request_accepted -> ok;
-	_ -> ?LOG(warning, "ARP fan-out Update Bearer Request for bearer ~p "
-			   "failed with ~p", [EBI, Cause])
-    end,
-    {keep_state, Data};
+		_Request, #{session := connected},
+		#{dedicated := Ded0, pending_updates := PU0} = Data) ->
+    %% Network-initiated Update Bearer Request for a dedicated bearer (M3 modified
+    %% QoS/TFT, or M5 ARP fan-out). Commit the staged descriptor only on success;
+    %% on failure keep the previously confirmed one (TS 23.401 5.4.2.1/5.4.2.2).
+    {Ded, PU} =
+	case maps:take(EBI, PU0) of
+	    {Desc, PU1} when Cause =:= request_accepted ->
+		{Ded0#{EBI => Desc}, PU1};
+	    {_Desc, PU1} ->
+		?LOG(warning, "Update Bearer Request for dedicated bearer ~p "
+			      "failed with ~p", [EBI, Cause]),
+		{Ded0, PU1};
+	    error ->
+		{Ded0, PU0}
+	end,
+    {keep_state, Data#{dedicated := Ded, pending_updates := PU}};
 
 handle_response({update_dedicated_bearer, EBI}, timeout,
-		#gtp{type = update_bearer_request}, #{session := connected}, Data) ->
-    ?LOG(error, "ARP fan-out Update Bearer Request for bearer ~p timed out", [EBI]),
-    {keep_state, Data};
+		#gtp{type = update_bearer_request}, #{session := connected},
+		#{pending_updates := PU0} = Data) ->
+    ?LOG(error, "Update Bearer Request for dedicated bearer ~p timed out", [EBI]),
+    {keep_state, Data#{pending_updates := maps:remove(EBI, PU0)}};
 
 handle_response({CommandReqKey, OldSOpts},
 		#gtp{type = update_bearer_response,
@@ -804,6 +811,12 @@ send_dedicated_bearer_arp_update(EBI, QCI, OldARP, NewARP, AMBR, PCC, AccessTunn
 initiate_update_dedicated_bearer(EBI, QoS, FlowInfo, AccessTunnel, Data) ->
     send_dedicated_bearer_update(EBI, QoS, FlowInfo, [], AccessTunnel),
     Data.
+
+%% Stage a recomputed descriptor for EBI; it is committed into `dedicated` when
+%% the matching Update Bearer Response succeeds, and dropped on failure/timeout,
+%% so a failed update leaves the previously confirmed descriptor in place.
+stage_bearer_update(EBI, Desc, #{pending_updates := PU} = Data) ->
+    Data#{pending_updates := PU#{EBI => Desc}}.
 
 %% Emit one network-initiated Update Bearer Request for a dedicated bearer
 %% (TS 29.274 7.2.15). Carries the updated bearer-level QoS and, when FlowInfo is
@@ -1016,10 +1029,12 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
     %% TODO(#27): batch these — emit one Update Bearer Request carrying all
     %% modified bearer contexts, and one Delete Bearer Request carrying all
     %% removed EBIs, instead of one message per bearer (GTPv2 carries a list).
-    ModifiedBearers = smf_gsn_lib:detect_modified_bearers(OldPCC, NewPCC, BearerMap),
+    Dedicated = maps:get(dedicated, Data, #{}),
+    ModifiedBearers = smf_gsn_lib:detect_modified_bearers(NewPCC, Dedicated),
     Data2 = lists:foldl(
-	      fun({EBI, _QCI, _ARP, QoS, FlowInfo}, D) ->
-		  initiate_update_dedicated_bearer(EBI, QoS, FlowInfo, AccessTunnel, D)
+	      fun({EBI, QoS, FlowInfo, NewDesc}, D) ->
+		  D1 = initiate_update_dedicated_bearer(EBI, QoS, FlowInfo, AccessTunnel, D),
+		  stage_bearer_update(EBI, NewDesc, D1)
 	      end, Data1, ModifiedBearers),
     RemovedEBIs = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
     lists:foldl(
