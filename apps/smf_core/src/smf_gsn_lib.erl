@@ -1158,8 +1158,20 @@ merge_bound_flow_info(Rules) ->
     lists:append([maps:get('Flow-Information', Def, []) || {_, Def} <- Rules]).
 
 %% GBR QCIs per TS 23.203 Table 6.1.7.
-is_gbr_qci(QCI) ->
-    lists:member(QCI, [1, 2, 3, 4, 65, 66, 67, 71, 72, 73, 74, 75, 76]).
+is_gbr_qci(1)  -> true;
+is_gbr_qci(2)  -> true;
+is_gbr_qci(3)  -> true;
+is_gbr_qci(4)  -> true;
+is_gbr_qci(65) -> true;
+is_gbr_qci(66) -> true;
+is_gbr_qci(67) -> true;
+is_gbr_qci(71) -> true;
+is_gbr_qci(72) -> true;
+is_gbr_qci(73) -> true;
+is_gbr_qci(74) -> true;
+is_gbr_qci(75) -> true;
+is_gbr_qci(76) -> true;
+is_gbr_qci(_)  -> false.
 
 %% remove_bearer_metadata_for_ebi/2
 %% Remove all {qci_arp, _, _} and {bearer_id, _} entries that map to EBI.
