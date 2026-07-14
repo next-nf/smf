@@ -5,6 +5,15 @@
 
 This is a 3GPP GGSN and PDN-GW implemented in Erlang. It strives to eventually support all the functionality as defined by [3GPP TS 23.002](http://www.3gpp.org/dynareport/23002.htm) Section 4.1.3.1 for the GGSN and Section 4.1.4.2.2 for the PDN-GW.
 
+> **Origin & attribution.** `next-nf/smf` began as a fork of
+> [Travelping's erGW](https://github.com/travelping/ergw), which appeared to be
+> no longer publicly maintained, and continues that codebase — evolving it
+> toward a full SMF. It is maintained as an independent project rather than a
+> GitHub fork, but the lineage is retained here: the original code is copyright
+> the erGW authors and this project remains licensed under **GPL-2.0**. See the
+> [upstream repository](https://github.com/travelping/ergw) for the original
+> history.
+
 # CONTENTS
 * [DEPLOYMENT](#deployment)
 * [IMPLEMENTED FEATURES](#implemented-features)
