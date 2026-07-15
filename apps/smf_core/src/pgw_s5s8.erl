@@ -762,6 +762,8 @@ fan_out_subscribed_arp_change(OldSOpts, CommandBearer, AMBR, Context, AccessTunn
 	true ->
 	    %% TODO(#27): batch — emit one Update Bearer Request carrying all
 	    %% bearers with the old ARP, not one message per bearer.
+	    %% TODO(#31): the is_map(QoS) guard skips a descriptor with undefined
+	    %% QoS; the pre-branch code still fanned out with a QCI-only fallback.
 	    maps:fold(
 	      fun(EBI, #ded_bearer{arp = ARP, qos = QoS} = Desc, D)
 		    when ARP =:= OldARP, EBI =/= DefaultEBI, is_map(QoS) ->
@@ -817,6 +819,8 @@ initiate_update_dedicated_bearer(EBI, QoS, FlowInfo, AccessTunnel, Data) ->
 %% Stage a recomputed descriptor for EBI; it is committed into `dedicated` when
 %% the matching Update Bearer Response succeeds, and dropped on failure/timeout,
 %% so a failed update leaves the previously confirmed descriptor in place.
+%% TODO(#30): the stash is keyed by bare EBI, so two in-flight updates for the
+%% same EBI clobber each other; key by request correlation or defer the second.
 stage_bearer_update(EBI, Desc, #{pending_updates := PU} = Data) ->
     Data#{pending_updates := PU#{EBI => Desc}}.
 

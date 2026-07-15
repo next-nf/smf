@@ -327,6 +327,8 @@ flow_info_list_to_filters([], _Used, _Precedence, Sdf) -> {[], Sdf};
 flow_info_list_to_filters([FlowInfo | Rest], Used, Precedence, Sdf0) ->
     Id = lowest_free_id(Used),
     Filter = flow_info_to_filter(FlowInfo, Id, Precedence),
+    %% TODO(#32): a duplicate Gx Packet-Filter-Identifier silently overwrites the
+    %% earlier sdf_to_pf entry; document/assert uniqueness when #22 consumes it.
     Sdf = case sdf_filter_id(FlowInfo) of
               undefined -> Sdf0;
               SdfId     -> Sdf0#{SdfId => Id}
