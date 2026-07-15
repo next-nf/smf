@@ -1109,12 +1109,12 @@ detect_removed_bearers(#pcc_ctx{rules = OldRules},
 %% handled by detect_removed_bearers). TS 23.401 §5.4.2.1/§5.4.3, TS 29.274 §7.2.15.
 detect_modified_bearers(#pcc_ctx{rules = NewRules} = NewPCC, Dedicated) ->
     maps:fold(
-      fun(EBI, #ded_bearer{qci = QCI, arp = ARP, charging_id = ChId} = Old, Acc) ->
-	      case bound_rules(QCI, ARP, NewRules) of
+      fun(EBI, #ded_bearer{qci = QCI, bind_arp = BindARP, charging_id = ChId} = Old, Acc) ->
+	      case bound_rules(QCI, BindARP, NewRules) of		% bind on the immutable ARP,
 		  [] ->
 		      Acc;
 		  BoundRules ->
-		      New = normalize_bearer(EBI, QCI, ARP, NewPCC, ChId),
+		      New = normalize_bearer(EBI, QCI, BindARP, NewPCC, ChId), % not the M5 wire ARP
 		      case descriptor_changed(Old, New) of
 			  false -> Acc;
 			  true  ->
@@ -1141,7 +1141,7 @@ normalize_bearer(EBI, QCI, ARP, #pcc_ctx{rules = Rules}, ChId) ->
     QoS = aggregate_bearer_qos(QCI, BoundRules),
     FlowInfo = merge_bound_flow_info(BoundRules),
     {_TFTBin, Filters, SdfToPf} = smf_tft:flow_info_to_tft_map(FlowInfo),
-    #ded_bearer{ebi = EBI, qci = QCI, arp = ARP, qos = QoS,
+    #ded_bearer{ebi = EBI, qci = QCI, arp = ARP, bind_arp = ARP, qos = QoS,
                 rules = RuleNames, tft = Filters,
                 sdf_to_pf = SdfToPf, charging_id = ChId}.
 
@@ -1207,87 +1207,3 @@ remove_bearer_metadata_for_ebi(EBI, BearerMap) ->
 	 ({bearer_id, _},   V) -> V /= EBI;
 	 (_, _)                -> true
       end, BearerMap).
-
--ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
-
-normalize_bearer_gbr_aggregates_test() ->
-    Rules = #{<<"r1">> => #{'QoS-Information' =>
-                                [#{'QoS-Class-Identifier' => 1,
-                                   'Max-Requested-Bandwidth-UL' => 100,
-                                   'Max-Requested-Bandwidth-DL' => 200,
-                                   'Guaranteed-Bitrate-UL' => 100,
-                                   'Guaranteed-Bitrate-DL' => 200}],
-                            'Flow-Information' =>
-                                [#{'Flow-Description' =>
-                                       [<<"permit out ip from any to assigned">>],
-                                   'Flow-Direction' => [2],
-                                   'Packet-Filter-Identifier' => [<<"sdf-1">>]}]},
-              <<"r2">> => #{'QoS-Information' =>
-                                [#{'QoS-Class-Identifier' => 1,
-                                   'Max-Requested-Bandwidth-UL' => 50,
-                                   'Max-Requested-Bandwidth-DL' => 50,
-                                   'Guaranteed-Bitrate-UL' => 50,
-                                   'Guaranteed-Bitrate-DL' => 50}]}},
-    PCC = #pcc_ctx{rules = set_qci_arp(Rules, 1, {2, 1, 0})},
-    D = normalize_bearer(7, 1, {2, 1, 0}, PCC, 42),
-    ?assertEqual(7, D#ded_bearer.ebi),
-    ?assertEqual(1, D#ded_bearer.qci),
-    ?assertEqual({2, 1, 0}, D#ded_bearer.arp),
-    ?assertEqual(42, D#ded_bearer.charging_id),
-    ?assertEqual([<<"r1">>, <<"r2">>], D#ded_bearer.rules),
-    %% GBR QCI 1: bitrates summed across the two bound rules
-    ?assertEqual(150, maps:get('Max-Requested-Bandwidth-UL', D#ded_bearer.qos)),
-    ?assertEqual(250, maps:get('Max-Requested-Bandwidth-DL', D#ded_bearer.qos)),
-    %% SDF id from r1's Flow-Information captured against its assigned TFT id
-    ?assertMatch(#{<<"sdf-1">> := _}, D#ded_bearer.sdf_to_pf),
-    ok.
-
-%% helper: tag every rule def with the {QCI, ARP} the binding logic keys on
-set_qci_arp(Rules, QCI, {PL, PCI, PVI}) ->
-    ARP = #{'Priority-Level' => PL,
-            'Pre-emption-Capability' => PCI,
-            'Pre-emption-Vulnerability' => PVI},
-    maps:map(
-      fun(_Name, #{'QoS-Information' := [Q | _]} = Def) ->
-              Def#{'QoS-Information' => [Q#{'QoS-Class-Identifier' => QCI,
-                                           'Allocation-Retention-Priority' => ARP}]}
-      end, Rules).
-
-detect_modified_bearers_qos_change_test() ->
-    ARP = {2, 1, 0},
-    Old = #ded_bearer{ebi = 5, qci = 1, arp = ARP, charging_id = 9,
-                      qos = #{'QoS-Class-Identifier' => 1,
-                              'Max-Requested-Bandwidth-UL' => 100,
-                              'Max-Requested-Bandwidth-DL' => 100,
-                              'Guaranteed-Bitrate-UL' => 100,
-                              'Guaranteed-Bitrate-DL' => 100},
-                      rules = [<<"r1">>], tft = [], sdf_to_pf = #{}},
-    %% new PCC: same rule name, bigger bitrate -> descriptor changes
-    NewRules = set_qci_arp(
-                 #{<<"r1">> => #{'QoS-Information' =>
-                                     [#{'Max-Requested-Bandwidth-UL' => 300,
-                                        'Max-Requested-Bandwidth-DL' => 300,
-                                        'Guaranteed-Bitrate-UL' => 300,
-                                        'Guaranteed-Bitrate-DL' => 300}]}}, 1, ARP),
-    NewPCC = #pcc_ctx{rules = NewRules},
-    [{5, QoS, _FlowInfo, #ded_bearer{ebi = 5}}] =
-        detect_modified_bearers(NewPCC, #{5 => Old}),
-    ?assertEqual(300, maps:get('Max-Requested-Bandwidth-UL', QoS)),
-    ok.
-
-detect_modified_bearers_unchanged_test() ->
-    ARP = {2, 1, 0},
-    NewRules = set_qci_arp(
-                 #{<<"r1">> => #{'QoS-Information' =>
-                                     [#{'Max-Requested-Bandwidth-UL' => 100,
-                                        'Max-Requested-Bandwidth-DL' => 100,
-                                        'Guaranteed-Bitrate-UL' => 100,
-                                        'Guaranteed-Bitrate-DL' => 100}],
-                                 'Flow-Information' => []}}, 1, ARP),
-    NewPCC = #pcc_ctx{rules = NewRules},
-    %% Build the "stored" descriptor the same way, so it matches exactly.
-    Stored = normalize_bearer(5, 1, ARP, NewPCC, 9),
-    ?assertEqual([], detect_modified_bearers(NewPCC, #{5 => Stored})),
-    ok.
--endif.

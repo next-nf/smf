@@ -1096,7 +1096,7 @@ ded_bearer_from_blqos(EBI,
 	    'Max-Requested-Bandwidth-DL'   => MBRdl * 1000,
 	    'Guaranteed-Bitrate-UL'        => GBRul * 1000,
 	    'Guaranteed-Bitrate-DL'        => GBRdl * 1000},
-    #ded_bearer{ebi = EBI, qci = QCI, arp = ARP, qos = QoS,
+    #ded_bearer{ebi = EBI, qci = QCI, arp = ARP, bind_arp = ARP, qos = QoS,
 		rules = [], tft = [], sdf_to_pf = #{}, charging_id = undefined}.
 
 %% Extract the dedicated EPS Bearer ID(s) named in a Delete Bearer Command

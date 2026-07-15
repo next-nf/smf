@@ -75,7 +75,8 @@
 -record(ded_bearer, {
 	  ebi		:: 0..15,
 	  qci		:: non_neg_integer(),
-	  arp		:: {0..15, 0..1, 0..1},
+	  arp		:: {0..15, 0..1, 0..1},	%% current (last-signalled) ARP; M5 subscribed-ARP fan-out updates this
+	  bind_arp	:: {0..15, 0..1, 0..1},	%% immutable PCC-rule-match ARP (creation ARP); M3 binds rules on this
 	  qos		:: map() | undefined,	%% canonical aggregate QoS-Information (Σ GBR/MBR)
 	  rules = []	:: [binary()],		%% bound Charging-Rule-Names, sorted
 	  tft = []	:: [map()],		%% smf_tft filter maps with assigned TFT ids
