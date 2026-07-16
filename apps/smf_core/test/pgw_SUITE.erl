@@ -21,6 +21,7 @@
 -include("smf_test_lib.hrl").
 -include("smf_pgw_test_lib.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 -define(TIMEOUT, 2000).
 -define(HUT, pgw_s5s8).				%% Handler Under Test
@@ -1804,6 +1805,22 @@ create_session_multi_bearer(Config) ->
        #gtp{type = create_session_response,
 	    ie = #{{v2_bearer_context, 0} := [_,_]}},
        Response),
+
+    %% The additional (non-default) bearer EBI 6 must get a canonical descriptor
+    %% built from its CSR Bearer Level QoS, so ARP fan-out / modified-bearer
+    %% detection cover it. The default bearer (EBI 5) is not a dedicated bearer.
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+    #{dedicated := Dedicated} = smf_context:test_cmd(gtp, CtxKey, info),
+    %% CSR Bearer Level QoS for EBI 6 is 1000/2000 kbps MBR, 500/1000 kbps GBR;
+    %% the descriptor stores bps, so the map must carry the *1000 values.
+    ?match(#{6 := #ded_bearer{ebi = 6, qci = 1, arp = {2, 1, 0},
+			      qos = #{'QoS-Class-Identifier' := 1,
+				      'Max-Requested-Bandwidth-UL' := 1000000,
+				      'Max-Requested-Bandwidth-DL' := 2000000,
+				      'Guaranteed-Bitrate-UL' := 500000,
+				      'Guaranteed-Bitrate-DL' := 1000000}}},
+	   Dedicated),
+    ?assertNot(maps:is_key(5, Dedicated)),
 
     delete_session(GtpC),
 
@@ -5711,6 +5728,10 @@ gx_rar_dedicated_bearer_create(Config) ->
     ?match(#{{qci_arp, 1, {2, 1, 0}} := DedEBI}, BearerMap),
     ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap),
 
+    %% Verify the dedicated bearer descriptor was stored
+    #{dedicated := Dedicated} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{DedEBI := #ded_bearer{ebi = DedEBI, qci = 1, arp = {2, 1, 0}}}, Dedicated),
+
     %% Verify that a Gx CCR-Update was sent to report the new bearer
     %% with Bearer-Operation = ESTABLISHMENT and Bearer-Identifier = <<EBI>>
     BearerCCRU =
@@ -5885,6 +5906,11 @@ modify_bearer_command_arp_fanout(Config) ->
 
     ?equal({ok, timeout}, recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok)),
     ?equal([], outstanding_requests()),
+
+    %% The staged descriptor for the dedicated bearer must have committed with
+    %% the new ARP once its Update Bearer Response was processed.
+    #{dedicated := DedicatedA} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{DedEBI := #ded_bearer{arp = {5, _, _}}}, DedicatedA),
 
     delete_session(GtpC2),
 
@@ -6062,6 +6088,16 @@ gx_rar_dedicated_bearer_modify(Config) ->
     send_pdu(Cntl, GtpC, make_response(UBRDed, simple, GtpCDed)),
     ct:sleep(200),
     ?equal([], outstanding_requests()),
+
+    %% The staged descriptor must have been committed into `dedicated` on the
+    %% Update Bearer Response success, reflecting the aggregated QoS of both
+    %% bound rules (ded-rule-1 6000/8000 + ded-rule-2 4000/5000).
+    #{dedicated := DedicatedM} = smf_context:test_cmd(gtp, CtxKey, info),
+    #{DedEBI := #ded_bearer{qos = NewQoSMap}} = DedicatedM,
+    ?equal(10000, maps:get('Max-Requested-Bandwidth-UL', NewQoSMap)),
+    ?equal(13000, maps:get('Max-Requested-Bandwidth-DL', NewQoSMap)),
+    ?equal(10000, maps:get('Guaranteed-Bitrate-UL', NewQoSMap)),
+    ?equal(13000, maps:get('Guaranteed-Bitrate-DL', NewQoSMap)),
 
     delete_session(GtpC),
 
@@ -7030,6 +7066,9 @@ mme_delete_bearer_command(Config) ->
 
     #{bearers := BearerMap1} = smf_context:test_cmd(gtp, CtxKey, info),
     ?equal(false, is_map_key({'Access', DedEBI}, BearerMap1)),
+
+    #{dedicated := DedicatedAfter} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?assertNot(maps:is_key(DedEBI, DedicatedAfter)),
 
     delete_session(GtpC2),
 

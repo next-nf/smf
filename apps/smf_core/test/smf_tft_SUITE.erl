@@ -37,7 +37,10 @@ all() ->
      flow_info_to_tft_uplink_present_unchanged,
      flow_info_to_tft_unique_ids,
      tft_to_flow_info_roundtrip,
-     decode_tad_operations].
+     decode_tad_operations,
+     flow_info_to_tft_map_no_sdf,
+     flow_info_to_tft_map_captures_sdf,
+     flow_info_to_tft_map_bare_binary_sdf].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -472,3 +475,43 @@ decode_tad_operations(_Config) ->
 			      filters => DelFilters, parameters => []}),
     {delete_packet_filters, DelContents} = smf_tft:decode_tad(DelBin),
     ?assertEqual([2, 5], DelContents).
+
+flow_info_to_tft_map_no_sdf() ->
+    [{doc, "flow_info_to_tft_map returns an empty SDF map when no "
+      "Packet-Filter-Identifier is present, and the same binary as flow_info_to_tft"}].
+flow_info_to_tft_map_no_sdf(_Config) ->
+    FlowInfo = [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+                  'Flow-Direction' => [1]}],
+    {Bin, Filters, SdfToPf} = smf_tft:flow_info_to_tft_map(FlowInfo),
+    ?assertEqual(smf_tft:flow_info_to_tft(FlowInfo), Bin),
+    ?assertEqual(#{}, SdfToPf),
+    ?assert(length(Filters) >= 1),
+    ok.
+
+flow_info_to_tft_map_captures_sdf() ->
+    [{doc, "flow_info_to_tft_map maps each Gx Packet-Filter-Identifier (SDF id) "
+      "to the TFT packet filter id assigned to that filter"}].
+flow_info_to_tft_map_captures_sdf(_Config) ->
+    FlowInfo = [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+                  'Flow-Direction' => [2],
+                  'Packet-Filter-Identifier' => [<<"sdf-a">>]},
+                #{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+                  'Flow-Direction' => [1],
+                  'Packet-Filter-Identifier' => [<<"sdf-b">>]}],
+    {_Bin, Filters, SdfToPf} = smf_tft:flow_info_to_tft_map(FlowInfo),
+    %% both SDF ids present, each pointing at a real filter id
+    ?assertEqual(2, map_size(SdfToPf)),
+    Ids = [Id || #{id := Id} <- Filters],
+    ?assert(lists:member(maps:get(<<"sdf-a">>, SdfToPf), Ids)),
+    ?assert(lists:member(maps:get(<<"sdf-b">>, SdfToPf), Ids)),
+    ok.
+
+flow_info_to_tft_map_bare_binary_sdf() ->
+    [{doc, "a bare-binary Packet-Filter-Identifier (not wrapped in a list) is captured"}].
+flow_info_to_tft_map_bare_binary_sdf(_Config) ->
+    FlowInfo = [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+                  'Flow-Direction' => [2],
+                  'Packet-Filter-Identifier' => <<"sdf-x">>}],
+    {_Bin, _Filters, SdfToPf} = smf_tft:flow_info_to_tft_map(FlowInfo),
+    ?assertMatch(#{<<"sdf-x">> := _}, SdfToPf),
+    ok.

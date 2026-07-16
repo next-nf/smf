@@ -125,7 +125,8 @@ init(_Opts, Data0) ->
     PCC = #pcc_ctx{offline_charging_profile = OCPcfg},
     Data = Data0#{'Version' => v2, aaa_session => AAASession, pcf => PCF,
 		  charging => Charging, aaa_auth => AAAAuth, pcc => PCC,
-		  pending_bearers => #{}, retry_bearers => #{}},
+		  pending_bearers => #{}, retry_bearers => #{},
+		  dedicated => #{}, pending_updates => #{}},
     {ok, smf_context:init_state(), Data}.
 
 handle_event(Type, Content, State, #{'Version' := v1} = Data) ->
@@ -407,10 +408,11 @@ handle_request(#request{src = Src, ip = IP, port = Port} = ReqKey,
     %% Fan the ARP change out to every dedicated bearer that still carries the
     %% old subscribed ARP; each gets its own network-initiated Update Bearer
     %% Request with QCI/GBR/MBR unchanged but the new ARP.
-    fan_out_subscribed_arp_change(OldSOpts, Bearer, AMBR, Context, AccessTunnel, DataNew),
+    DataNew1 = fan_out_subscribed_arp_change(OldSOpts, Bearer, AMBR, Context,
+					     AccessTunnel, DataNew),
 
     Actions = context_idle_action([], Context),
-    {keep_state, DataNew, Actions};
+    {keep_state, DataNew1, Actions};
 
 handle_request(ReqKey,
 	       #gtp{type = change_notification_request, ie = IEs} = Request,
@@ -504,11 +506,11 @@ handle_request(ReqKey,
 	    Actions = context_idle_action([], Context),
 	    {keep_state, Data1, Actions};
        true ->
-	    %% TODO(#22): UE-requested add_packet_filters / replace_packet_filters /
-	    %% delete_packet_filters on an existing dedicated bearer requires PCRF
-	    %% re-authorization (Gx CCR-U with the TAD translated to SDF filter
-	    %% identifiers) plus per-bearer SDF/packet-filter-id state this module
-	    %% does not yet track (see #21); deferred to follow-up #22. Reject for now.
+	    %% TODO(#22): UE-requested add/replace/delete_packet_filters needs PCRF
+	    %% re-authorization (Gx CCR-U with the TAD translated to SDF filter ids)
+	    %% and the async Gx-reply pipeline. The per-bearer SDF-id -> TFT-id map
+	    %% (#21) is now maintained in #ded_bearer.sdf_to_pf; the UE-modify path
+	    %% will read it to translate TAD packet-filter-ids back to SDF ids.
 	    ResponseIEs = [#v2_cause{v2_cause = request_rejected},
 			   #v2_eps_bearer_id{eps_bearer_id = LinkedEBI},
 			   #v2_procedure_transaction_id{pti = PTI}],
@@ -587,7 +589,7 @@ handle_response({create_bearer, PgwFTEID},
     case ?CAUSE_OK(bearer_context_cause(BearerCtxGroup)) of
 	true ->
 	    case maps:take(PgwFTEID, Pending0) of
-		{{QCI, ARP, AccessBearer0, _ChId}, Pending} ->
+		{{QCI, ARP, AccessBearer0, ChId}, Pending} ->
 		    #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} = BearerCtxGroup,
 		    AccessBearer = update_bearer_from_response(BearerCtxGroup, AccessBearer0),
 		    PgwBI = <<EBI:8>>,
@@ -598,8 +600,11 @@ handle_response({create_bearer, PgwFTEID},
 			       {ok, {PCtx1, _, _}} -> PCtx1;
 			       {error, _}         -> PCtx0
 			   end,
+		    Desc = smf_gsn_lib:normalize_bearer(EBI, QCI, ARP, PCC, ChId),
+		    Dedicated = maps:get(dedicated, Data0, #{}),
 		    Data1 = Data0#{bearers := BearerMap, pfcp := PCtx,
 				   pending_bearers := Pending,
+				   dedicated := Dedicated#{EBI => Desc},
 				   retry_bearers :=
 				       maps:remove(PgwFTEID,
 						   maps:get(retry_bearers, Data0, #{}))},
@@ -639,14 +644,16 @@ handle_response({delete_dedicated_bearer, EBI},
 		#gtp{type = delete_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = _Cause}}},
 		_Request, _State,
-		#{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC} = Data0) ->
+		#{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC,
+		  dedicated := Ded0} = Data0) ->
     BearerMap1 = maps:remove({'Access', EBI}, BearerMap0),
     BearerMap = smf_gsn_lib:remove_bearer_metadata_for_ebi(EBI, BearerMap1),
+    Data1 = Data0#{dedicated := maps:remove(EBI, Ded0)},
     case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
 	{ok, {PCtx, _, _}} ->
-	    {keep_state, Data0#{bearers := BearerMap, pfcp := PCtx}};
+	    {keep_state, Data1#{bearers := BearerMap, pfcp := PCtx}};
 	{error, _} ->
-	    {keep_state, Data0#{bearers := BearerMap}}
+	    {keep_state, Data1#{bearers := BearerMap}}
     end;
 
 handle_response({delete_dedicated_bearer, _EBI}, timeout,
@@ -657,22 +664,29 @@ handle_response({delete_dedicated_bearer, _EBI}, timeout,
 handle_response({update_dedicated_bearer, EBI},
 		#gtp{type = update_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause}}},
-		_Request, #{session := connected}, Data) ->
-    %% Response to a fan-out Update Bearer Request emitted for a dedicated bearer
-    %% during an HSS Initiated Subscribed QoS Modification (TS 23.401 5.4.2.2
-    %% step 5/7). Network-initiated, so there is no command ReqKey to finish; the
-    %% default-bearer exchange carries the procedure. Just log a failure.
-    case Cause of
-	request_accepted -> ok;
-	_ -> ?LOG(warning, "ARP fan-out Update Bearer Request for bearer ~p "
-			   "failed with ~p", [EBI, Cause])
-    end,
-    {keep_state, Data};
+		_Request, #{session := connected},
+		#{dedicated := Ded0, pending_updates := PU0} = Data) ->
+    %% Network-initiated Update Bearer Request for a dedicated bearer (M3 modified
+    %% QoS/TFT, or M5 ARP fan-out). Commit the staged descriptor only on success;
+    %% on failure keep the previously confirmed one (TS 23.401 5.4.2.1/5.4.2.2).
+    {Ded, PU} =
+	case maps:take(EBI, PU0) of
+	    {Desc, PU1} when Cause =:= request_accepted ->
+		{Ded0#{EBI => Desc}, PU1};
+	    {_Desc, PU1} ->
+		?LOG(warning, "Update Bearer Request for dedicated bearer ~p "
+			      "failed with ~p", [EBI, Cause]),
+		{Ded0, PU1};
+	    error ->
+		{Ded0, PU0}
+	end,
+    {keep_state, Data#{dedicated := Ded, pending_updates := PU}};
 
 handle_response({update_dedicated_bearer, EBI}, timeout,
-		#gtp{type = update_bearer_request}, #{session := connected}, Data) ->
-    ?LOG(error, "ARP fan-out Update Bearer Request for bearer ~p timed out", [EBI]),
-    {keep_state, Data};
+		#gtp{type = update_bearer_request}, #{session := connected},
+		#{pending_updates := PU0} = Data) ->
+    ?LOG(error, "Update Bearer Request for dedicated bearer ~p timed out", [EBI]),
+    {keep_state, Data#{pending_updates := maps:remove(EBI, PU0)}};
 
 handle_response({CommandReqKey, OldSOpts},
 		#gtp{type = update_bearer_response,
@@ -740,7 +754,7 @@ handle_response(_CommandReqKey, _Response, _Request, #{session := SState}, _Data
 %% Level QoS; if they differ, emit a network-initiated Update Bearer Request per
 %% affected dedicated bearer with QCI/GBR/MBR unchanged but the new ARP.
 fan_out_subscribed_arp_change(OldSOpts, CommandBearer, AMBR, Context, AccessTunnel,
-			      #{bearers := BearerMap, pcc := PCC}) ->
+			      #{dedicated := Dedicated} = Data) ->
     NewARP = command_bearer_arp(CommandBearer),
     OldARP = session_default_arp(OldSOpts),
     DefaultEBI = Context#context.default_bearer_id,
@@ -748,16 +762,20 @@ fan_out_subscribed_arp_change(OldSOpts, CommandBearer, AMBR, Context, AccessTunn
 	true ->
 	    %% TODO(#27): batch — emit one Update Bearer Request carrying all
 	    %% bearers with the old ARP, not one message per bearer.
-	    maps:foreach(
-	      fun({qci_arp, QCI, ARP}, EBI)
-		    when ARP =:= OldARP, EBI =/= DefaultEBI ->
-		      send_dedicated_bearer_arp_update(
-			EBI, QCI, ARP, NewARP, AMBR, PCC, AccessTunnel);
-		 (_, _) ->
-		      ok
-	      end, BearerMap);
+	    %% TODO(#31): the is_map(QoS) guard skips a descriptor with undefined
+	    %% QoS; the pre-branch code still fanned out with a QCI-only fallback.
+	    maps:fold(
+	      fun(EBI, #ded_bearer{arp = ARP, qos = QoS} = Desc, D)
+		    when ARP =:= OldARP, EBI =/= DefaultEBI, is_map(QoS) ->
+		      send_dedicated_bearer_arp_update(EBI, QoS, NewARP, AMBR, AccessTunnel),
+		      NewDesc = Desc#ded_bearer{arp = NewARP,
+						qos = set_qos_arp(QoS, NewARP)},
+		      stage_bearer_update(EBI, NewDesc, D);
+		 (_, _, D) ->
+		      D
+	      end, Data, Dedicated);
 	false ->
-	    ok
+	    Data
     end.
 
 %% New ARP carried in the command's Bearer Level QoS, as a {PL, PCI, PVI} tuple.
@@ -778,18 +796,17 @@ session_default_arp(#{'QoS-Information' := #{'Allocation-Retention-Priority' := 
 session_default_arp(_) ->
     undefined.
 
-%% Emit one Update Bearer Request for a dedicated bearer, keeping its QCI/GBR/MBR
-%% but replacing the ARP. The QCI/GBR/MBR are taken from the bearer's bound PCC
-%% rule when available; if none can be resolved, fall back to the QCI stored in
-%% the bearer map with zero bitrates (still conveying the new ARP).
-send_dedicated_bearer_arp_update(EBI, QCI, OldARP, NewARP, AMBR, PCC, AccessTunnel) ->
-    QoS0 = case dedicated_bearer_rule_qos(QCI, OldARP, PCC) of
-	       Q when is_map(Q) -> Q;
-	       undefined        -> #{'QoS-Class-Identifier' => QCI}
-	   end,
-    QoS = QoS0#{'Allocation-Retention-Priority' => arp_to_map(NewARP)},
-    %% ARP-only change: no TFT, but carry the APN-AMBR from the command.
+%% Emit one Update Bearer Request for a dedicated bearer keeping its QCI/GBR/MBR
+%% but replacing the ARP (TS 23.401 5.4.2.2 step 5). QoS is taken from the stored
+%% descriptor; only the ARP is overwritten. The APN-AMBR from the command rides
+%% along at message level.
+send_dedicated_bearer_arp_update(EBI, QoS0, NewARP, AMBR, AccessTunnel) ->
+    QoS = set_qos_arp(QoS0, NewARP),
     send_dedicated_bearer_update(EBI, QoS, undefined, [AMBR], AccessTunnel).
+
+%% Overwrite the Allocation-Retention-Priority in a QoS-Information map.
+set_qos_arp(QoS, NewARP) ->
+    QoS#{'Allocation-Retention-Priority' => arp_to_map(NewARP)}.
 
 %% TS 23.401 5.4.2.1 (with QoS update) / 5.4.3 (without): when a Gx PCC-rule
 %% change adds/removes a rule on an existing dedicated bearer or re-authorizes a
@@ -798,6 +815,14 @@ send_dedicated_bearer_arp_update(EBI, QCI, OldARP, NewARP, AMBR, PCC, AccessTunn
 initiate_update_dedicated_bearer(EBI, QoS, FlowInfo, AccessTunnel, Data) ->
     send_dedicated_bearer_update(EBI, QoS, FlowInfo, [], AccessTunnel),
     Data.
+
+%% Stage a recomputed descriptor for EBI; it is committed into `dedicated` when
+%% the matching Update Bearer Response succeeds, and dropped on failure/timeout,
+%% so a failed update leaves the previously confirmed descriptor in place.
+%% TODO(#30): the stash is keyed by bare EBI, so two in-flight updates for the
+%% same EBI clobber each other; key by request correlation or defer the second.
+stage_bearer_update(EBI, Desc, #{pending_updates := PU} = Data) ->
+    Data#{pending_updates := PU#{EBI => Desc}}.
 
 %% Emit one network-initiated Update Bearer Request for a dedicated bearer
 %% (TS 29.274 7.2.15). Carries the updated bearer-level QoS and, when FlowInfo is
@@ -819,20 +844,6 @@ send_dedicated_bearer_update(EBI, QoS, FlowInfo, ExtraIEs, AccessTunnel) ->
     RequestIEs0 = ExtraIEs ++ [#v2_bearer_context{group = BearerGroup}],
     RequestIEs = gtp_v2_c:build_recovery(Type, AccessTunnel, false, RequestIEs0),
     send_request(AccessTunnel, ?T3, ?N3, Type, RequestIEs, {update_dedicated_bearer, EBI}).
-
-%% Resolve a dedicated bearer's QoS-Information map from the PCC rule(s) bound to
-%% its {QCI, ARP}. Returns the rule's QoS-Information map or undefined.
-dedicated_bearer_rule_qos(QCI, ARP, #pcc_ctx{rules = Rules} = PCC) ->
-    case affected_pcc_rules(QCI, ARP, PCC) of
-	[Name | _] ->
-	    case maps:get(Name, Rules, undefined) of
-		#{'QoS-Information' := [Q]} when is_map(Q) -> Q;
-		#{'QoS-Information' := Q} when is_map(Q)   -> Q;
-		_                                          -> undefined
-	    end;
-	[] ->
-	    undefined
-    end.
 
 arp_to_map({PL, PCI, PVI}) ->
     #{'Priority-Level' => PL,
@@ -942,20 +953,23 @@ install_additional_bearer(BearerGroup, _AccessTunnel,
                                             local = #fq_teid{ip = PgwUIP, teid = DataTEI}},
                     AccessBearer = update_bearer_from_response(BearerGroup, AccessBearer0),
                     BearerMap1 = BearerMap0#{{'Access', EBI} => AccessBearer},
-                    BearerMap = case BearerGroup of
+                    Ded0 = maps:get(dedicated, Data, #{}),
+                    {BearerMap, Dedicated} = case BearerGroup of
                         #{?'Bearer Level QoS' :=
-                              #v2_bearer_level_quality_of_service{
-                                 pci = PCI, pl = PL, pvi = PVI, label = QCI}} ->
-                            ARP = {PL, PCI, PVI},
-                            BearerMap1#{{qci_arp, QCI, ARP} => EBI};
+                              #v2_bearer_level_quality_of_service{} = BLQoS} ->
+                            #ded_bearer{qci = QCI, arp = ARP} = Desc =
+                                ded_bearer_from_blqos(EBI, BLQoS),
+                            {BearerMap1#{{qci_arp, QCI, ARP} => EBI},
+                             Ded0#{EBI => Desc}};
                         _ ->
-                            BearerMap1
+                            {BearerMap1, Ded0}
                     end,
                     case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
                         {ok, {PCtx, _, _}} ->
-                            Data#{bearers := BearerMap, pfcp := PCtx};
+                            Data#{bearers := BearerMap, pfcp := PCtx,
+                                  dedicated := Dedicated};
                         {error, _} ->
-                            Data#{bearers := BearerMap}
+                            Data#{bearers := BearerMap, dedicated := Dedicated}
                     end;
                 _ ->
                     Data
@@ -1010,10 +1024,12 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
     %% TODO(#27): batch these — emit one Update Bearer Request carrying all
     %% modified bearer contexts, and one Delete Bearer Request carrying all
     %% removed EBIs, instead of one message per bearer (GTPv2 carries a list).
-    ModifiedBearers = smf_gsn_lib:detect_modified_bearers(OldPCC, NewPCC, BearerMap),
+    Dedicated = maps:get(dedicated, Data, #{}),
+    ModifiedBearers = smf_gsn_lib:detect_modified_bearers(NewPCC, Dedicated),
     Data2 = lists:foldl(
-	      fun({EBI, _QCI, _ARP, QoS, FlowInfo}, D) ->
-		  initiate_update_dedicated_bearer(EBI, QoS, FlowInfo, AccessTunnel, D)
+	      fun({EBI, QoS, FlowInfo, NewDesc}, D) ->
+		  D1 = initiate_update_dedicated_bearer(EBI, QoS, FlowInfo, AccessTunnel, D),
+		  stage_bearer_update(EBI, NewDesc, D1)
 	      end, Data1, ModifiedBearers),
     RemovedEBIs = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
     lists:foldl(
@@ -1060,6 +1076,32 @@ initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data) ->
 initiate_delete_dedicated_bearer(PTI, EBI, AccessTunnel, Data) ->
     delete_dedicated_bearer(PTI, EBI, AccessTunnel),
     Data.
+
+%% Build a descriptor for a dedicated bearer established directly from a Create
+%% Session Request bearer context (TS 29.274 7.2.1). Its QoS is the Bearer Level
+%% QoS carried in the CSR — there is no bound PCC rule and no TFT — so it is taken
+%% straight from that IE rather than via smf_gsn_lib:normalize_bearer/5, which
+%% derives from PCC. This keeps such bearers visible to the ARP fan-out (M5) and
+%% modified-bearer detection (M3), which iterate the stored descriptors.
+ded_bearer_from_blqos(EBI,
+		      #v2_bearer_level_quality_of_service{
+			 pl = PL, pci = PCI, pvi = PVI, label = QCI,
+			 maximum_bit_rate_for_uplink      = MBRul,
+			 maximum_bit_rate_for_downlink    = MBRdl,
+			 guaranteed_bit_rate_for_uplink   = GBRul,
+			 guaranteed_bit_rate_for_downlink = GBRdl}) ->
+    ARP = {PL, PCI, PVI},
+    %% The Bearer Level QoS record carries bit-rates in kbps; the QoS map keys are
+    %% bps (as encode_bearer_level_qos/1 div-1000s back and extract_flow_qos/1
+    %% *1000s), so scale up on the way in.
+    QoS = #{'QoS-Class-Identifier'       => QCI,
+	    'Allocation-Retention-Priority' => arp_to_map(ARP),
+	    'Max-Requested-Bandwidth-UL'   => MBRul * 1000,
+	    'Max-Requested-Bandwidth-DL'   => MBRdl * 1000,
+	    'Guaranteed-Bitrate-UL'        => GBRul * 1000,
+	    'Guaranteed-Bitrate-DL'        => GBRdl * 1000},
+    #ded_bearer{ebi = EBI, qci = QCI, arp = ARP, bind_arp = ARP, qos = QoS,
+		rules = [], tft = [], sdf_to_pf = #{}, charging_id = undefined}.
 
 %% Extract the dedicated EPS Bearer ID(s) named in a Delete Bearer Command
 %% Bearer Context IE (TS 29.274 7.2.17.1-2). gtplib may surface a single

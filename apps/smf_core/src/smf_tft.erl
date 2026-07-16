@@ -8,10 +8,10 @@
 -module(smf_tft).
 
 -export([encode/1, decode/1,
-	 flow_info_to_tft/1, tft_to_flow_info/1, decode_tad/1,
+	 flow_info_to_tft/1, flow_info_to_tft_map/1, tft_to_flow_info/1, decode_tad/1,
 	 parse_flow_description/1, format_flow_description/1]).
 -ignore_xref([encode/1, decode/1,
-	      flow_info_to_tft/1, tft_to_flow_info/1, decode_tad/1,
+	      flow_info_to_tft/1, flow_info_to_tft_map/1, tft_to_flow_info/1, decode_tad/1,
 	      parse_flow_description/1, format_flow_description/1]).
 
 %%%===================================================================
@@ -39,9 +39,20 @@ encode(#{operation := Operation, filters := Filters, parameters := Parameters}) 
 
 %% flow_info_to_tft/1 — [map()] -> binary()
 flow_info_to_tft(FlowInfoList) ->
-    Filters0 = flow_info_list_to_filters(FlowInfoList, 0, 255),
+    {TFTBin, _Filters, _SdfToPf} = flow_info_to_tft_map(FlowInfoList),
+    TFTBin.
+
+%% flow_info_to_tft_map/1 — [map()] -> {binary(), [map()], #{binary() => 0..15}}
+%% Like flow_info_to_tft/1 but also returns the structured filter list and the
+%% SDF-filter-id -> TFT-packet-filter-id map (TS 23.401 §5.4.5). The SDF filter id
+%% is the Gx Packet-Filter-Identifier carried per Flow-Information (TS 29.212
+%% §5.3.55); it is present only for PCRF/UE-initiated allocation, so a filter
+%% without one contributes no mapping entry.
+flow_info_to_tft_map(FlowInfoList) ->
+    {Filters0, SdfToPf} = flow_info_list_to_filters(FlowInfoList, 0, 255, #{}),
     Filters = ensure_uplink_filter(Filters0),
-    encode(#{operation => create_new_tft, filters => Filters, parameters => []}).
+    TFTBin = encode(#{operation => create_new_tft, filters => Filters, parameters => []}),
+    {TFTBin, Filters, SdfToPf}.
 
 %% TS 23.401 §5.4.5 / TS 23.060 §15.3.3.4: if after all operations a dedicated
 %% bearer TFT contains only downlink packet filters, the PDN GW shall add an
@@ -312,12 +323,24 @@ encode_parameters(Params) ->
 %% PGW maintains the SDF-id <-> TFT-id relation per §5.4.5). Per TS 24.301
 %% §6.4.2.4 d)1), two filters with identical identifiers in a "Create new TFT"
 %% make a conformant UE reject the activation with ESM cause #45.
-flow_info_list_to_filters([], _Used, _Precedence) -> [];
-flow_info_list_to_filters([FlowInfo | Rest], Used, Precedence) ->
+flow_info_list_to_filters([], _Used, _Precedence, Sdf) -> {[], Sdf};
+flow_info_list_to_filters([FlowInfo | Rest], Used, Precedence, Sdf0) ->
     Id = lowest_free_id(Used),
     Filter = flow_info_to_filter(FlowInfo, Id, Precedence),
-    Used1 = Used bor (1 bsl Id),
-    [Filter | flow_info_list_to_filters(Rest, Used1, Precedence - 1)].
+    %% TODO(#32): a duplicate Gx Packet-Filter-Identifier silently overwrites the
+    %% earlier sdf_to_pf entry; document/assert uniqueness when #22 consumes it.
+    Sdf = case sdf_filter_id(FlowInfo) of
+              undefined -> Sdf0;
+              SdfId     -> Sdf0#{SdfId => Id}
+          end,
+    {Rest1, Sdf1} =
+        flow_info_list_to_filters(Rest, Used bor (1 bsl Id), Precedence - 1, Sdf),
+    {[Filter | Rest1], Sdf1}.
+
+%% The Gx SDF filter identifier (TS 29.212 §5.3.55), if the PCRF assigned one.
+sdf_filter_id(#{'Packet-Filter-Identifier' := [Id | _]}) -> Id;
+sdf_filter_id(#{'Packet-Filter-Identifier' := Id}) when is_binary(Id) -> Id;
+sdf_filter_id(_) -> undefined.
 
 flow_info_to_filter(FlowInfo, Id, Precedence) ->
     Direction = get_flow_direction(FlowInfo),
