@@ -1046,6 +1046,10 @@ init_per_testcase(default_qci_arp_rule_binds_to_default, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
+init_per_testcase(gx_rar_removed_rule_on_default_bearer_no_delete, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
 init_per_testcase(gx_dedicated_bearer_create_failure, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
@@ -6926,6 +6930,7 @@ gx_rar_removed_rule_on_default_bearer_no_delete() ->
 	   "dedicated bearer's would). The PGW must NEVER emit a Delete Bearer "
 	   "Request naming the LBI -- that tears down the whole PDN connection"}].
 gx_rar_removed_rule_on_default_bearer_no_delete(Config) ->
+    Cntl = whereis(gtpc_client_server),
     CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
 
     {GtpC, _, _} = create_session(Config),
@@ -6938,19 +6943,11 @@ gx_rar_removed_rule_on_default_bearer_no_delete(Config) ->
 	fun(Request, Result, Avps, SOpts) ->
 		Self ! {'$response', Request, Result, Avps, SOpts} end,
 
-    %% The default bearer is created with QCI 8 / ARP PL=10,PCI=1,PVI=0 (see
-    %% session_options/1's 'QoS-Information' expectation), but nothing seeds
-    %% the bearer map's {qci_arp,...} entry for the DEFAULT bearer itself at
-    %% session creation (only dedicated bearers get one, on their Create
-    %% Bearer Response). Seed it directly -- this is exactly the BearerMap
-    %% shape detect_removed_bearers/3 operates on, whatever the code path
-    %% that produces it, and it's the precondition the LBI-leak requires.
-    #{context := #context{default_bearer_id = DefaultEBI0}} =
-	smf_context:test_cmd(gtp, CtxKey, info),
-    ok = smf_context:test_cmd(gtp, CtxKey, {put_bearer, {qci_arp, 8, {10, 1, 0}}, DefaultEBI0}),
-
-    %% Install a rule bound to that SAME {QCI,ARP} -- it binds onto the
-    %% default bearer (now present in the bearer map), no new bearer created.
+    %% Install a rule at the default bearer's {QCI,ARP} (QCI 8, ARP
+    %% PL=10,PCI=1,PVI=0 -- see session_options/1's 'QoS-Information'
+    %% expectation). It binds onto the default bearer -- no Create Bearer
+    %% Request -- which is what populates the bearer map's {qci_arp,...}
+    %% entry for the DEFAULT bearer itself.
     #{aaa_session := SOpts0} = smf_context:test_cmd(gtp, CtxKey, info),
     DefaultQARule =
 	#{'Charging-Rule-Definition' =>
@@ -6981,6 +6978,9 @@ gx_rar_removed_rule_on_default_bearer_no_delete(Config) ->
 	end,
     ?equal(ok, Resp0),
 
+    %% It must bind to the default bearer -- NO Create Bearer Request.
+    ?equal({ok, timeout}, recv_pdu(Cntl, undefined, 2000, ok)),
+
     %% Still bound to the default bearer's EBI -- no dedicated bearer exists.
     #{bearers := BearerMap, context := #context{default_bearer_id = DefaultEBI}} =
 	smf_context:test_cmd(gtp, CtxKey, info),
@@ -7005,7 +7005,7 @@ gx_rar_removed_rule_on_default_bearer_no_delete(Config) ->
     %% No Delete Bearer Request must have been emitted -- naming the LBI would
     %% tear down the whole PDN connection.
     ?equal([], outstanding_requests()),
-    ?equal({ok, timeout}, recv_pdu(whereis(gtpc_client_server), undefined, 2000, ok)),
+    ?equal({ok, timeout}, recv_pdu(Cntl, undefined, 2000, ok)),
 
     %% The session must still be up.
     ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
