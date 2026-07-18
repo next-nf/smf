@@ -559,10 +559,7 @@ handle_request(ReqKey,
 			     prep_commanded_deactivation(BearerContext, DefaultEBI,
 							  AccessTunnel, Acc)
 		     end, {Data0, []}, BearerContexts),
-    case EBIs of
-	[] -> ok;
-	_  -> send_dedicated_bearers_delete(EBIs, AccessTunnel)
-    end,
+    send_dedicated_bearers_delete(EBIs, AccessTunnel),
     %% Like modify_bearer_command, no direct response is sent; the follow-on
     %% Delete Bearer Request carries the procedure forward.
     gtp_context:request_finished(ReqKey),
@@ -794,11 +791,8 @@ fan_out_subscribed_arp_change(OldSOpts, CommandBearer, AMBR, Context, AccessTunn
 		     (_, _, Acc) ->
 			  Acc
 		  end, {[], #{}}, Dedicated),
-	    case Contexts of
-		[] -> ok;
-		_  -> send_dedicated_bearers_update(subscribed_qos, Contexts, [AMBR],
-						    Staged, AccessTunnel)
-	    end,
+	    send_dedicated_bearers_update(subscribed_qos, Contexts, [AMBR],
+					  Staged, AccessTunnel),
 	    Data;
 	false ->
 	    Data
@@ -832,6 +826,8 @@ set_qos_arp(QoS, NewARP) ->
 %% (§7.2.15 NOTE), which is handled on a separate path and never uses this helper.
 %% Kind (rule_change | subscribed_qos) selects the response failure policy; Staged
 %% maps each EBI to the descriptor to commit when that bearer is accepted.
+send_dedicated_bearers_update(_Kind, [], _ExtraIEs, _Staged, _AccessTunnel) ->
+    ok;
 send_dedicated_bearers_update(Kind, Contexts, ExtraIEs, Staged, AccessTunnel) ->
     BearerCtxIEs = [update_bearer_context(EBI, QoS, FlowInfo)
 		    || {EBI, QoS, FlowInfo} <- Contexts],
@@ -1006,6 +1002,8 @@ create_dedicated_bearer(PTI, LinkedEBI, QoS, TFTBin, ChId, AccessBearer, Tunnel)
 %% Emit one network-initiated Delete Bearer Request (TS 29.274 §7.2.9.2) carrying a
 %% list of dedicated EBIs. Never carries the LBI — that tears down the whole PDN
 %% connection (TS 23.401 §5.4.4.1). No PTI (network-initiated).
+send_dedicated_bearers_delete([], _Tunnel) ->
+    ok;
 send_dedicated_bearers_delete(EBIs, Tunnel) ->
     RequestIEs0 = [#v2_eps_bearer_id{instance = 1, eps_bearer_id = EBI} || EBI <- EBIs],
     RequestIEs = gtp_v2_c:build_recovery(delete_bearer_request, Tunnel, false, RequestIEs0),
@@ -1027,16 +1025,11 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
 	      end, Data, NewBearers),
     Dedicated = maps:get(dedicated, Data, #{}),
     ModifiedBearers = smf_gsn_lib:detect_modified_bearers(NewPCC, Dedicated),
-    case ModifiedBearers of
-	[] ->
-	    ok;
-	_ ->
-	    Contexts = [{EBI, QoS, FlowInfo}
-			|| {EBI, QoS, FlowInfo, _Desc} <- ModifiedBearers],
-	    Staged = maps:from_list([{EBI, Desc}
-			|| {EBI, _QoS, _FlowInfo, Desc} <- ModifiedBearers]),
-	    send_dedicated_bearers_update(rule_change, Contexts, [], Staged, AccessTunnel)
-    end,
+    Contexts = [{EBI, QoS, FlowInfo}
+		|| {EBI, QoS, FlowInfo, _Desc} <- ModifiedBearers],
+    Staged = maps:from_list([{EBI, Desc}
+			     || {EBI, _QoS, _FlowInfo, Desc} <- ModifiedBearers]),
+    send_dedicated_bearers_update(rule_change, Contexts, [], Staged, AccessTunnel),
     RemovedEBIs0 = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
     %% The default bearer's EBI can appear here (its {qci_arp,QCI,ARP} entry
     %% loses its last bound rule just like a dedicated bearer's would). Never
@@ -1049,10 +1042,7 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
 		   "ignoring (never emit a Delete Bearer Request for the LBI)",
 		   [DefaultEBI])
     end,
-    case RemovedEBIs of
-	[] -> ok;
-	_  -> send_dedicated_bearers_delete(RemovedEBIs, AccessTunnel)
-    end,
+    send_dedicated_bearers_delete(RemovedEBIs, AccessTunnel),
     Data1.
 
 initiate_create_dedicated_bearer(PTI, QCI, ARP, QoS, FlowInfo, DefaultEBI, AccessTunnel,
