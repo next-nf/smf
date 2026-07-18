@@ -362,12 +362,6 @@ handle_event({call, From}, {?TestCmdTag, session}, _State, #{aaa_session := Sess
     {keep_state_and_data, [{reply, From, {ok, Session}}]};
 handle_event({call, From}, {?TestCmdTag, pcc_rules}, _State, #{pcc := PCC}) ->
     {keep_state_and_data, [{reply, From, {ok, PCC#pcc_ctx.rules}}]};
-handle_event({call, From}, {?TestCmdTag, {put_bearer, Key, Val}}, _State,
-	     #{bearers := BearerMap} = Data) ->
-    %% Test-only: seed an arbitrary bearer map entry (e.g. a {qci_arp,...}
-    %% key) without driving a full GTP exchange, for constructing states that
-    %% are reachable in principle but awkward to reach end-to-end on the wire.
-    {keep_state, Data#{bearers := BearerMap#{Key => Val}}, [{reply, From, ok}]};
 handle_event({call, From}, {?TestCmdTag, kill}, State, Data) ->
     {next_state, State#{session := shutdown}, Data, [{reply, From, ok}]};
 handle_event({call, From}, {?TestCmdTag, info}, _State, Data) ->

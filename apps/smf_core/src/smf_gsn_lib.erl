@@ -44,7 +44,7 @@
 -export([resolve_access_bearer/2]).
 -export([detect_new_bearers/4, detect_removed_bearers/3,
 	 detect_modified_bearers/2, normalize_bearer/5,
-	 remove_bearer_metadata_for_ebi/2, get_rule_qci_arp/1,
+	 remove_bearer_metadata_for_ebi/2, get_rule_qci_arp/1, get_qci_arp/1,
 	 bearer_update_cause_class/1]).
 -ignore_xref([put_sgi_default_bearer/2]).
 -ignore_xref([access_default_bearer_key/1]).
