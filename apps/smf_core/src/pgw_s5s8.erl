@@ -648,6 +648,8 @@ handle_response({delete_dedicated_bearers, EBIs},
 		     ie = #{?'Cause' := #v2_cause{v2_cause = _Cause}}},
 		_Request, _State,
 		#{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC, dedicated := Ded0} = Data0) ->
+    %% TODO(#35): honor the per-bearer Cause in the Delete Bearer Response and release
+    %% only accepted EBIs; today the whole batch is released (as the single-EBI clause did).
     BearerMap = lists:foldl(
 		  fun(EBI, BM) ->
 			  smf_gsn_lib:remove_bearer_metadata_for_ebi(

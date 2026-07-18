@@ -625,6 +625,23 @@ make_request(delete_bearer_command, {ebi, TargetEBI},
     #gtp{version = v2, type = delete_bearer_command, tei = RemoteCntlTEI,
 	 seq_no = SeqNo bor 16#800000, ie = IEs};
 
+make_request(delete_bearer_command, {ebis, TargetEBIs},
+	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
+		   local_ip = LocalIP,
+		   local_control_tei = LocalCntlTEI,
+		   remote_control_tei = RemoteCntlTEI}) ->
+    %% MME-Initiated Dedicated Bearer Deactivation naming several dedicated
+    %% EBIs at once: one Bearer Context per EBI, all at instance 0 so gtplib
+    %% decodes them as a list under {v2_bearer_context, 0} (TS 29.274 7.2.17.1-2).
+    BearerCtxs = [#v2_bearer_context{
+		     instance = 0,
+		     group = [#v2_eps_bearer_id{eps_bearer_id = EBI}]}
+		  || EBI <- TargetEBIs],
+    IEs = [#v2_recovery{restart_counter = RCnt} | BearerCtxs] ++
+	[fq_teid(0, ?'S5/S8-C SGW', LocalCntlTEI, LocalIP)],
+    #gtp{version = v2, type = delete_bearer_command, tei = RemoteCntlTEI,
+	 seq_no = SeqNo bor 16#800000, ie = IEs};
+
 make_request(bearer_resource_command, simple,
 	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
 		   local_ip = LocalIP,
