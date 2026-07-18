@@ -21,7 +21,8 @@ all() ->
     [normalize_bearer_gbr_aggregates,
      detect_modified_bearers_qos_change,
      detect_modified_bearers_unchanged,
-     detect_modified_bearers_after_arp_override].
+     detect_modified_bearers_after_arp_override,
+     bearer_update_cause_class_partitions].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -141,6 +142,20 @@ detect_modified_bearers_after_arp_override(_Config) ->
     ?assertEqual(300, maps:get('Max-Requested-Bandwidth-UL', QoS)),
     ?assertEqual(BindARP, New#ded_bearer.arp),
     ?assertEqual(BindARP, New#ded_bearer.bind_arp),
+    ok.
+
+bearer_update_cause_class_partitions() ->
+    [{doc, "Update Bearer Response causes classify into accepted / temporary / terminal "
+      "so the fan-out response applies the right action (dossier §8)"}].
+bearer_update_cause_class_partitions(_Config) ->
+    ?assertEqual(accepted,  smf_gsn_lib:bearer_update_cause_class(request_accepted)),
+    ?assertEqual(temporary,
+        smf_gsn_lib:bearer_update_cause_class(ue_is_temporarily_not_reachable_due_to_power_saving)),
+    ?assertEqual(temporary,
+        smf_gsn_lib:bearer_update_cause_class(
+            temporarily_rejected_due_to_handover_tau_rau_procedure_in_progress)),
+    ?assertEqual(terminal,  smf_gsn_lib:bearer_update_cause_class(no_resources_available)),
+    ?assertEqual(terminal,  smf_gsn_lib:bearer_update_cause_class(request_rejected)),
     ok.
 
 %%%===================================================================

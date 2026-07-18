@@ -625,6 +625,23 @@ make_request(delete_bearer_command, {ebi, TargetEBI},
     #gtp{version = v2, type = delete_bearer_command, tei = RemoteCntlTEI,
 	 seq_no = SeqNo bor 16#800000, ie = IEs};
 
+make_request(delete_bearer_command, {ebis, TargetEBIs},
+	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
+		   local_ip = LocalIP,
+		   local_control_tei = LocalCntlTEI,
+		   remote_control_tei = RemoteCntlTEI}) ->
+    %% MME-Initiated Dedicated Bearer Deactivation naming several dedicated
+    %% EBIs at once: one Bearer Context per EBI, all at instance 0 so gtplib
+    %% decodes them as a list under {v2_bearer_context, 0} (TS 29.274 7.2.17.1-2).
+    BearerCtxs = [#v2_bearer_context{
+		     instance = 0,
+		     group = [#v2_eps_bearer_id{eps_bearer_id = EBI}]}
+		  || EBI <- TargetEBIs],
+    IEs = [#v2_recovery{restart_counter = RCnt} | BearerCtxs] ++
+	[fq_teid(0, ?'S5/S8-C SGW', LocalCntlTEI, LocalIP)],
+    #gtp{version = v2, type = delete_bearer_command, tei = RemoteCntlTEI,
+	 seq_no = SeqNo bor 16#800000, ie = IEs};
+
 make_request(bearer_resource_command, simple,
 	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
 		   local_ip = LocalIP,
@@ -861,7 +878,8 @@ make_response(#gtp{type = create_session_request, seq_no = SeqNo},
     #gtp{version = v2, type = create_session_response,
 	 tei = RemoteCntlTEI, seq_no = SeqNo, ie = IEs};
 
-make_response(#gtp{type = update_bearer_request, seq_no = SeqNo},
+make_response(#gtp{type = update_bearer_request, seq_no = SeqNo,
+		   ie = #{{v2_bearer_context, 0} := BearerCtxs}},
 	      SubType,
 	      #gtpc{restart_counter = RCnt,
 		    remote_control_tei = RemoteCntlTEI}) ->
@@ -874,12 +892,20 @@ make_response(#gtp{type = update_bearer_request, seq_no = SeqNo},
 	    _ ->
 		{request_accepted, request_accepted}
 	end,
-    EBI = 5,
+    %% Echo back the EBI(s) the request actually carried (may be a single
+    %% Bearer Context or a list, TS 29.274 §7.2.15) rather than a fixed one,
+    %% so the response correlates with whichever bearer(s) were updated.
+    EBIs = [EBI || #v2_bearer_context{
+			group = #{{v2_eps_bearer_id, 0} :=
+				      #v2_eps_bearer_id{eps_bearer_id = EBI}}}
+		       <- lists:flatten([BearerCtxs])],
+    RespBearerCtxs =
+	[#v2_bearer_context{
+	    group = [#v2_eps_bearer_id{eps_bearer_id = EBI},
+		     #v2_cause{v2_cause = BearerCause}]}
+	 || EBI <- EBIs],
     IEs = [#v2_recovery{restart_counter = RCnt},
-	   #v2_cause{v2_cause = Cause},
-	   #v2_bearer_context{
-	      group = [#v2_eps_bearer_id{eps_bearer_id = EBI},
-		       #v2_cause{v2_cause = BearerCause}]}],
+	   #v2_cause{v2_cause = Cause} | RespBearerCtxs],
     #gtp{version = v2, type = update_bearer_response,
 	 tei = RemoteCntlTEI, seq_no = SeqNo, ie = IEs};
 

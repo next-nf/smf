@@ -126,7 +126,7 @@ init(_Opts, Data0) ->
     Data = Data0#{'Version' => v2, aaa_session => AAASession, pcf => PCF,
 		  charging => Charging, aaa_auth => AAAAuth, pcc => PCC,
 		  pending_bearers => #{}, retry_bearers => #{},
-		  dedicated => #{}, pending_updates => #{}},
+		  dedicated => #{}},
     {ok, smf_context:init_state(), Data}.
 
 handle_event(Type, Content, State, #{'Version' := v1} = Data) ->
@@ -501,7 +501,7 @@ handle_request(ReqKey,
 	    %% Delete Bearer Request is tied to this UE-requested procedure
 	    %% (TS 29.274 7.2.9.2, PTI Conditional). Ack the command the same
 	    %% way the create branch does, then initiate the deactivation.
-	    Data1 = initiate_delete_dedicated_bearer(PTI, EBI, AccessTunnel, Data),
+	    Data1 = initiate_ue_delete_dedicated_bearer(PTI, EBI, AccessTunnel, Data),
 	    gtp_context:request_finished(ReqKey),
 	    Actions = context_idle_action([], Context),
 	    {keep_state, Data1, Actions};
@@ -554,14 +554,14 @@ handle_request(ReqKey,
     %% issues a network-initiated Delete Bearer Request. Default bearers are
     %% never deleted this way.
     DefaultEBI = Context#context.default_bearer_id,
-    %% TODO(#27): batch — accumulate the accepted EBIs and emit one Delete Bearer
-    %% Request naming all of them (EPS Bearer IDs list), instead of one per bearer.
-    Data = ie_foldl(
-	     fun(BearerContext, D) ->
-		     deactivate_commanded_bearer(BearerContext, DefaultEBI, AccessTunnel, D)
-	     end, Data0, BearerContexts),
+    {Data, EBIs} = ie_foldl(
+		     fun(BearerContext, Acc) ->
+			     prep_commanded_deactivation(BearerContext, DefaultEBI,
+							  AccessTunnel, Acc)
+		     end, {Data0, []}, BearerContexts),
+    send_dedicated_bearers_delete(EBIs, AccessTunnel),
     %% Like modify_bearer_command, no direct response is sent; the follow-on
-    %% Delete Bearer Request(s) carry the procedure forward.
+    %% Delete Bearer Request carries the procedure forward.
     gtp_context:request_finished(ReqKey),
     Actions = context_idle_action([], Context),
     {keep_state, Data, Actions};
@@ -640,53 +640,72 @@ handle_response({create_bearer, _PgwFTEID}, timeout,
     ?LOG(error, "Create Bearer Request timed out"),
     keep_state_and_data;
 
-handle_response({delete_dedicated_bearer, EBI},
+handle_response({delete_dedicated_bearers, EBIs},
 		#gtp{type = delete_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = _Cause}}},
 		_Request, _State,
-		#{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC,
-		  dedicated := Ded0} = Data0) ->
-    BearerMap1 = maps:remove({'Access', EBI}, BearerMap0),
-    BearerMap = smf_gsn_lib:remove_bearer_metadata_for_ebi(EBI, BearerMap1),
-    Data1 = Data0#{dedicated := maps:remove(EBI, Ded0)},
+		#{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC, dedicated := Ded0} = Data0) ->
+    %% TODO(#35): honor the per-bearer Cause in the Delete Bearer Response and release
+    %% only accepted EBIs; today the whole batch is released (as the single-EBI clause did).
+    BearerMap = lists:foldl(
+		  fun(EBI, BM) ->
+			  smf_gsn_lib:remove_bearer_metadata_for_ebi(
+			    EBI, maps:remove({'Access', EBI}, BM))
+		  end, BearerMap0, EBIs),
+    Data1 = Data0#{dedicated := maps:without(EBIs, Ded0)},
     case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
-	{ok, {PCtx, _, _}} ->
-	    {keep_state, Data1#{bearers := BearerMap, pfcp := PCtx}};
-	{error, _} ->
-	    {keep_state, Data1#{bearers := BearerMap}}
+	{ok, {PCtx, _, _}} -> {keep_state, Data1#{bearers := BearerMap, pfcp := PCtx}};
+	{error, _}         -> {keep_state, Data1#{bearers := BearerMap}}
     end;
 
-handle_response({delete_dedicated_bearer, _EBI}, timeout,
+handle_response({delete_dedicated_bearers, _EBIs}, timeout,
 		#gtp{type = delete_bearer_request}, _State, _Data) ->
-    ?LOG(error, "Delete Dedicated Bearer Request timed out"),
+    ?LOG(error, "batched Delete Dedicated Bearer Request timed out"),
     keep_state_and_data;
 
-handle_response({update_dedicated_bearer, EBI},
+handle_response({update_dedicated_bearers, Kind, Staged},
+		#gtp{type = update_bearer_response,
+		     ie = #{?'Bearer Contexts to be modified' := BearerCtxs}},
+		_Request, #{session := connected}, Data) ->
+    %% Network-initiated batched Update Bearer Request (M3 rule change / M5
+    %% subscribed-QoS fan-out). Per-bearer Cause governs (TS 29.274 §7.2.15).
+    Data1 = ie_foldl(fun(BC, D) -> apply_bearer_update_result(Kind, BC, Staged, D) end,
+		     Data, BearerCtxs),
+    {keep_state, Data1};
+
+handle_response({update_dedicated_bearers, Kind, Staged},
 		#gtp{type = update_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause}}},
-		_Request, #{session := connected},
-		#{dedicated := Ded0, pending_updates := PU0} = Data) ->
-    %% Network-initiated Update Bearer Request for a dedicated bearer (M3 modified
-    %% QoS/TFT, or M5 ARP fan-out). Commit the staged descriptor only on success;
-    %% on failure keep the previously confirmed one (TS 23.401 5.4.2.1/5.4.2.2).
-    {Ded, PU} =
-	case maps:take(EBI, PU0) of
-	    {Desc, PU1} when Cause =:= request_accepted ->
-		{Ded0#{EBI => Desc}, PU1};
-	    {_Desc, PU1} ->
-		?LOG(warning, "Update Bearer Request for dedicated bearer ~p "
-			      "failed with ~p", [EBI, Cause]),
-		{Ded0, PU1};
-	    error ->
-		{Ded0, PU0}
-	end,
-    {keep_state, Data#{dedicated := Ded, pending_updates := PU}};
+		_Request, #{session := connected}, Data) ->
+    %% Legitimate message-level rejection with NO per-bearer Bearer Contexts
+    %% (e.g. context_not_found, TS 29.274 §7.2.16) -- there is nothing to fold
+    %% per-bearer, so apply the message-level Cause class to every EBI staged
+    %% for this batch instead of crashing with function_clause.
+    ?LOG(warning, "batched Update Bearer Response carried no Bearer Contexts; "
+	 "applying message-level Cause ~p to ~p staged bearer(s)",
+	 [Cause, map_size(Staged)]),
+    Data1a = case smf_gsn_lib:bearer_update_cause_class(Cause) of
+		 accepted ->
+		     maps:fold(fun(EBI, _Desc, D) -> commit_staged_descriptor(EBI, Staged, D) end,
+			      Data, Staged);
+		 temporary ->
+		     ?LOG(warning, "batched Update Bearer Request temporarily rejected (~p); "
+			  "change not applied this round", [Cause]),
+		     Data;
+		 terminal ->
+		     maps:fold(fun(EBI, _Desc, D) -> handle_update_bearer_failure(Kind, EBI, Cause, D) end,
+			      Data, Staged)
+	     end,
+    {keep_state, Data1a};
 
-handle_response({update_dedicated_bearer, EBI}, timeout,
-		#gtp{type = update_bearer_request}, #{session := connected},
-		#{pending_updates := PU0} = Data) ->
-    ?LOG(error, "Update Bearer Request for dedicated bearer ~p timed out", [EBI]),
-    {keep_state, Data#{pending_updates := maps:remove(EBI, PU0)}};
+handle_response({update_dedicated_bearers, Kind, Staged}, timeout,
+		#gtp{type = update_bearer_request}, #{session := connected}, Data) ->
+    ?LOG(error, "batched Update Bearer Request timed out; ~p bearer(s) affected",
+	 [map_size(Staged)]),
+    Data1 = maps:fold(fun(EBI, _Desc, D) ->
+			      handle_update_bearer_failure(Kind, EBI, request_rejected, D)
+		      end, Data, Staged),
+    {keep_state, Data1};
 
 handle_response({CommandReqKey, OldSOpts},
 		#gtp{type = update_bearer_response,
@@ -760,20 +779,21 @@ fan_out_subscribed_arp_change(OldSOpts, CommandBearer, AMBR, Context, AccessTunn
     DefaultEBI = Context#context.default_bearer_id,
     case NewARP =/= undefined andalso OldARP =/= undefined andalso NewARP =/= OldARP of
 	true ->
-	    %% TODO(#27): batch — emit one Update Bearer Request carrying all
-	    %% bearers with the old ARP, not one message per bearer.
 	    %% TODO(#31): the is_map(QoS) guard skips a descriptor with undefined
 	    %% QoS; the pre-branch code still fanned out with a QCI-only fallback.
-	    maps:fold(
-	      fun(EBI, #ded_bearer{arp = ARP, qos = QoS} = Desc, D)
-		    when ARP =:= OldARP, EBI =/= DefaultEBI, is_map(QoS) ->
-		      send_dedicated_bearer_arp_update(EBI, QoS, NewARP, AMBR, AccessTunnel),
-		      NewDesc = Desc#ded_bearer{arp = NewARP,
-						qos = set_qos_arp(QoS, NewARP)},
-		      stage_bearer_update(EBI, NewDesc, D);
-		 (_, _, D) ->
-		      D
-	      end, Data, Dedicated);
+	    {Contexts, Staged} =
+		maps:fold(
+		  fun(EBI, #ded_bearer{arp = ARP, qos = QoS} = Desc, {Cs, St})
+			when ARP =:= OldARP, EBI =/= DefaultEBI, is_map(QoS) ->
+			  NewQoS = set_qos_arp(QoS, NewARP),
+			  NewDesc = Desc#ded_bearer{arp = NewARP, qos = NewQoS},
+			  {[{EBI, NewQoS, undefined} | Cs], St#{EBI => NewDesc}};
+		     (_, _, Acc) ->
+			  Acc
+		  end, {[], #{}}, Dedicated),
+	    send_dedicated_bearers_update(subscribed_qos, Contexts, [AMBR],
+					  Staged, AccessTunnel),
+	    Data;
 	false ->
 	    Data
     end.
@@ -796,54 +816,37 @@ session_default_arp(#{'QoS-Information' := #{'Allocation-Retention-Priority' := 
 session_default_arp(_) ->
     undefined.
 
-%% Emit one Update Bearer Request for a dedicated bearer keeping its QCI/GBR/MBR
-%% but replacing the ARP (TS 23.401 5.4.2.2 step 5). QoS is taken from the stored
-%% descriptor; only the ARP is overwritten. The APN-AMBR from the command rides
-%% along at message level.
-send_dedicated_bearer_arp_update(EBI, QoS0, NewARP, AMBR, AccessTunnel) ->
-    QoS = set_qos_arp(QoS0, NewARP),
-    send_dedicated_bearer_update(EBI, QoS, undefined, [AMBR], AccessTunnel).
-
 %% Overwrite the Allocation-Retention-Priority in a QoS-Information map.
 set_qos_arp(QoS, NewARP) ->
     QoS#{'Allocation-Retention-Priority' => arp_to_map(NewARP)}.
 
-%% TS 23.401 5.4.2.1 (with QoS update) / 5.4.3 (without): when a Gx PCC-rule
-%% change adds/removes a rule on an existing dedicated bearer or re-authorizes a
-%% bound rule so the bearer's aggregate QoS or TFT changes, the PGW emits a
-%% network-initiated Update Bearer Request (no PTI) carrying the new QoS and TFT.
-initiate_update_dedicated_bearer(EBI, QoS, FlowInfo, AccessTunnel, Data) ->
-    send_dedicated_bearer_update(EBI, QoS, FlowInfo, [], AccessTunnel),
-    Data.
-
-%% Stage a recomputed descriptor for EBI; it is committed into `dedicated` when
-%% the matching Update Bearer Response succeeds, and dropped on failure/timeout,
-%% so a failed update leaves the previously confirmed descriptor in place.
-%% TODO(#30): the stash is keyed by bare EBI, so two in-flight updates for the
-%% same EBI clobber each other; key by request correlation or defer the second.
-stage_bearer_update(EBI, Desc, #{pending_updates := PU} = Data) ->
-    Data#{pending_updates := PU#{EBI => Desc}}.
-
-%% Emit one network-initiated Update Bearer Request for a dedicated bearer
-%% (TS 29.274 7.2.15). Carries the updated bearer-level QoS and, when FlowInfo is
-%% a non-empty list, the updated TFT. ExtraIEs prepend message-level IEs such as
-%% APN-AMBR. Tagged {update_dedicated_bearer, EBI} for the response machinery.
-send_dedicated_bearer_update(EBI, QoS, FlowInfo, ExtraIEs, AccessTunnel) ->
-    BearerGroup0 = [#v2_eps_bearer_id{eps_bearer_id = EBI},
-		    encode_bearer_level_qos(QoS)],
-    BearerGroup =
-	case FlowInfo of
-	    [_ | _] ->
-		TFTBin = smf_tft:flow_info_to_tft(FlowInfo),
-		BearerGroup0 ++
-		    [#v2_eps_bearer_level_traffic_flow_template{value = TFTBin}];
-	    _ ->
-		BearerGroup0
-	end,
+%% Emit one network-initiated Update Bearer Request (TS 29.274 §7.2.15) carrying a
+%% list of Bearer Contexts. The network-initiated form MAY batch bearers of the
+%% same PDN connection — contrast the UE-requested single-context invariant
+%% (§7.2.15 NOTE), which is handled on a separate path and never uses this helper.
+%% Kind (rule_change | subscribed_qos) selects the response failure policy; Staged
+%% maps each EBI to the descriptor to commit when that bearer is accepted.
+send_dedicated_bearers_update(_Kind, [], _ExtraIEs, _Staged, _AccessTunnel) ->
+    ok;
+send_dedicated_bearers_update(Kind, Contexts, ExtraIEs, Staged, AccessTunnel) ->
+    BearerCtxIEs = [update_bearer_context(EBI, QoS, FlowInfo)
+		    || {EBI, QoS, FlowInfo} <- Contexts],
     Type = update_bearer_request,
-    RequestIEs0 = ExtraIEs ++ [#v2_bearer_context{group = BearerGroup}],
+    RequestIEs0 = ExtraIEs ++ BearerCtxIEs,
     RequestIEs = gtp_v2_c:build_recovery(Type, AccessTunnel, false, RequestIEs0),
-    send_request(AccessTunnel, ?T3, ?N3, Type, RequestIEs, {update_dedicated_bearer, EBI}).
+    send_request(AccessTunnel, ?T3, ?N3, Type, RequestIEs,
+		 {update_dedicated_bearers, Kind, Staged}).
+
+update_bearer_context(EBI, QoS, FlowInfo) ->
+    Group0 = [#v2_eps_bearer_id{eps_bearer_id = EBI}, encode_bearer_level_qos(QoS)],
+    Group = case FlowInfo of
+		[_ | _] ->
+		    TFTBin = smf_tft:flow_info_to_tft(FlowInfo),
+		    Group0 ++ [#v2_eps_bearer_level_traffic_flow_template{value = TFTBin}];
+		_ ->
+		    Group0
+	    end,
+    #v2_bearer_context{group = Group}.
 
 arp_to_map({PL, PCI, PVI}) ->
     #{'Priority-Level' => PL,
@@ -996,17 +999,16 @@ create_dedicated_bearer(PTI, LinkedEBI, QoS, TFTBin, ChId, AccessBearer, Tunnel)
     send_request(Tunnel, ?T3, ?N3, create_bearer_request, RequestIEs,
 		 {create_bearer, PgwFTEID}).
 
-delete_dedicated_bearer(PTI, EBI, Tunnel) ->
-    RequestIEs0 = [#v2_eps_bearer_id{instance = 1, eps_bearer_id = EBI}],
-    %% PTI is Conditional (TS 29.274 7.2.9.2): echo it only for a UE-requested
-    %% deactivation; the network-initiated path passes undefined and omits it.
-    RequestIEs1 = case PTI of
-		      undefined -> RequestIEs0;
-		      _ -> [#v2_procedure_transaction_id{pti = PTI} | RequestIEs0]
-		  end,
-    RequestIEs = gtp_v2_c:build_recovery(delete_bearer_request, Tunnel, false, RequestIEs1),
+%% Emit one network-initiated Delete Bearer Request (TS 29.274 §7.2.9.2) carrying a
+%% list of dedicated EBIs. Never carries the LBI — that tears down the whole PDN
+%% connection (TS 23.401 §5.4.4.1). No PTI (network-initiated).
+send_dedicated_bearers_delete([], _Tunnel) ->
+    ok;
+send_dedicated_bearers_delete(EBIs, Tunnel) ->
+    RequestIEs0 = [#v2_eps_bearer_id{instance = 1, eps_bearer_id = EBI} || EBI <- EBIs],
+    RequestIEs = gtp_v2_c:build_recovery(delete_bearer_request, Tunnel, false, RequestIEs0),
     send_request(Tunnel, ?T3, ?N3, delete_bearer_request, RequestIEs,
-		 {delete_dedicated_bearer, EBI}).
+		 {delete_dedicated_bearers, EBIs}).
 
 handle_dedicated_bearer_changes(OldPCC, NewPCC,
 				#{bearers := BearerMap,
@@ -1021,21 +1023,27 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
 		  initiate_create_dedicated_bearer(undefined, QCI, ARP, QoS, FlowInfo,
 						   DefaultEBI, AccessTunnel, D)
 	      end, Data, NewBearers),
-    %% TODO(#27): batch these — emit one Update Bearer Request carrying all
-    %% modified bearer contexts, and one Delete Bearer Request carrying all
-    %% removed EBIs, instead of one message per bearer (GTPv2 carries a list).
     Dedicated = maps:get(dedicated, Data, #{}),
     ModifiedBearers = smf_gsn_lib:detect_modified_bearers(NewPCC, Dedicated),
-    Data2 = lists:foldl(
-	      fun({EBI, QoS, FlowInfo, NewDesc}, D) ->
-		  D1 = initiate_update_dedicated_bearer(EBI, QoS, FlowInfo, AccessTunnel, D),
-		  stage_bearer_update(EBI, NewDesc, D1)
-	      end, Data1, ModifiedBearers),
-    RemovedEBIs = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
-    lists:foldl(
-      fun(EBI, D) ->
-	  initiate_delete_dedicated_bearer(EBI, AccessTunnel, D)
-      end, Data2, RemovedEBIs).
+    Contexts = [{EBI, QoS, FlowInfo}
+		|| {EBI, QoS, FlowInfo, _Desc} <- ModifiedBearers],
+    Staged = maps:from_list([{EBI, Desc}
+			     || {EBI, _QoS, _FlowInfo, Desc} <- ModifiedBearers]),
+    send_dedicated_bearers_update(rule_change, Contexts, [], Staged, AccessTunnel),
+    RemovedEBIs0 = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
+    %% The default bearer's EBI can appear here (its {qci_arp,QCI,ARP} entry
+    %% loses its last bound rule just like a dedicated bearer's would). Never
+    %% name the LBI in a Delete Bearer Request -- that tears down the whole
+    %% PDN connection (TS 23.401 §5.4.4.1).
+    RemovedEBIs = lists:filter(fun(EBI) -> EBI =/= DefaultEBI end, RemovedEBIs0),
+    case RemovedEBIs0 -- RemovedEBIs of
+	[] -> ok;
+	_  -> ?LOG(warning, "detect_removed_bearers named the default bearer ~p; "
+		   "ignoring (never emit a Delete Bearer Request for the LBI)",
+		   [DefaultEBI])
+    end,
+    send_dedicated_bearers_delete(RemovedEBIs, AccessTunnel),
+    Data1.
 
 initiate_create_dedicated_bearer(PTI, QCI, ARP, QoS, FlowInfo, DefaultEBI, AccessTunnel,
 				 #{bearers := BearerMap0, pfcp := PCtx0,
@@ -1070,11 +1078,20 @@ initiate_create_dedicated_bearer(PTI, QCI, ARP, QoS, FlowInfo, DefaultEBI, Acces
     end.
 
 
+%% Network-initiated single-bearer deactivation: a batch of one, no PTI.
 initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data) ->
-    initiate_delete_dedicated_bearer(undefined, EBI, AccessTunnel, Data).
+    send_dedicated_bearers_delete([EBI], AccessTunnel),
+    Data.
 
-initiate_delete_dedicated_bearer(PTI, EBI, AccessTunnel, Data) ->
-    delete_dedicated_bearer(PTI, EBI, AccessTunnel),
+%% UE-requested single-bearer deactivation (bearer_resource_command
+%% delete_existing_tft, TS 29.274 7.2.9.2): echoes the PTI and sends exactly one
+%% EBI — NOT routed through the network-initiated batched send (§7.2.9.2 NOTE).
+initiate_ue_delete_dedicated_bearer(PTI, EBI, Tunnel, Data) ->
+    RequestIEs0 = [#v2_procedure_transaction_id{pti = PTI},
+		   #v2_eps_bearer_id{instance = 1, eps_bearer_id = EBI}],
+    RequestIEs = gtp_v2_c:build_recovery(delete_bearer_request, Tunnel, false, RequestIEs0),
+    send_request(Tunnel, ?T3, ?N3, delete_bearer_request, RequestIEs,
+		 {delete_dedicated_bearers, [EBI]}),
     Data.
 
 %% Build a descriptor for a dedicated bearer established directly from a Create
@@ -1114,24 +1131,122 @@ ie_foldl(Fun, Acc, IEs) when is_list(IEs) ->
 ie_foldl(Fun, Acc, IE) ->
     Fun(IE, Acc).
 
-%% Deactivate one dedicated bearer named in a Delete Bearer Command: report the
-%% affected PCC rule(s) to the PCRF as INACTIVE, remove them from the PCC
-%% context and re-provision PFCP, then issue a network-initiated Delete Bearer
-%% Request. The default bearer and unknown bearers are left untouched.
-deactivate_commanded_bearer(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
+%% Apply one Bearer Context's Cause from a batched Update Bearer Response
+%% (M3 rule change / M5 subscribed-QoS fan-out) to the dedicated bearer state,
+%% per the §8 failure matrix: request_accepted commits the staged descriptor;
+%% a temporary cause holds the change; a terminal cause runs the failure
+%% policy for the procedure Kind (handle_update_bearer_failure/4).
+apply_bearer_update_result(_Kind,
+			   #v2_bearer_context{group = #{
+			       ?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI},
+			       ?'Cause' := #v2_cause{v2_cause = request_accepted}}},
+			   Staged, Data) ->
+    commit_staged_descriptor(EBI, Staged, Data);
+apply_bearer_update_result(Kind,
+			   #v2_bearer_context{group = #{
+			       ?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI},
+			       ?'Cause' := #v2_cause{v2_cause = Cause}}},
+			   Staged, Data) ->
+    case smf_gsn_lib:bearer_update_cause_class(Cause) of
+	temporary ->
+	    %% TODO(#34): re-attempt the Update when the UE is next reachable
+	    %% (mirroring the Create-path power-saving retry); for now hold the
+	    %% change without removing the rule or deleting the bearer (dossier §8).
+	    ?LOG(warning, "Update Bearer Request for dedicated bearer ~p temporarily "
+		 "rejected (~p); change not applied this round", [EBI, Cause]),
+	    Data;
+	terminal when is_map_key(EBI, Staged) ->
+	    handle_update_bearer_failure(Kind, EBI, Cause, Data);
+	terminal ->
+	    %% This EBI was never staged for the current batch -- a response
+	    %% echoing an EBI we didn't ask to modify. Log and skip rather than
+	    %% removing rules or deleting a bearer we have no staged change for.
+	    ?LOG(warning, "Update Bearer Response named EBI ~p with terminal cause "
+		 "~p, but it was not staged for this procedure; skipping",
+		 [EBI, Cause]),
+	    Data
+    end;
+apply_bearer_update_result(_Kind, BearerContext, _Staged, Data) ->
+    %% A Bearer Context missing an EPS Bearer ID or Cause is malformed; skip it
+    %% without aborting processing of the batch's remaining contexts.
+    ?LOG(warning, "malformed Bearer Context in Update Bearer Response, skipping: ~p",
+	 [BearerContext]),
+    Data.
+
+commit_staged_descriptor(EBI, Staged, #{dedicated := Ded} = Data) ->
+    case maps:find(EBI, Staged) of
+	{ok, Desc} -> Data#{dedicated := Ded#{EBI => Desc}};
+	error      -> Data
+    end.
+
+%% Terminal Update failure: report the affected PCC rule(s) to the PCRF
+%% (TS 29.212 §4.5.6/§4.5.12). A failed subscribed-QoS Modify (M5) is not ignorable —
+%% delete the concerned bearer (TS 23.401 §5.4.2.2 step 7); the bearer's rule(s) must
+%% also come out of pcc.rules (like every other removal path) or PFCP gets
+%% re-provisioned against an orphaned rule on the next unrelated change. A failed
+%% rule-change Modify (M3) removes the offending rule(s), re-provisions PFCP, and
+%% keeps the bearer on its previously confirmed descriptor.
+handle_update_bearer_failure(subscribed_qos, EBI, Cause,
+			     #{tunnels := #{'Access' := AccessTunnel}} = Data) ->
+    ?LOG(warning, "subscribed-QoS Update for bearer ~p failed with ~p; deleting bearer "
+	 "(TS 23.401 5.4.2.2 step 7)", [EBI, Cause]),
+    Data1 = case ebi_rule_names(EBI, Data) of
+		[]        -> Data;
+		RuleNames ->
+		    Data0 = remove_dedicated_bearer_rules(RuleNames, Data),
+		    report_bearer_failure(RuleNames, Data0)
+	    end,
+    initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data1);
+handle_update_bearer_failure(rule_change, EBI, Cause, Data) ->
+    ?LOG(warning, "rule-change Update for bearer ~p failed with ~p; removing rule(s) "
+	 "and reporting to PCRF", [EBI, Cause]),
+    case ebi_rule_names(EBI, Data) of
+	[] ->
+	    Data;
+	RuleNames ->
+	    Data1 = remove_dedicated_bearer_rules(RuleNames, Data),
+	    report_bearer_failure(RuleNames, Data1)
+    end.
+
+ebi_rule_names(EBI, #{bearers := BearerMap, pcc := PCC}) ->
+    case ebi_qci_arp(EBI, BearerMap) of
+	{QCI, ARP} -> affected_pcc_rules(QCI, ARP, PCC);
+	undefined  -> []
+    end.
+
+%% Remove RuleNames from the PCC context and re-provision PFCP accordingly.
+%% Shared by the rule_change and subscribed_qos terminal Update failure
+%% branches (both strip the bearer's rule(s) from pcc.rules the same way as
+%% every other removal path: the Delete Bearer Command prep, the Create Bearer
+%% failure handler).
+remove_dedicated_bearer_rules(RuleNames,
+			      #{bearers := BearerMap, pfcp := PCtx0, pcc := PCC} = Data) ->
+    PCC1 = PCC#pcc_ctx{rules = maps:without(RuleNames, PCC#pcc_ctx.rules)},
+    case smf_pfcp_context:modify_session(PCC1, [], #{}, BearerMap, PCtx0) of
+	{ok, {PCtx, _, _}} -> Data#{pcc := PCC1, pfcp := PCtx};
+	{error, _}         -> Data#{pcc := PCC1}
+    end.
+
+%% Prep one dedicated bearer named in a Delete Bearer Command for deactivation:
+%% report the affected PCC rule(s) to the PCRF as INACTIVE, remove them from the
+%% PCC context and re-provision PFCP, then accumulate the EBI. The caller emits
+%% ONE network-initiated Delete Bearer Request for the whole accumulated batch
+%% after the fold. The default bearer and unknown bearers are left untouched
+%% and not accumulated.
+prep_commanded_deactivation(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
 				    #v2_eps_bearer_id{eps_bearer_id = EBI}}},
-			    DefaultEBI, _AccessTunnel, Data)
+			     DefaultEBI, _AccessTunnel, {Data, Acc})
   when EBI =:= DefaultEBI ->
     ?LOG(warning, "Delete Bearer Command targeted the default bearer ~p; ignored", [EBI]),
-    Data;
-deactivate_commanded_bearer(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
+    {Data, Acc};
+prep_commanded_deactivation(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
 				    #v2_eps_bearer_id{eps_bearer_id = EBI}}},
-			    _DefaultEBI, AccessTunnel,
-			    #{bearers := BearerMap, pfcp := PCtx0, pcc := PCC} = Data0) ->
+			     _DefaultEBI, _AccessTunnel,
+			     {#{bearers := BearerMap, pfcp := PCtx0, pcc := PCC} = Data0, Acc}) ->
     case maps:is_key({'Access', EBI}, BearerMap) of
 	false ->
 	    ?LOG(warning, "Delete Bearer Command for unknown bearer ~p; ignored", [EBI]),
-	    Data0;
+	    {Data0, Acc};
 	true ->
 	    RuleNames =
 		case ebi_qci_arp(EBI, BearerMap) of
@@ -1148,12 +1263,11 @@ deactivate_commanded_bearer(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
 		       [] -> Data1;
 		       _  -> report_rules_inactive(RuleNames, Data1)
 		   end,
-	    %% Network-initiated: no PTI.
-	    initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data)
+	    {Data, [EBI | Acc]}
     end;
-deactivate_commanded_bearer(_BearerContext, _DefaultEBI, _AccessTunnel, Data) ->
+prep_commanded_deactivation(_BearerContext, _DefaultEBI, _AccessTunnel, DataAcc) ->
     %% A Bearer Context without an EPS Bearer ID: nothing to deactivate.
-    Data.
+    DataAcc.
 
 %% Reverse lookup of a bearer's {QCI, ARP} from its EBI via the bearer map's
 %% {qci_arp, QCI, ARP} => EBI entries.
