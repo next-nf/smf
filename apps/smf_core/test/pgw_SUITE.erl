@@ -761,6 +761,8 @@ common() ->
      mme_delete_bearer_command,
      dedicated_bearer_session_delete,
      modify_bearer_command_arp_fanout,
+     modify_bearer_command_arp_fanout_delete_on_fail,
+     modify_bearer_command_arp_fanout_temporary_hold,
      gx_rar_dedicated_bearer_modify,
      gx_rar_two_dedicated_bearers_batched_update,
      gx_rar_bearer_binding_reeval,
@@ -1059,6 +1061,14 @@ init_per_testcase(mme_delete_bearer_command, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(modify_bearer_command_arp_fanout, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(modify_bearer_command_arp_fanout_delete_on_fail, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(modify_bearer_command_arp_fanout_temporary_hold, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -5916,6 +5926,216 @@ modify_bearer_command_arp_fanout(Config) ->
     %% the new ARP once its Update Bearer Response was processed.
     #{dedicated := DedicatedA} = smf_context:test_cmd(gtp, CtxKey, info),
     ?match(#{DedEBI := #ded_bearer{arp = {5, _, _}}}, DedicatedA),
+
+    delete_session(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+modify_bearer_command_arp_fanout_delete_on_fail() ->
+    [{doc, "TS 23.401 5.4.2.2 step 7: when the dedicated bearer's ARP fan-out "
+	   "Update Bearer Response carries a terminal per-bearer Cause (M5 "
+	   "subscribed-QoS Modify failure), the PGW must delete that bearer"}].
+modify_bearer_command_arp_fanout_delete_on_fail(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun =
+	fun(Request, Result, Avps, SOpts) ->
+		Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SessionOpts, events = []},
+
+    %% Install a PCC rule whose ARP MATCHES the default bearer's subscribed ARP
+    %% (PL=10, PCI=1, PVI=0 from create_session) so the resulting dedicated
+    %% bearer carries the same ARP as the default bearer.
+    DedRule = #{'Charging-Rule-Definition' =>
+		    [#{'Charging-Rule-Name' => [<<"ded-arp-rule">>],
+		       'Flow-Information' =>
+			   [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+			      'Flow-Direction' => [2]}],
+		       'QoS-Information' =>
+			   [#{'QoS-Class-Identifier' => 1,
+			      'Max-Requested-Bandwidth-UL' => 6000,
+			      'Max-Requested-Bandwidth-DL' => 8000,
+			      'Guaranteed-Bitrate-UL' => 6000,
+			      'Guaranteed-Bitrate-DL' => 8000,
+			      'Allocation-Retention-Priority' =>
+				  #{'Priority-Level' => 10,
+				    'Pre-emption-Capability' => 1,
+				    'Pre-emption-Vulnerability' => 0}}],
+		       'Metering-Method' => [1],
+		       'Precedence' => [100],
+		       'Online' => [0],
+		       'Offline' => [0]}]},
+    Server ! AAAReq#aaa_request{events = [{pcc, install, [DedRule]}]},
+
+    {_, Resp0, _, _} =
+	receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp0),
+
+    %% Complete the Create Bearer exchange to install the dedicated bearer.
+    DedEBI = 6,
+    GtpCDed = complete_create_bearer(Cntl, GtpC, DedEBI),
+
+    %% The dedicated bearer must be installed under the default's ARP.
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 1, {10, 1, 0}} := DedEBI}, BearerMap),
+
+    %% Send a Modify Bearer Command changing the subscribed ARP to PL=5.
+    {GtpC2, Cmd} = modify_bearer_command({arp_change, 5}, GtpC),
+
+    %% The PGW emits the default-bearer Update Bearer Request (echoing the
+    %% command seq_no) with the new ARP.
+    UBRDefault = recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok),
+    ?match(#gtp{type = update_bearer_request}, UBRDefault),
+
+    %% ... and a separate network-initiated Update Bearer Request for the
+    %% DEDICATED bearer.
+    UBRDed = recv_pdu(Cntl, ?TIMEOUT),
+    #gtp{type = update_bearer_request,
+	 ie = #{{v2_bearer_context, 0} :=
+		    #v2_bearer_context{
+		       group = #{{v2_eps_bearer_id, 0} :=
+				     #v2_eps_bearer_id{eps_bearer_id = DedEBI}}}}} =
+	UBRDed,
+
+    %% Accept the default bearer's update, but reject the dedicated bearer's
+    %% with a terminal per-bearer Cause (M5 subscribed-QoS Modify failure).
+    send_pdu(GtpC2, make_response(UBRDefault, simple, GtpC2)),
+    DedResp = two_bearer_update_response(UBRDed, GtpCDed,
+					 [{DedEBI, no_resources_available}]),
+    send_pdu(Cntl, GtpC, DedResp),
+
+    ?equal({ok, timeout}, recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok)),
+
+    %% TS 23.401 5.4.2.2 step 7: a terminal subscribed-QoS Update failure
+    %% deletes the concerned dedicated bearer.
+    Del = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = delete_bearer_request,
+		ie = #{{v2_eps_bearer_id, 1} :=
+			   #v2_eps_bearer_id{eps_bearer_id = DedEBI}}},
+	   Del),
+    send_pdu(Cntl, GtpC, make_response(Del, simple, GtpCDed)),
+    ct:sleep(200),
+
+    #{dedicated := DedicatedA} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?equal(false, maps:is_key(DedEBI, DedicatedA)),
+
+    delete_session(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+modify_bearer_command_arp_fanout_temporary_hold() ->
+    [{doc, "TS 23.401 5.4.1 / dossier §8: when the dedicated bearer's ARP "
+	   "fan-out Update Bearer Response carries a temporary per-bearer Cause, "
+	   "the PGW must not delete the bearer or emit any further request for it "
+	   "this round"}].
+modify_bearer_command_arp_fanout_temporary_hold(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun =
+	fun(Request, Result, Avps, SOpts) ->
+		Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SessionOpts, events = []},
+
+    %% Install a PCC rule whose ARP MATCHES the default bearer's subscribed ARP
+    %% (PL=10, PCI=1, PVI=0 from create_session) so the resulting dedicated
+    %% bearer carries the same ARP as the default bearer.
+    DedRule = #{'Charging-Rule-Definition' =>
+		    [#{'Charging-Rule-Name' => [<<"ded-arp-rule">>],
+		       'Flow-Information' =>
+			   [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+			      'Flow-Direction' => [2]}],
+		       'QoS-Information' =>
+			   [#{'QoS-Class-Identifier' => 1,
+			      'Max-Requested-Bandwidth-UL' => 6000,
+			      'Max-Requested-Bandwidth-DL' => 8000,
+			      'Guaranteed-Bitrate-UL' => 6000,
+			      'Guaranteed-Bitrate-DL' => 8000,
+			      'Allocation-Retention-Priority' =>
+				  #{'Priority-Level' => 10,
+				    'Pre-emption-Capability' => 1,
+				    'Pre-emption-Vulnerability' => 0}}],
+		       'Metering-Method' => [1],
+		       'Precedence' => [100],
+		       'Online' => [0],
+		       'Offline' => [0]}]},
+    Server ! AAAReq#aaa_request{events = [{pcc, install, [DedRule]}]},
+
+    {_, Resp0, _, _} =
+	receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp0),
+
+    %% Complete the Create Bearer exchange to install the dedicated bearer.
+    DedEBI = 6,
+    GtpCDed = complete_create_bearer(Cntl, GtpC, DedEBI),
+
+    %% The dedicated bearer must be installed under the default's ARP.
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 1, {10, 1, 0}} := DedEBI}, BearerMap),
+
+    %% Send a Modify Bearer Command changing the subscribed ARP to PL=5.
+    {GtpC2, Cmd} = modify_bearer_command({arp_change, 5}, GtpC),
+
+    UBRDefault = recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok),
+    ?match(#gtp{type = update_bearer_request}, UBRDefault),
+
+    UBRDed = recv_pdu(Cntl, ?TIMEOUT),
+    #gtp{type = update_bearer_request,
+	 ie = #{{v2_bearer_context, 0} :=
+		    #v2_bearer_context{
+		       group = #{{v2_eps_bearer_id, 0} :=
+				     #v2_eps_bearer_id{eps_bearer_id = DedEBI}}}}} =
+	UBRDed,
+
+    %% Accept the default bearer's update, but answer the dedicated bearer's
+    %% with a temporary per-bearer Cause (UE unreachable due to power saving).
+    send_pdu(GtpC2, make_response(UBRDefault, simple, GtpC2)),
+    DedResp = two_bearer_update_response(
+		 UBRDed, GtpCDed,
+		 [{DedEBI, ue_is_temporarily_not_reachable_due_to_power_saving}]),
+    send_pdu(Cntl, GtpC, DedResp),
+
+    ?equal({ok, timeout}, recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok)),
+    ?equal([], outstanding_requests()),
+
+    %% No Delete Bearer Request must follow a temporary Cause; the bearer
+    %% is held on its previously confirmed descriptor (TODO(#34)).
+    ?equal(timeout, recv_pdu(Cntl, undefined, 500, fun(Why) -> Why end)),
+    #{dedicated := Ded} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?assert(maps:is_key(DedEBI, Ded)),
 
     delete_session(GtpC2),
 

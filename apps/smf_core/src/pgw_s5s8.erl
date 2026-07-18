@@ -671,10 +671,14 @@ handle_response({update_dedicated_bearers, Kind, Staged},
 		     Data, BearerCtxs),
     {keep_state, Data1};
 
-handle_response({update_dedicated_bearers, _Kind, _Staged}, timeout,
+handle_response({update_dedicated_bearers, Kind, Staged}, timeout,
 		#gtp{type = update_bearer_request}, #{session := connected}, Data) ->
-    ?LOG(error, "batched Update Bearer Request timed out"),
-    {keep_state, Data};
+    ?LOG(error, "batched Update Bearer Request timed out; ~p bearer(s) affected",
+	 [map_size(Staged)]),
+    Data1 = maps:fold(fun(EBI, _Desc, D) ->
+			      handle_update_bearer_failure(Kind, EBI, request_rejected, D)
+		      end, Data, Staged),
+    {keep_state, Data1};
 
 handle_response({CommandReqKey, OldSOpts},
 		#gtp{type = update_bearer_response,
@@ -1092,30 +1096,79 @@ ie_foldl(Fun, Acc, IE) ->
     Fun(IE, Acc).
 
 %% Apply one Bearer Context's Cause from a batched Update Bearer Response
-%% (M3 rule change / M5 subscribed-QoS fan-out) to the dedicated bearer state.
-%% Interim: only request_accepted commits the staged descriptor; every other
-%% cause logs and keeps the previously confirmed descriptor in place (the full
-%% §8 failure matrix — retry on temporary causes, rule/bearer teardown on
-%% terminal ones — lands in a follow-up task).
+%% (M3 rule change / M5 subscribed-QoS fan-out) to the dedicated bearer state,
+%% per the §8 failure matrix: request_accepted commits the staged descriptor;
+%% a temporary cause holds the change; a terminal cause runs the failure
+%% policy for the procedure Kind (handle_update_bearer_failure/4).
 apply_bearer_update_result(_Kind,
 			   #v2_bearer_context{group = #{
 			       ?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI},
 			       ?'Cause' := #v2_cause{v2_cause = request_accepted}}},
 			   Staged, Data) ->
     commit_staged_descriptor(EBI, Staged, Data);
-apply_bearer_update_result(_Kind,
+apply_bearer_update_result(Kind,
 			   #v2_bearer_context{group = #{
 			       ?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI},
 			       ?'Cause' := #v2_cause{v2_cause = Cause}}},
 			   _Staged, Data) ->
-    ?LOG(warning, "Update Bearer Request for dedicated bearer ~p failed with ~p",
-	 [EBI, Cause]),
+    case smf_gsn_lib:bearer_update_cause_class(Cause) of
+	temporary ->
+	    %% TODO(#34): re-attempt the Update when the UE is next reachable
+	    %% (mirroring the Create-path power-saving retry); for now hold the
+	    %% change without removing the rule or deleting the bearer (dossier §8).
+	    ?LOG(warning, "Update Bearer Request for dedicated bearer ~p temporarily "
+		 "rejected (~p); change not applied this round", [EBI, Cause]),
+	    Data;
+	terminal ->
+	    handle_update_bearer_failure(Kind, EBI, Cause, Data)
+    end;
+apply_bearer_update_result(_Kind, BearerContext, _Staged, Data) ->
+    %% A Bearer Context missing an EPS Bearer ID or Cause is malformed; skip it
+    %% without aborting processing of the batch's remaining contexts.
+    ?LOG(warning, "malformed Bearer Context in Update Bearer Response, skipping: ~p",
+	 [BearerContext]),
     Data.
 
 commit_staged_descriptor(EBI, Staged, #{dedicated := Ded} = Data) ->
     case maps:find(EBI, Staged) of
 	{ok, Desc} -> Data#{dedicated := Ded#{EBI => Desc}};
 	error      -> Data
+    end.
+
+%% Terminal Update failure: report the affected PCC rule(s) to the PCRF
+%% (TS 29.212 §4.5.6/§4.5.12). A failed subscribed-QoS Modify (M5) is not ignorable —
+%% delete the concerned bearer (TS 23.401 §5.4.2.2 step 7). A failed rule-change
+%% Modify (M3) removes the offending rule(s), re-provisions PFCP, and keeps the
+%% bearer on its previously confirmed descriptor.
+handle_update_bearer_failure(subscribed_qos, EBI, Cause,
+			     #{tunnels := #{'Access' := AccessTunnel}} = Data) ->
+    ?LOG(warning, "subscribed-QoS Update for bearer ~p failed with ~p; deleting bearer "
+	 "(TS 23.401 5.4.2.2 step 7)", [EBI, Cause]),
+    Data1 = case ebi_rule_names(EBI, Data) of
+		[]        -> Data;
+		RuleNames -> report_bearer_failure(RuleNames, Data)
+	    end,
+    initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data1);
+handle_update_bearer_failure(rule_change, EBI, Cause,
+			     #{bearers := BearerMap, pfcp := PCtx0, pcc := PCC} = Data) ->
+    ?LOG(warning, "rule-change Update for bearer ~p failed with ~p; removing rule(s) "
+	 "and reporting to PCRF", [EBI, Cause]),
+    case ebi_rule_names(EBI, Data) of
+	[] ->
+	    Data;
+	RuleNames ->
+	    PCC1 = PCC#pcc_ctx{rules = maps:without(RuleNames, PCC#pcc_ctx.rules)},
+	    Data1 = case smf_pfcp_context:modify_session(PCC1, [], #{}, BearerMap, PCtx0) of
+			{ok, {PCtx, _, _}} -> Data#{pcc := PCC1, pfcp := PCtx};
+			{error, _}         -> Data#{pcc := PCC1}
+		    end,
+	    report_bearer_failure(RuleNames, Data1)
+    end.
+
+ebi_rule_names(EBI, #{bearers := BearerMap, pcc := PCC}) ->
+    case ebi_qci_arp(EBI, BearerMap) of
+	{QCI, ARP} -> affected_pcc_rules(QCI, ARP, PCC);
+	undefined  -> []
     end.
 
 %% Deactivate one dedicated bearer named in a Delete Bearer Command: report the
