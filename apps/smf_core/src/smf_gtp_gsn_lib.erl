@@ -88,7 +88,7 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
 		    {'SGi-LAN', default_lan_id} => 1,
 		    {'SGi-LAN', 1} => SGiBearer},
     BearerMap0 =
-	case smf_gsn_lib:get_rule_qci_arp(maps:get('QoS-Information', SessionOpts3, #{})) of
+	case smf_gsn_lib:get_qci_arp(maps:get('QoS-Information', SessionOpts3, #{})) of
 	    {QCI, ARP} -> BearerMap0a#{{qci_arp, QCI, ARP} => EBI};
 	    undefined  -> BearerMap0a
 	end,

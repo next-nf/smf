@@ -752,6 +752,8 @@ common() ->
      gx_asr,
      gx_rar,
      gx_rar_dedicated_bearer_create,
+     default_bearer_qci_arp_binding_entry,
+     default_qci_arp_rule_binds_to_default,
      gx_dedicated_bearer_create_failure,
      gx_dedicated_bearer_create_partial_reject,
      gx_dedicated_bearer_create_power_saving_retry,
@@ -1033,6 +1035,14 @@ init_per_testcase(create_session_multi_bearer, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(gx_rar_dedicated_bearer_create, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(default_bearer_qci_arp_binding_entry, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(default_qci_arp_rule_binds_to_default, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -5781,6 +5791,97 @@ gx_rar_dedicated_bearer_create(Config) ->
 		  false
 	  end, meck:history(smf_aaa_pcf)),
     ?match([_], BearerCCRU),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+default_bearer_qci_arp_binding_entry() ->
+    [{doc, "The default bearer's {qci_arp,...} binding-map entry must be "
+	   "populated at Create Session so PCC rules installed at the "
+	   "default's QCI/ARP bind to it instead of spawning a dedicated "
+	   "bearer"}].
+default_bearer_qci_arp_binding_entry(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    #{bearers := BearerMap, context := #context{default_bearer_id = DefaultEBI}} =
+	smf_context:test_cmd(gtp, CtxKey, info),
+
+    %% The default bearer (QCI 8, ARP {10,1,0} -- see session_options/1's
+    %% 'QoS-Information') must have a {qci_arp,...} entry pointing at its EBI.
+    ?match(#{{qci_arp, 8, {10, 1, 0}} := DefaultEBI}, BearerMap),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+default_qci_arp_rule_binds_to_default() ->
+    [{doc, "A Gx RAR installing a PCC rule at the default bearer's QCI/ARP "
+	   "must bind onto the default bearer -- no Create Bearer Request"}].
+default_qci_arp_rule_binds_to_default(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun =
+	fun(Request, Result, Avps, SOpts) ->
+		Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SessionOpts, events = []},
+
+    %% Install a PCC rule whose QoS matches the default bearer's QCI/ARP
+    %% (QCI 8, ARP PL=10,PCI=1,PVI=0 from create_session).
+    DefRule = #{'Charging-Rule-Definition' =>
+		    [#{'Charging-Rule-Name' => [<<"def-qos-rule">>],
+		       'Flow-Information' =>
+			   [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+			      'Flow-Direction' => [2]}],
+		       'QoS-Information' =>
+			   [#{'QoS-Class-Identifier' => 8,
+			      'Allocation-Retention-Priority' =>
+				  #{'Priority-Level' => 10,
+				    'Pre-emption-Capability' => 1,
+				    'Pre-emption-Vulnerability' => 0}}],
+		       'Metering-Method' => [1],
+		       'Precedence' => [100],
+		       'Online' => [0],
+		       'Offline' => [0]}]},
+    Server ! AAAReq#aaa_request{events = [{pcc, install, [DefRule]}]},
+
+    {_, Resp0, _, _} =
+	receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp0),
+
+    %% It must bind to the default bearer -- NO Create Bearer Request.
+    ?equal({ok, timeout}, recv_pdu(Cntl, undefined, 2000, ok)),
+
+    #{bearers := BearerMap, context := #context{default_bearer_id = DefaultEBI}} =
+	smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 8, {10, 1, 0}} := DefaultEBI}, BearerMap),
+    #{dedicated := Dedicated} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?equal(0, map_size(Dedicated)),
 
     delete_session(GtpC),
 
