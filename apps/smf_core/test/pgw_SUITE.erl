@@ -762,6 +762,7 @@ common() ->
      dedicated_bearer_session_delete,
      modify_bearer_command_arp_fanout,
      gx_rar_dedicated_bearer_modify,
+     gx_rar_two_dedicated_bearers_batched_update,
      gx_rar_bearer_binding_reeval,
      gy_asr,
      gy_async_stop,
@@ -1062,6 +1063,10 @@ init_per_testcase(modify_bearer_command_arp_fanout, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(gx_rar_dedicated_bearer_modify, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(gx_rar_two_dedicated_bearers_batched_update, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -6098,6 +6103,201 @@ gx_rar_dedicated_bearer_modify(Config) ->
     ?equal(13000, maps:get('Max-Requested-Bandwidth-DL', NewQoSMap)),
     ?equal(10000, maps:get('Guaranteed-Bitrate-UL', NewQoSMap)),
     ?equal(13000, maps:get('Guaranteed-Bitrate-DL', NewQoSMap)),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+%% Complete a network-initiated Create Bearer Request/Response exchange for a
+%% new dedicated bearer, assigning it DedEBI (as the SGW/MME would). Returns
+%% the pseudo SGW-side gtpc record allocated for the new bearer's tunnel.
+complete_create_bearer(Cntl, GtpC, DedEBI) ->
+    CBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = create_bearer_request}, CBReq),
+    #gtp{seq_no = CBSeqNo,
+	 ie = #{{v2_bearer_context, 0} :=
+		    #v2_bearer_context{
+		       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 1} :=
+				     #v2_fully_qualified_tunnel_endpoint_identifier{
+					key = PgwUTEI,
+					ipv4 = PgwUIP4,
+					ipv6 = PgwUIP6}}}}} = CBReq,
+
+    GtpCDed = gtp_context_new_teids(GtpC),
+    #gtpc{local_ip = LocalIP,
+	  local_data_tei = SgwUTEI,
+	  remote_control_tei = RemoteCntlTEI} = GtpCDed,
+
+    PgwUFTEID =
+	if PgwUIP4 /= undefined, size(PgwUIP4) =:= 4 ->
+	       #v2_fully_qualified_tunnel_endpoint_identifier{
+		  instance = 2, interface_type = ?'S5/S8-U PGW',
+		  key = PgwUTEI, ipv4 = PgwUIP4};
+	   PgwUIP6 /= undefined, size(PgwUIP6) =:= 16 ->
+	       #v2_fully_qualified_tunnel_endpoint_identifier{
+		  instance = 2, interface_type = ?'S5/S8-U PGW',
+		  key = PgwUTEI, ipv6 = PgwUIP6};
+	   true ->
+	       #v2_fully_qualified_tunnel_endpoint_identifier{
+		  instance = 2, interface_type = ?'S5/S8-U PGW',
+		  key = PgwUTEI}
+	end,
+    SgwUFTEID =
+	case LocalIP of
+	    {_,_,_,_} ->
+		#v2_fully_qualified_tunnel_endpoint_identifier{
+		   instance = 3, interface_type = ?'S5/S8-U SGW',
+		   key = SgwUTEI, ipv4 = smf_inet:ip2bin(LocalIP)};
+	    {_,_,_,_,_,_,_,_} ->
+		#v2_fully_qualified_tunnel_endpoint_identifier{
+		   instance = 3, interface_type = ?'S5/S8-U SGW',
+		   key = SgwUTEI, ipv6 = smf_inet:ip2bin(LocalIP)}
+	end,
+    CBRespIEs = [#v2_cause{v2_cause = request_accepted},
+		 #v2_bearer_context{
+		    group = [#v2_cause{v2_cause = request_accepted},
+			     #v2_eps_bearer_id{eps_bearer_id = DedEBI},
+			     PgwUFTEID,
+			     SgwUFTEID]}],
+    CBResp = #gtp{version = v2, type = create_bearer_response,
+		  tei = RemoteCntlTEI, seq_no = CBSeqNo, ie = CBRespIEs},
+    send_pdu(Cntl, GtpC, CBResp),
+    ct:sleep(200),
+    GtpCDed.
+
+%% Build an update_bearer_response carrying one Bearer Context per {EBI, Cause}
+%% pair in BearerCauses, echoing Req's seq_no (TS 29.274 §7.2.16). Extends the
+%% single-bearer construction in smf_pgw_test_lib:make_response/3 to a batch.
+two_bearer_update_response(#gtp{seq_no = SeqNo}, #gtpc{restart_counter = RCnt,
+							remote_control_tei = RemoteCntlTEI},
+			   BearerCauses) ->
+    BearerCtxs = [#v2_bearer_context{
+		     group = [#v2_eps_bearer_id{eps_bearer_id = EBI},
+			      #v2_cause{v2_cause = Cause}]}
+		  || {EBI, Cause} <- BearerCauses],
+    IEs = [#v2_recovery{restart_counter = RCnt},
+	   #v2_cause{v2_cause = request_accepted} | BearerCtxs],
+    #gtp{version = v2, type = update_bearer_response,
+	 tei = RemoteCntlTEI, seq_no = SeqNo, ie = IEs}.
+
+%%--------------------------------------------------------------------
+gx_rar_two_dedicated_bearers_batched_update() ->
+    [{doc, "TS 29.274 §7.2.15: a Gx RAR that changes the aggregate QoS of two "
+	   "existing dedicated bearers at once must batch both into a single "
+	   "network-initiated Update Bearer Request carrying two Bearer "
+	   "Contexts, not two separate messages"}].
+gx_rar_two_dedicated_bearers_batched_update(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+
+    Self = self(),
+    ResponseFun =
+	fun(Request, Result, Avps, SOpts) ->
+		Self ! {'$response', Request, Result, Avps, SOpts} end,
+
+    RuleFun =
+	fun(Name, QCI, PL, UL, DL) ->
+		#{'Charging-Rule-Definition' =>
+		      [#{'Charging-Rule-Name' => [Name],
+			 'Flow-Information' =>
+			     [#{'Flow-Description' =>
+				    [<<"permit out ip from any to assigned">>],
+				'Flow-Direction' => [2]}],
+			 'QoS-Information' =>
+			     [#{'QoS-Class-Identifier' => QCI,
+				'Max-Requested-Bandwidth-UL' => UL,
+				'Max-Requested-Bandwidth-DL' => DL,
+				'Guaranteed-Bitrate-UL' => UL,
+				'Guaranteed-Bitrate-DL' => DL,
+				'Allocation-Retention-Priority' =>
+				    #{'Priority-Level' => PL,
+				      'Pre-emption-Capability' => 1,
+				      'Pre-emption-Vulnerability' => 0}}],
+			 'Metering-Method' => [1],
+			 'Precedence' => [100],
+			 'Online' => [0],
+			 'Offline' => [0]}]}
+	end,
+
+    %% First RAR: install a rule on QCI 1 / ARP PL=2, creating dedicated bearer #1.
+    #{aaa_session := SOpts0} = smf_context:test_cmd(gtp, CtxKey, info),
+    Rule1 = RuleFun(<<"ded-rule-1">>, 1, 2, 6000, 8000),
+    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SOpts0, events = [{pcc, install, [Rule1]}]},
+    {_, Resp0, _, _} =
+	receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp0),
+
+    DedEBI1 = 6,
+    _GtpCDed1 = complete_create_bearer(Cntl, GtpC, DedEBI1),
+
+    #{bearers := BearerMap1} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 1, {2, 1, 0}} := DedEBI1}, BearerMap1),
+
+    %% Second RAR: install a rule on QCI 2 / ARP PL=3, creating dedicated bearer #2.
+    #{aaa_session := SOpts1} = smf_context:test_cmd(gtp, CtxKey, info),
+    Rule2 = RuleFun(<<"ded-rule-2">>, 2, 3, 3000, 4000),
+    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SOpts1, events = [{pcc, install, [Rule2]}]},
+    {_, Resp1, _, _} =
+	receive {'$response', _, _, _, _} = R1 -> erlang:delete_element(1, R1)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp1),
+
+    DedEBI2 = 7,
+    _GtpCDed2 = complete_create_bearer(Cntl, GtpC, DedEBI2),
+
+    #{bearers := BearerMap2} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 2, {3, 1, 0}} := DedEBI2}, BearerMap2),
+
+    %% Third RAR: re-authorize BOTH ded-rule-1 and ded-rule-2 (new bandwidth,
+    %% same QCI/ARP so no re-bind) in a single Gx event. Both bearers' aggregate
+    %% QoS changes, so this must batch into ONE Update Bearer Request.
+    #{aaa_session := SOpts2} = smf_context:test_cmd(gtp, CtxKey, info),
+    Rule1Upd = RuleFun(<<"ded-rule-1">>, 1, 2, 7000, 9000),
+    Rule2Upd = RuleFun(<<"ded-rule-2">>, 2, 3, 3500, 4500),
+    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SOpts2, events = [{pcc, install, [Rule1Upd, Rule2Upd]}]},
+    {_, Resp2, _, _} =
+	receive {'$response', _, _, _, _} = R2 -> erlang:delete_element(1, R2)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp2),
+
+    %% Exactly ONE Update Bearer Request must be received, carrying TWO Bearer
+    %% Contexts (one per modified dedicated bearer).
+    UBRReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = update_bearer_request,
+		ie = #{{v2_bearer_context, 0} := [_, _]}}, UBRReq),
+
+    %% Complete the exchange: accept both bearers.
+    UBRResp = two_bearer_update_response(UBRReq, GtpC,
+					 [{DedEBI1, request_accepted},
+					  {DedEBI2, request_accepted}]),
+    send_pdu(Cntl, GtpC, UBRResp),
+    ct:sleep(200),
+    ?equal([], outstanding_requests()),
+
+    %% Both staged descriptors must have committed on the accepted response.
+    #{dedicated := Ded} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?assertEqual(2, length([E || {E, _} <- maps:to_list(Ded), is_integer(E)])),
+    ?match(#{DedEBI1 := #ded_bearer{qos = #{'Max-Requested-Bandwidth-UL' := 7000}},
+	     DedEBI2 := #ded_bearer{qos = #{'Max-Requested-Bandwidth-UL' := 3500}}},
+	   Ded),
 
     delete_session(GtpC),
 

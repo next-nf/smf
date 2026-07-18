@@ -861,7 +861,8 @@ make_response(#gtp{type = create_session_request, seq_no = SeqNo},
     #gtp{version = v2, type = create_session_response,
 	 tei = RemoteCntlTEI, seq_no = SeqNo, ie = IEs};
 
-make_response(#gtp{type = update_bearer_request, seq_no = SeqNo},
+make_response(#gtp{type = update_bearer_request, seq_no = SeqNo,
+		   ie = #{{v2_bearer_context, 0} := BearerCtxs}},
 	      SubType,
 	      #gtpc{restart_counter = RCnt,
 		    remote_control_tei = RemoteCntlTEI}) ->
@@ -874,12 +875,20 @@ make_response(#gtp{type = update_bearer_request, seq_no = SeqNo},
 	    _ ->
 		{request_accepted, request_accepted}
 	end,
-    EBI = 5,
+    %% Echo back the EBI(s) the request actually carried (may be a single
+    %% Bearer Context or a list, TS 29.274 §7.2.15) rather than a fixed one,
+    %% so the response correlates with whichever bearer(s) were updated.
+    EBIs = [EBI || #v2_bearer_context{
+			group = #{{v2_eps_bearer_id, 0} :=
+				      #v2_eps_bearer_id{eps_bearer_id = EBI}}}
+		       <- lists:flatten([BearerCtxs])],
+    RespBearerCtxs =
+	[#v2_bearer_context{
+	    group = [#v2_eps_bearer_id{eps_bearer_id = EBI},
+		     #v2_cause{v2_cause = BearerCause}]}
+	 || EBI <- EBIs],
     IEs = [#v2_recovery{restart_counter = RCnt},
-	   #v2_cause{v2_cause = Cause},
-	   #v2_bearer_context{
-	      group = [#v2_eps_bearer_id{eps_bearer_id = EBI},
-		       #v2_cause{v2_cause = BearerCause}]}],
+	   #v2_cause{v2_cause = Cause} | RespBearerCtxs],
     #gtp{version = v2, type = update_bearer_response,
 	 tei = RemoteCntlTEI, seq_no = SeqNo, ie = IEs};
 
