@@ -44,7 +44,8 @@
 -export([resolve_access_bearer/2]).
 -export([detect_new_bearers/4, detect_removed_bearers/3,
 	 detect_modified_bearers/2, normalize_bearer/5,
-	 remove_bearer_metadata_for_ebi/2, get_rule_qci_arp/1]).
+	 remove_bearer_metadata_for_ebi/2, get_rule_qci_arp/1,
+	 bearer_update_cause_class/1]).
 -ignore_xref([put_sgi_default_bearer/2]).
 -ignore_xref([access_default_bearer_key/1]).
 -ignore_xref([resolve_access_bearer/2]).
@@ -1198,6 +1199,18 @@ is_gbr_qci(74) -> true;
 is_gbr_qci(75) -> true;
 is_gbr_qci(76) -> true;
 is_gbr_qci(_)  -> false.
+
+%% Classify a GTPv2 per-bearer Cause on an Update Bearer Response (dossier §8;
+%% TS 23.401 §5.4.1, §5.4.2.2 step 7). Temporary causes mean "retry when the UE is
+%% reachable", and must never trigger rule removal or bearer deletion.
+bearer_update_cause_class(request_accepted) ->
+    accepted;
+bearer_update_cause_class(ue_is_temporarily_not_reachable_due_to_power_saving) ->
+    temporary;
+bearer_update_cause_class(temporarily_rejected_due_to_handover_tau_rau_procedure_in_progress) ->
+    temporary;
+bearer_update_cause_class(_) ->
+    terminal.
 
 %% remove_bearer_metadata_for_ebi/2
 %% Remove all {qci_arp, _, _} and {bearer_id, _} entries that map to EBI.
