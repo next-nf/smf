@@ -793,7 +793,7 @@ fan_out_subscribed_arp_change(OldSOpts, CommandBearer, AMBR, Context, AccessTunn
 		  end, {[], #{}}, Dedicated),
 	    send_dedicated_bearers_update(subscribed_qos, Contexts, [AMBR],
 					  Staged, AccessTunnel),
-	    Data;
+	    rekey_default_qci_arp(DefaultEBI, NewARP, Data);
 	false ->
 	    Data
     end.
@@ -1276,6 +1276,19 @@ ebi_qci_arp(EBI, BearerMap) ->
       fun({qci_arp, QCI, ARP}, V, _Acc) when V =:= EBI -> {QCI, ARP};
 	 (_, _, Acc)                                   -> Acc
       end, undefined, BearerMap).
+
+%% Keep the default bearer's {qci_arp} binding key in sync with its
+%% re-authorized ARP (#39) so a later PCC rule at the new default ARP binds to
+%% the default instead of spawning a dedicated bearer. Rewrites on the actually
+%% stored ARP; no-op if the default has no {qci_arp} entry.
+rekey_default_qci_arp(DefaultEBI, NewARP, #{bearers := BearerMap} = Data) ->
+    case ebi_qci_arp(DefaultEBI, BearerMap) of
+	{QCI, StoredARP} when StoredARP =/= NewARP ->
+	    BM = maps:remove({qci_arp, QCI, StoredARP}, BearerMap),
+	    Data#{bearers := BM#{{qci_arp, QCI, NewARP} => DefaultEBI}};
+	_ ->
+	    Data
+    end.
 
 %% Report new dedicated bearer to PCRF via Gx CCR-Update
 %% with Bearer-Operation = ESTABLISHMENT and the PGW-assigned Bearer-Identifier.

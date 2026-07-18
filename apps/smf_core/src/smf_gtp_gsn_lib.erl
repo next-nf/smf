@@ -89,9 +89,8 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
 		    {'SGi-LAN', 1} => SGiBearer},
     %% Register the default bearer under its {QCI, ARP} so a PCC rule at the
     %% default's QoS binds to it (via detect_new_bearers) instead of spawning a
-    %% dedicated bearer. TODO(#39): this captures the *create-time* subscribed
-    %% QCI/ARP and is not refreshed if the default bearer's ARP is later
-    %% re-authorized (Modify Bearer Command); keep it in sync there.
+    %% dedicated bearer. Kept in sync on a later default-ARP re-authorization by
+    %% fan_out_subscribed_arp_change/6 (rekey_default_qci_arp/3).
     BearerMap0 =
 	case smf_gsn_lib:get_qci_arp(maps:get('QoS-Information', SessionOpts3, #{})) of
 	    {QCI, ARP} -> BearerMap0a#{{qci_arp, QCI, ARP} => EBI};

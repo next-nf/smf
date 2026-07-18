@@ -766,6 +766,7 @@ common() ->
      modify_bearer_command_arp_fanout,
      modify_bearer_command_arp_fanout_delete_on_fail,
      modify_bearer_command_arp_fanout_temporary_hold,
+     default_bearer_arp_rekey_binds_new_rule,
      gx_rar_dedicated_bearer_modify,
      gx_rar_dedicated_bearer_update_message_level_reject,
      gx_rar_two_dedicated_bearers_batched_update,
@@ -1091,6 +1092,10 @@ init_per_testcase(modify_bearer_command_arp_fanout_delete_on_fail, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(modify_bearer_command_arp_fanout_temporary_hold, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(default_bearer_arp_rekey_binds_new_rule, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -6264,6 +6269,88 @@ modify_bearer_command_arp_fanout_temporary_hold(Config) ->
     ?equal(timeout, recv_pdu(Cntl, undefined, 500, fun(Why) -> Why end)),
     #{dedicated := Ded} = smf_context:test_cmd(gtp, CtxKey, info),
     ?assert(maps:is_key(DedEBI, Ded)),
+
+    delete_session(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+default_bearer_arp_rekey_binds_new_rule() ->
+    [{doc, "After a Modify Bearer Command re-authorizes the default bearer's ARP, "
+      "the default's {qci_arp} key is rekeyed and a Gx rule at the new default "
+      "ARP binds to the default rather than spawning a dedicated bearer (#39)"}].
+default_bearer_arp_rekey_binds_new_rule(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+    #{context := #context{default_bearer_id = DefaultEBI}} =
+	smf_context:test_cmd(gtp, CtxKey, info),
+
+    %% Default is QCI 8, ARP {10,1,0}. Re-authorize its ARP PL 10 -> 5.
+    {GtpC2, Cmd} = modify_bearer_command({arp_change, 5}, GtpC),
+
+    %% The PGW emits the default-bearer Update Bearer Request (echoing the
+    %% command seq_no) with the new ARP.
+    UBRDefault = recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok),
+    #gtp{type = update_bearer_request,
+	 ie = #{{v2_bearer_context, 0} :=
+		    #v2_bearer_context{
+		       group = #{{v2_eps_bearer_id, 0} :=
+				     #v2_eps_bearer_id{eps_bearer_id = 5},
+				 {v2_bearer_level_quality_of_service, 0} :=
+				     #v2_bearer_level_quality_of_service{pl = 5}}}}} =
+	UBRDefault,
+
+    %% Answer the Update Bearer Request to complete the exchange.
+    send_pdu(GtpC2, make_response(UBRDefault, simple, GtpC2)),
+
+    ?equal({ok, timeout}, recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok)),
+    ?equal([], outstanding_requests()),
+    ct:sleep(200),
+
+    %% The default's {qci_arp} key is now {8,{5,1,0}}, not the stale {8,{10,1,0}}.
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 8, {5, 1, 0}} := DefaultEBI}, BearerMap),
+    ?assertNot(maps:is_key({qci_arp, 8, {10, 1, 0}}, BearerMap)),
+
+    %% A Gx rule at the NEW default ARP must bind to the default -> no CBR.
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+    DefRule = #{'Charging-Rule-Definition' =>
+		    [#{'Charging-Rule-Name' => [<<"new-arp-rule">>],
+		       'Flow-Information' =>
+			   [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+			      'Flow-Direction' => [2]}],
+		       'QoS-Information' =>
+			   [#{'QoS-Class-Identifier' => 8,
+			      'Allocation-Retention-Priority' =>
+				  #{'Priority-Level' => 5,
+				    'Pre-emption-Capability' => 1,
+				    'Pre-emption-Vulnerability' => 0}}],
+		       'Metering-Method' => [1],
+		       'Precedence' => [100],
+		       'Online' => [0],
+		       'Offline' => [0]}]},
+    Self = self(),
+    ResponseFun =
+	fun(Request, Result, Avps, SOpts) ->
+		Self ! {'$response', Request, Result, Avps, SOpts} end,
+    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SessionOpts, events = [{pcc, install, [DefRule]}]},
+    {_, Resp1, _, _} =
+	receive {'$response', _, _, _, _} = R1 -> erlang:delete_element(1, R1)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp1),
+
+    %% It must bind to the default bearer -- NO Create Bearer Request.
+    ?equal({ok, timeout}, recv_pdu(Cntl, undefined, 2000, ok)),
 
     delete_session(GtpC2),
 
