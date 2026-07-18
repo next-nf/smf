@@ -765,6 +765,7 @@ common() ->
      modify_bearer_command_arp_fanout_temporary_hold,
      gx_rar_dedicated_bearer_modify,
      gx_rar_two_dedicated_bearers_batched_update,
+     gx_rar_two_dedicated_bearers_batched_delete,
      gx_rar_bearer_binding_reeval,
      gy_asr,
      gy_async_stop,
@@ -1077,6 +1078,10 @@ init_per_testcase(gx_rar_dedicated_bearer_modify, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(gx_rar_two_dedicated_bearers_batched_update, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(gx_rar_two_dedicated_bearers_batched_delete, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -6518,6 +6523,133 @@ gx_rar_two_dedicated_bearers_batched_update(Config) ->
     ?match(#{DedEBI1 := #ded_bearer{qos = #{'Max-Requested-Bandwidth-UL' := 7000}},
 	     DedEBI2 := #ded_bearer{qos = #{'Max-Requested-Bandwidth-UL' := 3500}}},
 	   Ded),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gx_rar_two_dedicated_bearers_batched_delete() ->
+    [{doc, "TS 29.274 §7.2.9.2: a Gx RAR that removes the PCC rules of two "
+	   "existing dedicated bearers at once must batch both EBIs into a "
+	   "single network-initiated Delete Bearer Request, not two separate "
+	   "messages"}].
+gx_rar_two_dedicated_bearers_batched_delete(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+
+    Self = self(),
+    ResponseFun =
+	fun(Request, Result, Avps, SOpts) ->
+		Self ! {'$response', Request, Result, Avps, SOpts} end,
+
+    RuleFun =
+	fun(Name, QCI, PL, UL, DL) ->
+		#{'Charging-Rule-Definition' =>
+		      [#{'Charging-Rule-Name' => [Name],
+			 'Flow-Information' =>
+			     [#{'Flow-Description' =>
+				    [<<"permit out ip from any to assigned">>],
+				'Flow-Direction' => [2]}],
+			 'QoS-Information' =>
+			     [#{'QoS-Class-Identifier' => QCI,
+				'Max-Requested-Bandwidth-UL' => UL,
+				'Max-Requested-Bandwidth-DL' => DL,
+				'Guaranteed-Bitrate-UL' => UL,
+				'Guaranteed-Bitrate-DL' => DL,
+				'Allocation-Retention-Priority' =>
+				    #{'Priority-Level' => PL,
+				      'Pre-emption-Capability' => 1,
+				      'Pre-emption-Vulnerability' => 0}}],
+			 'Metering-Method' => [1],
+			 'Precedence' => [100],
+			 'Online' => [0],
+			 'Offline' => [0]}]}
+	end,
+
+    %% First RAR: install a rule on QCI 1 / ARP PL=2, creating dedicated bearer #1.
+    #{aaa_session := SOpts0} = smf_context:test_cmd(gtp, CtxKey, info),
+    Rule1 = RuleFun(<<"ded-rule-1">>, 1, 2, 6000, 8000),
+    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SOpts0, events = [{pcc, install, [Rule1]}]},
+    {_, Resp0, _, _} =
+	receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp0),
+
+    DedEBI1 = 6,
+    _GtpCDed1 = complete_create_bearer(Cntl, GtpC, DedEBI1),
+
+    #{bearers := BearerMap1} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 1, {2, 1, 0}} := DedEBI1}, BearerMap1),
+
+    %% Second RAR: install a rule on QCI 2 / ARP PL=3, creating dedicated bearer #2.
+    #{aaa_session := SOpts1} = smf_context:test_cmd(gtp, CtxKey, info),
+    Rule2 = RuleFun(<<"ded-rule-2">>, 2, 3, 3000, 4000),
+    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SOpts1, events = [{pcc, install, [Rule2]}]},
+    {_, Resp1, _, _} =
+	receive {'$response', _, _, _, _} = R1 -> erlang:delete_element(1, R1)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp1),
+
+    DedEBI2 = 7,
+    _GtpCDed2 = complete_create_bearer(Cntl, GtpC, DedEBI2),
+
+    #{bearers := BearerMap2} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 2, {3, 1, 0}} := DedEBI2}, BearerMap2),
+
+    %% Third RAR: remove BOTH ded-rule-1 and ded-rule-2 in a single Gx event.
+    %% Both dedicated bearers end up with no bound rules, so this must batch
+    %% into ONE Delete Bearer Request carrying both EBIs.
+    #{aaa_session := SOpts2} = smf_context:test_cmd(gtp, CtxKey, info),
+    %% The rules were installed via Charging-Rule-Definition, whose (list-valued)
+    %% Charging-Rule-Name field becomes the PCC rules map key verbatim; echo that
+    %% same list-of-a-list shape back so the remove event's key lookup hits.
+    RemoveCR = [{pcc, remove, [#{'Charging-Rule-Name' =>
+				      [[<<"ded-rule-1">>], [<<"ded-rule-2">>]]}]}],
+    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SOpts2, events = RemoveCR},
+    {_, Resp2, _, _} =
+	receive {'$response', _, _, _, _} = R2 -> erlang:delete_element(1, R2)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp2),
+
+    %% Exactly ONE Delete Bearer Request must be received, carrying TWO EPS
+    %% Bearer ID IEs at instance 1 (one per removed dedicated bearer).
+    Req = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = delete_bearer_request,
+		ie = #{{v2_eps_bearer_id, 1} := [_, _]}}, Req),
+    #gtp{ie = #{{v2_eps_bearer_id, 1} := EBIIEs}} = Req,
+    ?equal(lists:sort([DedEBI1, DedEBI2]),
+	   lists:sort([E || #v2_eps_bearer_id{eps_bearer_id = E} <- EBIIEs])),
+    ?equal(false, is_map_key({v2_procedure_transaction_id, 0}, Req#gtp.ie)),
+
+    %% Answer the batched Delete Bearer Request; both bearers must be released.
+    send_pdu(Cntl, GtpC, make_response(Req, simple, GtpC)),
+    ct:sleep(200),
+    ?equal([], outstanding_requests()),
+
+    #{bearers := BearerMap3} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?equal(false, is_map_key({'Access', DedEBI1}, BearerMap3)),
+    ?equal(false, is_map_key({'Access', DedEBI2}, BearerMap3)),
+
+    #{dedicated := DedicatedAfter} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?assertNot(maps:is_key(DedEBI1, DedicatedAfter)),
+    ?assertNot(maps:is_key(DedEBI2, DedicatedAfter)),
 
     delete_session(GtpC),
 
