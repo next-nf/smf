@@ -767,6 +767,7 @@ common() ->
      modify_bearer_command_arp_fanout_delete_on_fail,
      modify_bearer_command_arp_fanout_temporary_hold,
      default_bearer_arp_rekey_binds_new_rule,
+     default_arp_rekey_skips_dedicated_collision,
      gx_rar_dedicated_bearer_modify,
      gx_rar_dedicated_bearer_update_message_level_reject,
      gx_rar_two_dedicated_bearers_batched_update,
@@ -1096,6 +1097,10 @@ init_per_testcase(modify_bearer_command_arp_fanout_temporary_hold, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(default_bearer_arp_rekey_binds_new_rule, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(default_arp_rekey_skips_dedicated_collision, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -6351,6 +6356,147 @@ default_bearer_arp_rekey_binds_new_rule(Config) ->
 
     %% It must bind to the default bearer -- NO Create Bearer Request.
     ?equal({ok, timeout}, recv_pdu(Cntl, undefined, 2000, ok)),
+
+    delete_session(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+default_arp_rekey_skips_dedicated_collision() ->
+    [{doc, "#39 guard: a default bearer ARP re-auth must not clobber a dedicated "
+      "bearer's {qci_arp} binding when the default's newly re-authorized "
+      "{QCI, ARP} collides with one already bound to a distinct dedicated bearer"}].
+default_arp_rekey_skips_dedicated_collision(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+    #{context := #context{default_bearer_id = DefaultEBI}} =
+	smf_context:test_cmd(gtp, CtxKey, info),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+
+    Self = self(),
+    ResponseFun =
+	fun(Request, Result, Avps, SOpts) ->
+		Self ! {'$response', Request, Result, Avps, SOpts} end,
+
+    RuleFun =
+	fun(Name, QCI, PL) ->
+		#{'Charging-Rule-Definition' =>
+		      [#{'Charging-Rule-Name' => [Name],
+			 'Flow-Information' =>
+			     [#{'Flow-Description' =>
+				    [<<"permit out ip from any to assigned">>],
+				'Flow-Direction' => [2]}],
+			 'QoS-Information' =>
+			     [#{'QoS-Class-Identifier' => QCI,
+				'Max-Requested-Bandwidth-UL' => 6000,
+				'Max-Requested-Bandwidth-DL' => 8000,
+				'Guaranteed-Bitrate-UL' => 6000,
+				'Guaranteed-Bitrate-DL' => 8000,
+				'Allocation-Retention-Priority' =>
+				    #{'Priority-Level' => PL,
+				      'Pre-emption-Capability' => 1,
+				      'Pre-emption-Vulnerability' => 0}}],
+			 'Metering-Method' => [1],
+			 'Precedence' => [100],
+			 'Online' => [0],
+			 'Offline' => [0]}]}
+	end,
+
+    %% Step 1: install a Gx rule at QCI 8, ARP PL=5. The default's ARP is
+    %% still 10 at this point, so this does NOT bind to the default; it
+    %% spawns a DEDICATED bearer at {qci_arp, 8, {5,1,0}} -- the SAME QCI as
+    %% the default, at the ARP the default will later be re-authorized to.
+    #{aaa_session := SOpts0} = smf_context:test_cmd(gtp, CtxKey, info),
+    ColRule = RuleFun(<<"col-arp-rule">>, 8, 5),
+    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SOpts0, events = [{pcc, install, [ColRule]}]},
+    {_, Resp0, _, _} =
+	receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp0),
+
+    DedEBI = 6,
+    _GtpCDed = complete_create_bearer(Cntl, GtpC, DedEBI),
+
+    #{bearers := BearerMap0} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 8, {5, 1, 0}} := DedEBI}, BearerMap0),
+
+    %% Step 2: install a SECOND Gx rule at a distinct QCI (2) but the SAME ARP
+    %% as the default's CURRENT ARP (PL=10). This spawns a second dedicated
+    %% bearer and, as a side effect of its Gx CCR-Update establishment report,
+    %% re-syncs the session's cached 'QoS-Information' ARP back to {10,1,0}
+    %% (step 1's own establishment report last set it to {5,1,0}, the
+    %% collision bearer's own ARP) so the upcoming ARP-change command's "old
+    %% ARP" comparison reads the default's real current ARP.
+    #{aaa_session := SOpts1} = smf_context:test_cmd(gtp, CtxKey, info),
+    FanRule = RuleFun(<<"fan-arp-rule">>, 2, 10),
+    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SOpts1, events = [{pcc, install, [FanRule]}]},
+    {_, Resp1, _, _} =
+	receive {'$response', _, _, _, _} = R1 -> erlang:delete_element(1, R1)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp1),
+
+    FanEBI = 7,
+    GtpCFan = complete_create_bearer(Cntl, GtpC, FanEBI),
+
+    #{bearers := BearerMap1} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 2, {10, 1, 0}} := FanEBI}, BearerMap1),
+
+    %% Step 3: re-authorize the default bearer's ARP PL 10 -> 5. The default's
+    %% rekey target, {qci_arp, 8, {5,1,0}}, COLLIDES with the step 1 dedicated
+    %% bearer's key. The step 2 dedicated bearer (ARP 10, matching the OLD
+    %% default ARP) is fanned out with its own Update Bearer Request.
+    {GtpC2, Cmd} = modify_bearer_command({arp_change, 5}, GtpC),
+
+    %% The PGW emits the default-bearer Update Bearer Request (echoing the
+    %% command seq_no) with the new ARP.
+    UBRDefault = recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok),
+    #gtp{type = update_bearer_request,
+	 ie = #{{v2_bearer_context, 0} :=
+		    #v2_bearer_context{
+		       group = #{{v2_eps_bearer_id, 0} :=
+				     #v2_eps_bearer_id{eps_bearer_id = DefaultEBI},
+				 {v2_bearer_level_quality_of_service, 0} :=
+				     #v2_bearer_level_quality_of_service{pl = 5}}}}} =
+	UBRDefault,
+
+    %% ... and a separate network-initiated Update Bearer Request for the
+    %% step 2 dedicated bearer, carrying its unchanged QCI/GBR/MBR but the new ARP.
+    UBRFan = recv_pdu(Cntl, ?TIMEOUT),
+    #gtp{type = update_bearer_request,
+	 ie = #{{v2_bearer_context, 0} :=
+		    #v2_bearer_context{
+		       group = #{{v2_eps_bearer_id, 0} :=
+				     #v2_eps_bearer_id{eps_bearer_id = FanEBI},
+				 {v2_bearer_level_quality_of_service, 0} :=
+				     #v2_bearer_level_quality_of_service{pl = 5}}}}} =
+	UBRFan,
+
+    %% Answer both Update Bearer Requests to complete the exchanges.
+    send_pdu(GtpC2, make_response(UBRDefault, simple, GtpC2)),
+    send_pdu(Cntl, GtpC, make_response(UBRFan, simple, GtpCFan)),
+
+    ?equal({ok, timeout}, recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok)),
+    ?equal([], outstanding_requests()),
+    ct:sleep(200),
+
+    %% The guard must have left the step 1 dedicated bearer's binding intact
+    %% -- {qci_arp, 8, {5,1,0}} must STILL map to DedEBI, not the default's (a
+    %% clobber would silently steal the dedicated's binding).
+    #{bearers := BearerMap2} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 8, {5, 1, 0}} := DedEBI}, BearerMap2),
 
     delete_session(GtpC2),
 
