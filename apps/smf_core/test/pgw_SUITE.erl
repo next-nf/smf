@@ -765,8 +765,10 @@ common() ->
      modify_bearer_command_arp_fanout_delete_on_fail,
      modify_bearer_command_arp_fanout_temporary_hold,
      gx_rar_dedicated_bearer_modify,
+     gx_rar_dedicated_bearer_update_message_level_reject,
      gx_rar_two_dedicated_bearers_batched_update,
      gx_rar_two_dedicated_bearers_batched_delete,
+     gx_rar_removed_rule_on_default_bearer_no_delete,
      gx_rar_bearer_binding_reeval,
      gy_asr,
      gy_async_stop,
@@ -1079,6 +1081,10 @@ init_per_testcase(modify_bearer_command_arp_fanout_temporary_hold, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(gx_rar_dedicated_bearer_modify, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(gx_rar_dedicated_bearer_update_message_level_reject, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -6046,6 +6052,13 @@ modify_bearer_command_arp_fanout_delete_on_fail(Config) ->
     #{dedicated := DedicatedA} = smf_context:test_cmd(gtp, CtxKey, info),
     ?equal(false, maps:is_key(DedEBI, DedicatedA)),
 
+    %% FIX regression: the rule bound to the deleted bearer must also come
+    %% out of pcc.rules on a terminal subscribed-QoS Update failure (not just
+    %% get reported to the PCRF) -- otherwise PFCP gets re-provisioned
+    %% against an orphaned rule on the next unrelated change.
+    {ok, RulesAfter} = smf_context:test_cmd(gtp, CtxKey, pcc_rules),
+    ?equal(false, maps:is_key([<<"ded-arp-rule">>], RulesAfter)),
+
     delete_session(GtpC2),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
@@ -6416,6 +6429,145 @@ two_bearer_update_response(#gtp{seq_no = SeqNo}, #gtpc{restart_counter = RCnt,
     #gtp{version = v2, type = update_bearer_response,
 	 tei = RemoteCntlTEI, seq_no = SeqNo, ie = IEs}.
 
+%% Build an update_bearer_response carrying ONLY a message-level Cause (TS
+%% 29.274 §7.2.16) -- no 'Bearer Contexts to be modified' IE at all. This is
+%% a legitimate whole-procedure rejection (e.g. context_not_found).
+message_level_update_response(#gtp{seq_no = SeqNo}, #gtpc{restart_counter = RCnt,
+							   remote_control_tei = RemoteCntlTEI},
+			      Cause) ->
+    IEs = [#v2_recovery{restart_counter = RCnt}, #v2_cause{v2_cause = Cause}],
+    #gtp{version = v2, type = update_bearer_response,
+	 tei = RemoteCntlTEI, seq_no = SeqNo, ie = IEs}.
+
+%%--------------------------------------------------------------------
+gx_rar_dedicated_bearer_update_message_level_reject() ->
+    [{doc, "TS 29.274 §7.2.16: a batched Update Bearer Response can reject the "
+	   "whole procedure at message level (e.g. context_not_found) with NO "
+	   "'Bearer Contexts to be modified' IE at all. The gtp_context must not "
+	   "crash and must apply the message-level Cause class to every bearer "
+	   "staged for the batch"}].
+gx_rar_dedicated_bearer_update_message_level_reject(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun =
+	fun(Request, Result, Avps, SOpts) ->
+		Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SessionOpts, events = []},
+
+    %% First RAR: install a rule on QCI 1 / ARP PL=2, creating a dedicated bearer.
+    Rule1 = #{'Charging-Rule-Definition' =>
+		  [#{'Charging-Rule-Name' => [<<"msglvl-rule-1">>],
+		     'Flow-Information' =>
+			 [#{'Flow-Description' =>
+				[<<"permit out ip from any to assigned">>],
+			    'Flow-Direction' => [2]}],
+		     'QoS-Information' =>
+			 [#{'QoS-Class-Identifier' => 1,
+			    'Max-Requested-Bandwidth-UL' => 6000,
+			    'Max-Requested-Bandwidth-DL' => 8000,
+			    'Guaranteed-Bitrate-UL' => 6000,
+			    'Guaranteed-Bitrate-DL' => 8000,
+			    'Allocation-Retention-Priority' =>
+				#{'Priority-Level' => 2,
+				  'Pre-emption-Capability' => 1,
+				  'Pre-emption-Vulnerability' => 0}}],
+		     'Metering-Method' => [1],
+		     'Precedence' => [100],
+		     'Online' => [0],
+		     'Offline' => [0]}]},
+    Server ! AAAReq#aaa_request{events = [{pcc, install, [Rule1]}]},
+    {_, Resp0, _, _} =
+	receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp0),
+
+    DedEBI = 6,
+    GtpCDed = complete_create_bearer(Cntl, GtpC, DedEBI),
+
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 1, {2, 1, 0}} := DedEBI}, BearerMap),
+
+    %% Second RAR: install another rule bound to the SAME (QCI 1, ARP PL=2)
+    %% bearer -> aggregate QoS changes -> a rule_change Update Bearer Request
+    %% staging DedEBI.
+    #{aaa_session := SessionOpts2} = smf_context:test_cmd(gtp, CtxKey, info),
+    Rule2 = #{'Charging-Rule-Definition' =>
+		  [#{'Charging-Rule-Name' => [<<"msglvl-rule-2">>],
+		     'Flow-Information' =>
+			 [#{'Flow-Description' =>
+				[<<"permit out ip from any to assigned">>],
+			    'Flow-Direction' => [2]}],
+		     'QoS-Information' =>
+			 [#{'QoS-Class-Identifier' => 1,
+			    'Max-Requested-Bandwidth-UL' => 4000,
+			    'Max-Requested-Bandwidth-DL' => 5000,
+			    'Guaranteed-Bitrate-UL' => 4000,
+			    'Guaranteed-Bitrate-DL' => 5000,
+			    'Allocation-Retention-Priority' =>
+				#{'Priority-Level' => 2,
+				  'Pre-emption-Capability' => 1,
+				  'Pre-emption-Vulnerability' => 0}}],
+		     'Metering-Method' => [1],
+		     'Precedence' => [110],
+		     'Online' => [0],
+		     'Offline' => [0]}]},
+    Server ! AAAReq#aaa_request{session = SessionOpts2, events = [{pcc, install, [Rule2]}]},
+    {_, Resp1, _, _} =
+	receive {'$response', _, _, _, _} = R1 -> erlang:delete_element(1, R1)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp1),
+
+    UBRDed = recv_pdu(Cntl, ?TIMEOUT),
+    ?match(#gtp{type = update_bearer_request,
+		ie = #{{v2_bearer_context, 0} :=
+			   #v2_bearer_context{
+			      group = #{{v2_eps_bearer_id, 0} :=
+					    #v2_eps_bearer_id{eps_bearer_id = DedEBI}}}}},
+	   UBRDed),
+
+    %% Reject the WHOLE procedure at message level (context_not_found), with
+    %% NO Bearer Contexts to be modified -- a legitimate TS 29.274 rejection
+    %% (unlike a per-bearer Cause) that must not crash the gtp_context.
+    Reject = message_level_update_response(UBRDed, GtpCDed, context_not_found),
+    send_pdu(Cntl, GtpC, Reject),
+    ct:sleep(200),
+
+    %% The context must still be alive -- no function_clause crash.
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    ?equal([], outstanding_requests()),
+
+    %% context_not_found classifies as a terminal Cause: the rule_change
+    %% failure policy ran for the staged bearer, so its rule(s) come out of
+    %% pcc.rules.
+    {ok, RulesAfter} = smf_context:test_cmd(gtp, CtxKey, pcc_rules),
+    ?equal(false, maps:is_key([<<"msglvl-rule-1">>], RulesAfter)),
+    ?equal(false, maps:is_key([<<"msglvl-rule-2">>], RulesAfter)),
+
+    %% rule_change (unlike subscribed_qos) does not delete the bearer -- it
+    %% stays installed on its previously confirmed descriptor.
+    #{dedicated := DedicatedAfter} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?equal(true, maps:is_key(DedEBI, DedicatedAfter)),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
 %%--------------------------------------------------------------------
 gx_rar_two_dedicated_bearers_batched_update() ->
     [{doc, "TS 29.274 §7.2.15: a Gx RAR that changes the aggregate QoS of two "
@@ -6655,6 +6807,107 @@ gx_rar_two_dedicated_bearers_batched_delete(Config) ->
     #{dedicated := DedicatedAfter} = smf_context:test_cmd(gtp, CtxKey, info),
     ?assertNot(maps:is_key(DedEBI1, DedicatedAfter)),
     ?assertNot(maps:is_key(DedEBI2, DedicatedAfter)),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gx_rar_removed_rule_on_default_bearer_no_delete() ->
+    [{doc, "TS 23.401 §5.4.4.1: detect_removed_bearers can name the DEFAULT "
+	   "bearer's EBI (a Gx rule bound to the default bearer's {QCI,ARP}, "
+	   "when removed, leaves that {QCI,ARP} with no bound rule, same as a "
+	   "dedicated bearer's would). The PGW must NEVER emit a Delete Bearer "
+	   "Request naming the LBI -- that tears down the whole PDN connection"}].
+gx_rar_removed_rule_on_default_bearer_no_delete(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+
+    Self = self(),
+    ResponseFun =
+	fun(Request, Result, Avps, SOpts) ->
+		Self ! {'$response', Request, Result, Avps, SOpts} end,
+
+    %% The default bearer is created with QCI 8 / ARP PL=10,PCI=1,PVI=0 (see
+    %% session_options/1's 'QoS-Information' expectation), but nothing seeds
+    %% the bearer map's {qci_arp,...} entry for the DEFAULT bearer itself at
+    %% session creation (only dedicated bearers get one, on their Create
+    %% Bearer Response). Seed it directly -- this is exactly the BearerMap
+    %% shape detect_removed_bearers/3 operates on, whatever the code path
+    %% that produces it, and it's the precondition the LBI-leak requires.
+    #{context := #context{default_bearer_id = DefaultEBI0}} =
+	smf_context:test_cmd(gtp, CtxKey, info),
+    ok = smf_context:test_cmd(gtp, CtxKey, {put_bearer, {qci_arp, 8, {10, 1, 0}}, DefaultEBI0}),
+
+    %% Install a rule bound to that SAME {QCI,ARP} -- it binds onto the
+    %% default bearer (now present in the bearer map), no new bearer created.
+    #{aaa_session := SOpts0} = smf_context:test_cmd(gtp, CtxKey, info),
+    DefaultQARule =
+	#{'Charging-Rule-Definition' =>
+	      [#{'Charging-Rule-Name' => [<<"default-qa-rule">>],
+		 'Flow-Information' =>
+		     [#{'Flow-Description' =>
+			    [<<"permit out ip from any to assigned">>],
+			'Flow-Direction' => [2]}],
+		 'QoS-Information' =>
+		     [#{'QoS-Class-Identifier' => 8,
+			'Max-Requested-Bandwidth-UL' => 1000,
+			'Max-Requested-Bandwidth-DL' => 2000,
+			'Guaranteed-Bitrate-UL' => 1000,
+			'Guaranteed-Bitrate-DL' => 2000,
+			'Allocation-Retention-Priority' =>
+			    #{'Priority-Level' => 10,
+			      'Pre-emption-Capability' => 1,
+			      'Pre-emption-Vulnerability' => 0}}],
+		 'Metering-Method' => [1],
+		 'Precedence' => [100],
+		 'Online' => [0],
+		 'Offline' => [0]}]},
+    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SOpts0, events = [{pcc, install, [DefaultQARule]}]},
+    {_, Resp0, _, _} =
+	receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp0),
+
+    %% Still bound to the default bearer's EBI -- no dedicated bearer exists.
+    #{bearers := BearerMap, context := #context{default_bearer_id = DefaultEBI}} =
+	smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 8, {10, 1, 0}} := DefaultEBI}, BearerMap),
+    #{dedicated := DedicatedBefore} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?equal(0, map_size(DedicatedBefore)),
+
+    %% Now remove that rule in a second RAR. detect_removed_bearers finds
+    %% {8,{10,1,0}} with no bound rule left in NewPCC, maps it via the bearer
+    %% map to DefaultEBI -- exactly the LBI-leak scenario.
+    #{aaa_session := SOpts1} = smf_context:test_cmd(gtp, CtxKey, info),
+    RemoveCR = [{pcc, remove, [#{'Charging-Rule-Name' => [[<<"default-qa-rule">>]]}]}],
+    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SOpts1, events = RemoveCR},
+    {_, Resp1, _, _} =
+	receive {'$response', _, _, _, _} = R1 -> erlang:delete_element(1, R1)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp1),
+    ct:sleep(200),
+
+    %% No Delete Bearer Request must have been emitted -- naming the LBI would
+    %% tear down the whole PDN connection.
+    ?equal([], outstanding_requests()),
+    ?equal({ok, timeout}, recv_pdu(whereis(gtpc_client_server), undefined, 2000, ok)),
+
+    %% The session must still be up.
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
 
     delete_session(GtpC),
 

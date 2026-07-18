@@ -676,6 +676,31 @@ handle_response({update_dedicated_bearers, Kind, Staged},
 		     Data, BearerCtxs),
     {keep_state, Data1};
 
+handle_response({update_dedicated_bearers, Kind, Staged},
+		#gtp{type = update_bearer_response,
+		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause}}},
+		_Request, #{session := connected}, Data) ->
+    %% Legitimate message-level rejection with NO per-bearer Bearer Contexts
+    %% (e.g. context_not_found, TS 29.274 §7.2.16) -- there is nothing to fold
+    %% per-bearer, so apply the message-level Cause class to every EBI staged
+    %% for this batch instead of crashing with function_clause.
+    ?LOG(warning, "batched Update Bearer Response carried no Bearer Contexts; "
+	 "applying message-level Cause ~p to ~p staged bearer(s)",
+	 [Cause, map_size(Staged)]),
+    Data1a = case smf_gsn_lib:bearer_update_cause_class(Cause) of
+		 accepted ->
+		     maps:fold(fun(EBI, _Desc, D) -> commit_staged_descriptor(EBI, Staged, D) end,
+			      Data, Staged);
+		 temporary ->
+		     ?LOG(warning, "batched Update Bearer Request temporarily rejected (~p); "
+			  "change not applied this round", [Cause]),
+		     Data;
+		 terminal ->
+		     maps:fold(fun(EBI, _Desc, D) -> handle_update_bearer_failure(Kind, EBI, Cause, D) end,
+			      Data, Staged)
+	     end,
+    {keep_state, Data1a};
+
 handle_response({update_dedicated_bearers, Kind, Staged}, timeout,
 		#gtp{type = update_bearer_request}, #{session := connected}, Data) ->
     ?LOG(error, "batched Update Bearer Request timed out; ~p bearer(s) affected",
@@ -1012,7 +1037,18 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
 			|| {EBI, _QoS, _FlowInfo, Desc} <- ModifiedBearers]),
 	    send_dedicated_bearers_update(rule_change, Contexts, [], Staged, AccessTunnel)
     end,
-    RemovedEBIs = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
+    RemovedEBIs0 = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
+    %% The default bearer's EBI can appear here (its {qci_arp,QCI,ARP} entry
+    %% loses its last bound rule just like a dedicated bearer's would). Never
+    %% name the LBI in a Delete Bearer Request -- that tears down the whole
+    %% PDN connection (TS 23.401 §5.4.4.1).
+    RemovedEBIs = lists:filter(fun(EBI) -> EBI =/= DefaultEBI end, RemovedEBIs0),
+    case RemovedEBIs0 -- RemovedEBIs of
+	[] -> ok;
+	_  -> ?LOG(warning, "detect_removed_bearers named the default bearer ~p; "
+		   "ignoring (never emit a Delete Bearer Request for the LBI)",
+		   [DefaultEBI])
+    end,
     case RemovedEBIs of
 	[] -> ok;
 	_  -> send_dedicated_bearers_delete(RemovedEBIs, AccessTunnel)
@@ -1120,7 +1156,7 @@ apply_bearer_update_result(Kind,
 			   #v2_bearer_context{group = #{
 			       ?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI},
 			       ?'Cause' := #v2_cause{v2_cause = Cause}}},
-			   _Staged, Data) ->
+			   Staged, Data) ->
     case smf_gsn_lib:bearer_update_cause_class(Cause) of
 	temporary ->
 	    %% TODO(#34): re-attempt the Update when the UE is next reachable
@@ -1129,8 +1165,16 @@ apply_bearer_update_result(Kind,
 	    ?LOG(warning, "Update Bearer Request for dedicated bearer ~p temporarily "
 		 "rejected (~p); change not applied this round", [EBI, Cause]),
 	    Data;
+	terminal when is_map_key(EBI, Staged) ->
+	    handle_update_bearer_failure(Kind, EBI, Cause, Data);
 	terminal ->
-	    handle_update_bearer_failure(Kind, EBI, Cause, Data)
+	    %% This EBI was never staged for the current batch -- a response
+	    %% echoing an EBI we didn't ask to modify. Log and skip rather than
+	    %% removing rules or deleting a bearer we have no staged change for.
+	    ?LOG(warning, "Update Bearer Response named EBI ~p with terminal cause "
+		 "~p, but it was not staged for this procedure; skipping",
+		 [EBI, Cause]),
+	    Data
     end;
 apply_bearer_update_result(_Kind, BearerContext, _Staged, Data) ->
     %% A Bearer Context missing an EPS Bearer ID or Cause is malformed; skip it
@@ -1147,31 +1191,30 @@ commit_staged_descriptor(EBI, Staged, #{dedicated := Ded} = Data) ->
 
 %% Terminal Update failure: report the affected PCC rule(s) to the PCRF
 %% (TS 29.212 §4.5.6/§4.5.12). A failed subscribed-QoS Modify (M5) is not ignorable —
-%% delete the concerned bearer (TS 23.401 §5.4.2.2 step 7). A failed rule-change
-%% Modify (M3) removes the offending rule(s), re-provisions PFCP, and keeps the
-%% bearer on its previously confirmed descriptor.
+%% delete the concerned bearer (TS 23.401 §5.4.2.2 step 7); the bearer's rule(s) must
+%% also come out of pcc.rules (like every other removal path) or PFCP gets
+%% re-provisioned against an orphaned rule on the next unrelated change. A failed
+%% rule-change Modify (M3) removes the offending rule(s), re-provisions PFCP, and
+%% keeps the bearer on its previously confirmed descriptor.
 handle_update_bearer_failure(subscribed_qos, EBI, Cause,
 			     #{tunnels := #{'Access' := AccessTunnel}} = Data) ->
     ?LOG(warning, "subscribed-QoS Update for bearer ~p failed with ~p; deleting bearer "
 	 "(TS 23.401 5.4.2.2 step 7)", [EBI, Cause]),
     Data1 = case ebi_rule_names(EBI, Data) of
 		[]        -> Data;
-		RuleNames -> report_bearer_failure(RuleNames, Data)
+		RuleNames ->
+		    Data0 = remove_dedicated_bearer_rules(RuleNames, Data),
+		    report_bearer_failure(RuleNames, Data0)
 	    end,
     initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data1);
-handle_update_bearer_failure(rule_change, EBI, Cause,
-			     #{bearers := BearerMap, pfcp := PCtx0, pcc := PCC} = Data) ->
+handle_update_bearer_failure(rule_change, EBI, Cause, Data) ->
     ?LOG(warning, "rule-change Update for bearer ~p failed with ~p; removing rule(s) "
 	 "and reporting to PCRF", [EBI, Cause]),
     case ebi_rule_names(EBI, Data) of
 	[] ->
 	    Data;
 	RuleNames ->
-	    PCC1 = PCC#pcc_ctx{rules = maps:without(RuleNames, PCC#pcc_ctx.rules)},
-	    Data1 = case smf_pfcp_context:modify_session(PCC1, [], #{}, BearerMap, PCtx0) of
-			{ok, {PCtx, _, _}} -> Data#{pcc := PCC1, pfcp := PCtx};
-			{error, _}         -> Data#{pcc := PCC1}
-		    end,
+	    Data1 = remove_dedicated_bearer_rules(RuleNames, Data),
 	    report_bearer_failure(RuleNames, Data1)
     end.
 
@@ -1179,6 +1222,19 @@ ebi_rule_names(EBI, #{bearers := BearerMap, pcc := PCC}) ->
     case ebi_qci_arp(EBI, BearerMap) of
 	{QCI, ARP} -> affected_pcc_rules(QCI, ARP, PCC);
 	undefined  -> []
+    end.
+
+%% Remove RuleNames from the PCC context and re-provision PFCP accordingly.
+%% Shared by the rule_change and subscribed_qos terminal Update failure
+%% branches (both strip the bearer's rule(s) from pcc.rules the same way as
+%% every other removal path: the Delete Bearer Command prep, the Create Bearer
+%% failure handler).
+remove_dedicated_bearer_rules(RuleNames,
+			      #{bearers := BearerMap, pfcp := PCtx0, pcc := PCC} = Data) ->
+    PCC1 = PCC#pcc_ctx{rules = maps:without(RuleNames, PCC#pcc_ctx.rules)},
+    case smf_pfcp_context:modify_session(PCC1, [], #{}, BearerMap, PCtx0) of
+	{ok, {PCtx, _, _}} -> Data#{pcc := PCC1, pfcp := PCtx};
+	{error, _}         -> Data#{pcc := PCC1}
     end.
 
 %% Prep one dedicated bearer named in a Delete Bearer Command for deactivation:
