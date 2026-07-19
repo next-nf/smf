@@ -348,7 +348,8 @@ init({[Socket, Info, Version, Interface,
       interface      => Interface,
       node_selection => NodeSelect,
       aaa_opts       => AAAOpts,
-      tunnels        => #{'Access' => AccessTunnel}},
+      tunnels        => #{'Access' => AccessTunnel},
+      async_pending  => #{}},
 
     {ok, State, LoopData} = Interface:init(Opts, Data),
     gen_statem:enter_loop(?MODULE, LoopOpts, State, LoopData).
@@ -599,6 +600,17 @@ handle_event(info, {'$reply', Promise, Handler, Msg, _Opts}, _State, Data) ->
 	    {keep_state, Data1, Actions}
     end;
 
+handle_event(info, {'$async_reply', ReqId, Result}, State,
+	     #{async_pending := P} = Data) when is_map_key(ReqId, P) ->
+    async_dispatch(ReqId, Result, State, Data);
+
+handle_event(info, {{'$async_down', ReqId}, _MRef, process, _Pid, Reason}, State,
+	     #{async_pending := P} = Data) when is_map_key(ReqId, P) ->
+    async_dispatch(ReqId, {error, {worker_down, Reason}}, State, Data);
+
+handle_event(info, {{'$async_down', _ReqId}, _MRef, process, _Pid, _Reason}, _State, _Data) ->
+    keep_state_and_data;
+
 handle_event(info, {update_session, Session, Events}, _State, _Data) ->
     ?LOG(debug, "SessionEvents: ~p~n       Events: ~p", [Session, Events]),
     Actions = [{next_event, internal, {session, Ev, Session}} || Ev <- Events],
@@ -788,6 +800,22 @@ generic_error(#request{socket = Socket} = Request,
 	   end,
     Reply = Handler:build_response({MsgType, TEID, Error}),
     smf_gtp_c_socket:send_response(Request, Reply#gtp{seq_no = SeqNo}, SeqNo /= 0).
+
+%%%===================================================================
+%%% Async reply dispatch
+%%%===================================================================
+
+async_dispatch(ReqId, Result, State, Data) ->
+    try async_m:handle_reply(ReqId, Result, State, Data) of
+	no_entry ->
+	    %% race: entry already consumed; nothing to do
+	    keep_state_and_data;
+	FsmResult ->
+	    FsmResult
+    catch
+	throw:#ctx_err{} = CtxErr:St ->
+	    handle_ctx_error(CtxErr, St, State, Data)
+    end.
 
 %%%===================================================================
 %%% AAA reply dispatch
