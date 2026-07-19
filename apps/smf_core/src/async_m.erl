@@ -10,6 +10,7 @@
 -export([get_state/0, put_state/1, modify_state/1,
          get_data/0, put_data/1, modify_data/1,
          await/1, lift/1]).
+-export([run_async/5, handle_reply/4, resume/2]).
 
 -export_type([async_m/0, result/0]).
 
@@ -69,3 +70,39 @@ lift(ok)          -> return(ok);
 lift({ok, V})     -> return(V);
 lift({error, E})  -> fail(E);
 lift(V)           -> return(V).
+
+-spec run_async(async_m(),
+                fun((term(), term(), term()) -> term()),
+                fun((term(), term(), term()) -> term()),
+                term(), map()) -> term().
+run_async(M, OkFun, ErrFun, S, D) ->
+    dispatch(run(M, S, D), OkFun, ErrFun).
+
+dispatch({{ok, V}, S1, D1}, OkFun, _ErrFun) ->
+    OkFun(V, S1, D1);
+dispatch({{error, R}, S1, D1}, _OkFun, ErrFun) ->
+    ErrFun(R, S1, D1);
+dispatch({{await, ReqId, Conts}, S1, D1}, OkFun, ErrFun) ->
+    Pending = maps:get(async_pending, D1, #{}),
+    D2 = D1#{async_pending => Pending#{ReqId => {Conts, OkFun, ErrFun}}},
+    {next_state, S1, D2}.
+
+-spec handle_reply(term(), term(), term(), map()) -> term() | no_entry.
+handle_reply(ReqId, Reply, S, D) ->
+    Pending = maps:get(async_pending, D, #{}),
+    case maps:take(ReqId, Pending) of
+        {{Conts, OkFun, ErrFun}, Pending1} ->
+            D1 = D#{async_pending => Pending1},
+            M = resume(Conts, Reply),
+            run_async(M, OkFun, ErrFun, S, D1);
+        error ->
+            no_entry
+    end.
+
+%% Conts is ordered outermost-first ([Fn, ..., F2, F1]); the innermost F1
+%% receives the raw reply, its result feeds F2, and so on outward.
+-spec resume([fun()], term()) -> async_m().
+resume(Conts, Reply) ->
+    [Innermost | Rest] = lists:reverse(Conts),
+    M0 = Innermost(Reply),
+    lists:foldl(fun(F, M) -> '>>='(M, F) end, M0, Rest).
