@@ -5705,7 +5705,8 @@ gx_rar_dedicated_bearer_create(Config) ->
                        'Metering-Method' => [1],
                        'Precedence' => [100],
                        'Online' => [0],
-                       'Offline' => [0]}]},
+                       'Offline' => [0]}],
+                'Resource-Allocation-Notification' => [0]},
     InstCR = [{pcc, install, [DedRule]}],
     Server ! AAAReq#aaa_request{events = InstCR},
 
@@ -5787,24 +5788,28 @@ gx_rar_dedicated_bearer_create(Config) ->
     #{dedicated := Dedicated} = smf_context:test_cmd(gtp, CtxKey, info),
     ?match(#{DedEBI := #ded_bearer{ebi = DedEBI, qci = 1, arp = {2, 1, 0}}}, Dedicated),
 
-    %% Verify that a Gx CCR-Update was sent to report the new bearer
-    %% with Bearer-Operation = ESTABLISHMENT and Bearer-Identifier = <<EBI>>
+    %% Verify that a Gx CCR-Update was sent to confirm the successful resource
+    %% allocation via a Charging-Rule-Report naming the bound rule ACTIVE with
+    %% the SUCCESSFUL_RESOURCE_ALLOCATION event trigger (TS 29.212 4.5.2.0),
+    %% not the old Bearer-Operation/QoS-Information report.
     BearerCCRU =
 	lists:filter(
-	  fun({_, {smf_aaa_pcf, ccr_update,
-		   [_, _, SOpts, _]}, _}) ->
+	  fun({_, {smf_aaa_pcf, ccr_update, [_, _, SOpts, _]}, _}) ->
 		  case SOpts of
-		      #{'Bearer-Operation' :=
-			    ?'DIAMETER_GX_BEARER-OPERATION_ESTABLISHMENT',
-			'Bearer-Identifier' := <<DedEBI:8>>} ->
-			  true;
-		      _ ->
-			  false
+		      #{'Charging-Rule-Report' := [#{'PCC-Rule-Status' :=
+							 [?'DIAMETER_GX_PCC-RULE-STATUS_ACTIVE']} | _],
+			'Event-Trigger' :=
+			    ?'DIAMETER_GX_EVENT-TRIGGER_SUCCESSFUL_RESOURCE_ALLOCATION'} -> true;
+		      _ -> false
 		  end;
-	     (_) ->
-		  false
+	     (_) -> false
 	  end, meck:history(smf_aaa_pcf)),
     ?match([_], BearerCCRU),
+
+    %% The default bearer's session-level QoS-Information (QCI 8) must survive
+    %% the dedicated bearer's establishment report unclobbered.
+    #{aaa_session := Sess} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{'QoS-Class-Identifier' := 8}, maps:get('QoS-Information', Sess)),
 
     delete_session(GtpC),
 
