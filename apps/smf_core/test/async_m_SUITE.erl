@@ -7,7 +7,8 @@ all() ->
     [return_wraps, bind_sequences, fail_short_circuits, bind_threads_state,
      accessors_read_write, await_captures_rest, lift_injects,
      run_async_complete, run_async_error, run_async_parks, resume_completes,
-     resume_multiple_suspends, resume_nested_ordering].
+     resume_multiple_suspends, resume_nested_ordering,
+     async_apply_roundtrip, async_apply_worker_crash].
 
 %% run a do-block against a trivial (State, Data) = (st, dt)
 return_wraps(_Config) ->
@@ -120,4 +121,28 @@ resume_nested_ordering(_Config) ->
     {next_state, st, D1} = async_m:run_async(M, Ok, Err, st, #{}),
     %% reply 10 -> inner 10+1=11 -> outer 11*2=22
     {done, 22, _} = async_m:handle_reply(req1, 10, st, D1),
+    ok.
+
+async_apply_roundtrip(_Config) ->
+    %% drive one full suspend/resume cycle using a real worker process
+    ReqId0 = async_m:async_apply(fun() -> 6 * 7 end),
+    Reply = receive
+                {'$async_reply', ReqId0, R} -> R
+            after 2000 -> ct:fail(no_reply)
+            end,
+    {ok, 42} = Reply,
+    ok.
+
+async_apply_worker_crash(_Config) ->
+    ReqId0 = async_m:async_apply(fun() -> error(kaboom) end),
+    %% no '$async_reply'; a tagged DOWN arrives instead
+    receive
+        {'$async_reply', ReqId0, _} -> ct:fail(unexpected_reply)
+    after 0 -> ok
+    end,
+    receive
+        {{'$async_down', ReqId0}, _MRef, process, _Pid, Reason} ->
+            {error, {kaboom, _}} = {error, Reason}
+    after 2000 -> ct:fail(no_down)
+    end,
     ok.

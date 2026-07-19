@@ -10,7 +10,7 @@
 -export([get_state/0, put_state/1, modify_state/1,
          get_data/0, put_data/1, modify_data/1,
          await/1, lift/1]).
--export([run_async/5, handle_reply/4, resume/2]).
+-export([run_async/5, handle_reply/4, resume/2, async_apply/1]).
 
 -export_type([async_m/0, result/0]).
 
@@ -106,3 +106,14 @@ resume(Conts, Reply) ->
     [Innermost | Rest] = lists:reverse(Conts),
     M0 = Innermost(Reply),
     lists:foldl(fun(F, M) -> '>>='(M, F) end, M0, Rest).
+
+%% Spawn a monitored worker. Success -> {'$async_reply', ReqId, {ok, Result}}.
+%% Crash  -> tagged DOWN {{'$async_down', ReqId}, MRef, process, Pid, Reason}.
+-spec async_apply(fun(() -> term())) -> reference().
+async_apply(Fun) ->
+    ReqId = make_ref(),
+    Owner = self(),
+    _ = spawn_opt(
+          fun() -> Owner ! {'$async_reply', ReqId, {ok, Fun()}} end,
+          [{monitor, [{tag, {'$async_down', ReqId}}]}]),
+    ReqId.
