@@ -79,20 +79,20 @@ run_async_parks(_Config) ->
                        async_m:return(R)]),
     Ok = fun(V, _S, D) -> {done, V, D} end,
     Err = fun(R, _S, _D) -> {err, R} end,
-    {next_state, st, Data1} = async_m:run_async(M, Ok, Err, st, #{}),
-    true = is_map_key(req1, maps:get(async_pending, Data1)),
+    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{}, dt),
+    true = is_map_key(req1, maps:get(async_pending, State1)),
     ok.
 
 resume_completes(_Config) ->
     M = do([async_m || R <- async_m:await(req1),
                        async_m:return(R * 10)]),
-    Ok = fun(V, _S, D) -> {done, V, D} end,
+    Ok = fun(V, S, _D) -> {done, V, S} end,
     Err = fun(R, _S, _D) -> {err, R} end,
-    {next_state, st, Data1} = async_m:run_async(M, Ok, Err, st, #{}),
-    %% reply 4 arrives -> 4 * 10 = 40, and the entry is removed
-    {done, 40, Data2} = async_m:handle_reply(req1, 4, st, Data1),
-    #{} = maps:get(async_pending, Data2),
-    no_entry = async_m:handle_reply(req1, 4, st, Data2),
+    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{}, dt),
+    %% reply 4 arrives -> 4 * 10 = 40, and the entry is removed from the STATE
+    {done, 40, State2} = async_m:handle_reply(req1, 4, State1, dt),
+    #{} = maps:get(async_pending, State2),
+    no_entry = async_m:handle_reply(req1, 4, State2, dt),
     ok.
 
 resume_multiple_suspends(_Config) ->
@@ -102,10 +102,10 @@ resume_multiple_suspends(_Config) ->
                        async_m:return(A + B)]),
     Ok = fun(V, _S, D) -> {done, V, D} end,
     Err = fun(R, _S, _D) -> {err, R} end,
-    {next_state, st, D1} = async_m:run_async(M, Ok, Err, st, #{}),
-    {next_state, st, D2} = async_m:handle_reply(reqA, 1, st, D1),
-    true = is_map_key(reqB, maps:get(async_pending, D2)),
-    {done, 3, _} = async_m:handle_reply(reqB, 2, st, D2),
+    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{}, dt),
+    {next_state, State2, dt} = async_m:handle_reply(reqA, 1, State1, dt),
+    true = is_map_key(reqB, maps:get(async_pending, State2)),
+    {done, 3, _} = async_m:handle_reply(reqB, 2, State2, dt),
     ok.
 
 resume_nested_ordering(_Config) ->
@@ -118,9 +118,9 @@ resume_nested_ordering(_Config) ->
                        async_m:return(A * 2)]),
     Ok = fun(V, _S, D) -> {done, V, D} end,
     Err = fun(R, _S, _D) -> {err, R} end,
-    {next_state, st, D1} = async_m:run_async(M, Ok, Err, st, #{}),
+    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{}, dt),
     %% reply 10 -> inner 10+1=11 -> outer 11*2=22
-    {done, 22, _} = async_m:handle_reply(req1, 10, st, D1),
+    {done, 22, _} = async_m:handle_reply(req1, 10, State1, dt),
     ok.
 
 async_apply_roundtrip(_Config) ->
@@ -154,6 +154,6 @@ resume_await_tail(_Config) ->
                        async_m:await(reqX)]),
     Ok = fun(V, _S, D) -> {done, V, D} end,
     Err = fun(R, _S, _D) -> {err, R} end,
-    {next_state, st, D1} = async_m:run_async(M, Ok, Err, st, #{}),
-    {done, 99, _} = async_m:handle_reply(reqX, 99, st, D1),
+    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{}, dt),
+    {done, 99, _} = async_m:handle_reply(reqX, 99, State1, dt),
     ok.

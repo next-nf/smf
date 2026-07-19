@@ -42,7 +42,7 @@
 
 %% init_state/0
 init_state() ->
-    #{session => init}.
+    #{session => init, async_pending => #{}}.
 
 sx_report(#pfcp{type = session_report_request, seid = SEID} = Report) ->
     apply2context(#seid_key{seid = SEID}, sx_report, [Report]).

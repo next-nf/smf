@@ -348,8 +348,7 @@ init({[Socket, Info, Version, Interface,
       interface      => Interface,
       node_selection => NodeSelect,
       aaa_opts       => AAAOpts,
-      tunnels        => #{'Access' => AccessTunnel},
-      async_pending  => #{}},
+      tunnels        => #{'Access' => AccessTunnel}},
 
     {ok, State, LoopData} = Interface:init(Opts, Data),
     gen_statem:enter_loop(?MODULE, LoopOpts, State, LoopData).
@@ -600,12 +599,12 @@ handle_event(info, {'$reply', Promise, Handler, Msg, _Opts}, _State, Data) ->
 	    {keep_state, Data1, Actions}
     end;
 
-handle_event(info, {'$async_reply', ReqId, Result}, State,
-	     #{async_pending := P} = Data) when is_map_key(ReqId, P) ->
+handle_event(info, {'$async_reply', ReqId, Result},
+	     #{async_pending := P} = State, Data) when is_map_key(ReqId, P) ->
     async_dispatch(ReqId, Result, State, Data);
 
-handle_event(info, {{'$async_down', ReqId}, _MRef, process, _Pid, Reason}, State,
-	     #{async_pending := P} = Data) when is_map_key(ReqId, P) ->
+handle_event(info, {{'$async_down', ReqId}, _MRef, process, _Pid, Reason},
+	     #{async_pending := P} = State, Data) when is_map_key(ReqId, P) ->
     async_dispatch(ReqId, {error, {worker_down, Reason}}, State, Data);
 
 handle_event(info, {{'$async_down', _ReqId}, _MRef, process, _Pid, _Reason}, _State, _Data) ->
