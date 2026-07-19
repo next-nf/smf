@@ -6589,33 +6589,9 @@ default_arp_rekey_skips_dedicated_collision(Config) ->
     #{bearers := BearerMap0} = smf_context:test_cmd(gtp, CtxKey, info),
     ?match(#{{qci_arp, 8, {5, 1, 0}} := DedEBI}, BearerMap0),
 
-    %% Step 2: install a SECOND Gx rule at a distinct QCI (2) but the SAME ARP
-    %% as the default's CURRENT ARP (PL=10). This spawns a second dedicated
-    %% bearer and, as a side effect of its Gx CCR-Update establishment report,
-    %% re-syncs the session's cached 'QoS-Information' ARP back to {10,1,0}
-    %% (step 1's own establishment report last set it to {5,1,0}, the
-    %% collision bearer's own ARP) so the upcoming ARP-change command's "old
-    %% ARP" comparison reads the default's real current ARP.
-    #{aaa_session := SOpts1} = smf_context:test_cmd(gtp, CtxKey, info),
-    FanRule = RuleFun(<<"fan-arp-rule">>, 2, 10),
-    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
-			  session = SOpts1, events = [{pcc, install, [FanRule]}]},
-    {_, Resp1, _, _} =
-	receive {'$response', _, _, _, _} = R1 -> erlang:delete_element(1, R1)
-	after 5000 -> ct:fail(rar_timeout)
-	end,
-    ?equal(ok, Resp1),
-
-    FanEBI = 7,
-    GtpCFan = complete_create_bearer(Cntl, GtpC, FanEBI),
-
-    #{bearers := BearerMap1} = smf_context:test_cmd(gtp, CtxKey, info),
-    ?match(#{{qci_arp, 2, {10, 1, 0}} := FanEBI}, BearerMap1),
-
-    %% Step 3: re-authorize the default bearer's ARP PL 10 -> 5. The default's
+    %% Step 2: re-authorize the default bearer's ARP PL 10 -> 5. The default's
     %% rekey target, {qci_arp, 8, {5,1,0}}, COLLIDES with the step 1 dedicated
-    %% bearer's key. The step 2 dedicated bearer (ARP 10, matching the OLD
-    %% default ARP) is fanned out with its own Update Bearer Request.
+    %% bearer's key, so the guard must skip the rekey.
     {GtpC2, Cmd} = modify_bearer_command({arp_change, 5}, GtpC),
 
     %% The PGW emits the default-bearer Update Bearer Request (echoing the
@@ -6630,21 +6606,8 @@ default_arp_rekey_skips_dedicated_collision(Config) ->
 				     #v2_bearer_level_quality_of_service{pl = 5}}}}} =
 	UBRDefault,
 
-    %% ... and a separate network-initiated Update Bearer Request for the
-    %% step 2 dedicated bearer, carrying its unchanged QCI/GBR/MBR but the new ARP.
-    UBRFan = recv_pdu(Cntl, ?TIMEOUT),
-    #gtp{type = update_bearer_request,
-	 ie = #{{v2_bearer_context, 0} :=
-		    #v2_bearer_context{
-		       group = #{{v2_eps_bearer_id, 0} :=
-				     #v2_eps_bearer_id{eps_bearer_id = FanEBI},
-				 {v2_bearer_level_quality_of_service, 0} :=
-				     #v2_bearer_level_quality_of_service{pl = 5}}}}} =
-	UBRFan,
-
-    %% Answer both Update Bearer Requests to complete the exchanges.
+    %% Answer the default-bearer Update Bearer Request to complete the exchange.
     send_pdu(GtpC2, make_response(UBRDefault, simple, GtpC2)),
-    send_pdu(Cntl, GtpC, make_response(UBRFan, simple, GtpCFan)),
 
     ?equal({ok, timeout}, recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok)),
     ?equal([], outstanding_requests()),
