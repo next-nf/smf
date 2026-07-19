@@ -79,7 +79,7 @@ run_async_parks(_Config) ->
                        async_m:return(R)]),
     Ok = fun(V, _S, D) -> {done, V, D} end,
     Err = fun(R, _S, _D) -> {err, R} end,
-    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{}, dt),
+    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{async_pending => #{}}, dt),
     true = is_map_key(req1, maps:get(async_pending, State1)),
     ok.
 
@@ -88,7 +88,7 @@ resume_completes(_Config) ->
                        async_m:return(R * 10)]),
     Ok = fun(V, S, _D) -> {done, V, S} end,
     Err = fun(R, _S, _D) -> {err, R} end,
-    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{}, dt),
+    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{async_pending => #{}}, dt),
     %% reply 4 arrives -> 4 * 10 = 40, and the entry is removed from the STATE
     {done, 40, State2} = async_m:handle_reply(req1, 4, State1, dt),
     #{} = maps:get(async_pending, State2),
@@ -102,7 +102,7 @@ resume_multiple_suspends(_Config) ->
                        async_m:return(A + B)]),
     Ok = fun(V, _S, D) -> {done, V, D} end,
     Err = fun(R, _S, _D) -> {err, R} end,
-    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{}, dt),
+    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{async_pending => #{}}, dt),
     {next_state, State2, dt} = async_m:handle_reply(reqA, 1, State1, dt),
     true = is_map_key(reqB, maps:get(async_pending, State2)),
     {done, 3, _} = async_m:handle_reply(reqB, 2, State2, dt),
@@ -118,7 +118,7 @@ resume_nested_ordering(_Config) ->
                        async_m:return(A * 2)]),
     Ok = fun(V, _S, D) -> {done, V, D} end,
     Err = fun(R, _S, _D) -> {err, R} end,
-    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{}, dt),
+    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{async_pending => #{}}, dt),
     %% reply 10 -> inner 10+1=11 -> outer 11*2=22
     {done, 22, _} = async_m:handle_reply(req1, 10, State1, dt),
     ok.
@@ -154,6 +154,6 @@ resume_await_tail(_Config) ->
                        async_m:await(reqX)]),
     Ok = fun(V, _S, D) -> {done, V, D} end,
     Err = fun(R, _S, _D) -> {err, R} end,
-    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{}, dt),
+    {next_state, State1, dt} = async_m:run_async(M, Ok, Err, #{async_pending => #{}}, dt),
     {done, 99, _} = async_m:handle_reply(reqX, 99, State1, dt),
     ok.

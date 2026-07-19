@@ -86,16 +86,19 @@ dispatch({{await, ReqId, Conts}, S1, D1}, OkFun, ErrFun) ->
     %% The pending registry lives in the gen_statem STATE (not Data): mutating it
     %% is a state-term change, which is what makes gen_statem re-deliver postponed
     %% events on drain — so a caller can gate purely on async_pending in State.
-    Pending = maps:get(async_pending, S1, #{}),
-    S2 = S1#{async_pending => Pending#{ReqId => {Conts, OkFun, ErrFun}}},
+    %% Match (not maps:get/3 with a default) so a State that lost the registry —
+    %% e.g. a procedure that replaced State with a bare map — fails loudly instead
+    %% of silently orphaning every other parked request.
+    #{async_pending := Pending} = S1,
+    S2 = S1#{async_pending := Pending#{ReqId => {Conts, OkFun, ErrFun}}},
     {next_state, S2, D1}.
 
 -spec handle_reply(term(), term(), map(), term()) -> term() | no_entry.
 handle_reply(ReqId, Reply, S, D) ->
-    Pending = maps:get(async_pending, S, #{}),
+    #{async_pending := Pending} = S,
     case maps:take(ReqId, Pending) of
         {{Conts, OkFun, ErrFun}, Pending1} ->
-            S1 = S#{async_pending => Pending1},
+            S1 = S#{async_pending := Pending1},
             M = resume(Conts, Reply),
             run_async(M, OkFun, ErrFun, S1, D);
         error ->
