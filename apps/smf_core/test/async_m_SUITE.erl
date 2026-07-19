@@ -8,7 +8,7 @@ all() ->
      accessors_read_write, await_captures_rest, lift_injects,
      run_async_complete, run_async_error, run_async_parks, resume_completes,
      resume_multiple_suspends, resume_nested_ordering,
-     async_apply_roundtrip, async_apply_worker_crash].
+     async_apply_roundtrip, async_apply_worker_crash, resume_await_tail].
 
 %% run a do-block against a trivial (State, Data) = (st, dt)
 return_wraps(_Config) ->
@@ -145,4 +145,15 @@ async_apply_worker_crash(_Config) ->
             {error, {kaboom, _}} = {error, Reason}
     after 2000 -> ct:fail(no_down)
     end,
+    ok.
+
+resume_await_tail(_Config) ->
+    %% a do-block ENDING in a bare await yields Conts = [] -> resume must not crash;
+    %% the reply becomes the result.
+    M = do([async_m || _ <- async_m:return(unit),
+                       async_m:await(reqX)]),
+    Ok = fun(V, _S, D) -> {done, V, D} end,
+    Err = fun(R, _S, _D) -> {err, R} end,
+    {next_state, st, D1} = async_m:run_async(M, Ok, Err, st, #{}),
+    {done, 99, _} = async_m:handle_reply(reqX, 99, st, D1),
     ok.

@@ -102,6 +102,8 @@ handle_reply(ReqId, Reply, S, D) ->
 %% Conts is ordered outermost-first ([Fn, ..., F2, F1]); the innermost F1
 %% receives the raw reply, its result feeds F2, and so on outward.
 -spec resume([fun()], term()) -> async_m().
+resume([], Reply) ->
+    return(Reply);
 resume(Conts, Reply) ->
     [Innermost | Rest] = lists:reverse(Conts),
     M0 = Innermost(Reply),
