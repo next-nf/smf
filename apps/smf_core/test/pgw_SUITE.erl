@@ -752,6 +752,7 @@ common() ->
      gx_asr,
      gx_rar,
      gx_rar_dedicated_bearer_create,
+     gx_rar_dedicated_bearer_create_unarmed,
      default_bearer_qci_arp_binding_entry,
      default_qci_arp_rule_binds_to_default,
      gx_dedicated_bearer_create_failure,
@@ -1037,6 +1038,10 @@ init_per_testcase(create_session_multi_bearer, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(gx_rar_dedicated_bearer_create, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(gx_rar_dedicated_bearer_create_unarmed, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -5808,6 +5813,154 @@ gx_rar_dedicated_bearer_create(Config) ->
 
     %% The default bearer's session-level QoS-Information (QCI 8) must survive
     %% the dedicated bearer's establishment report unclobbered.
+    #{aaa_session := Sess} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{'QoS-Class-Identifier' := 8}, maps:get('QoS-Information', Sess)),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gx_rar_dedicated_bearer_create_unarmed() ->
+    [{doc, "Check that a Gx RAR with QCI/ARP mismatch creates a dedicated "
+	   "bearer, but sends NO SUCCESSFUL_RESOURCE_ALLOCATION confirmation "
+	   "when the PCRF did not arm Resource-Allocation-Notification"}].
+gx_rar_dedicated_bearer_create_unarmed(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun =
+        fun(Request, Result, Avps, SOpts) ->
+                Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+                          session = SessionOpts, events = []},
+
+    %% Install a PCC rule with a QCI/ARP different from the default bearer
+    %% to trigger dedicated bearer creation (BCM = UE_NW set in init_per_testcase),
+    %% but WITHOUT Resource-Allocation-Notification -- the PCRF did not arm it.
+    DedRule = #{'Charging-Rule-Definition' =>
+                    [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+                       'Flow-Information' =>
+                           [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+                              'Flow-Direction' => [2]}],
+                       'QoS-Information' =>
+                           [#{'QoS-Class-Identifier' => 1,
+                              'Allocation-Retention-Priority' =>
+                                  #{'Priority-Level' => 2,
+                                    'Pre-emption-Capability' => 1,
+                                    'Pre-emption-Vulnerability' => 0}}],
+                       'Metering-Method' => [1],
+                       'Precedence' => [100],
+                       'Online' => [0],
+                       'Offline' => [0]}]},
+    InstCR = [{pcc, install, [DedRule]}],
+    Server ! AAAReq#aaa_request{events = InstCR},
+
+    %% Wait for RAR reply — should be ok
+    {_, Resp0, _, _} =
+        receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+        after 5000 -> ct:fail(rar_timeout)
+        end,
+    ?equal(ok, Resp0),
+
+    %% The PGW should still send a Create Bearer Request -- the bearer is
+    %% created regardless of whether the PCRF wants a confirmation.
+    CBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = create_bearer_request}, CBReq),
+    #gtp{seq_no = CBSeqNo,
+         ie = #{{v2_bearer_context, 0} :=
+                    #v2_bearer_context{
+                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 1} :=
+                                     #v2_fully_qualified_tunnel_endpoint_identifier{
+                                        interface_type = ?'S5/S8-U PGW',
+                                        key = PgwUTEI,
+                                        ipv4 = PgwUIP4,
+                                        ipv6 = PgwUIP6},
+                                 {v2_charging_id, 0} := #v2_charging_id{}
+                                }
+                      }}} = CBReq,
+
+    %% Build SGW F-TEID for the new dedicated bearer (use existing GtpC data tei)
+    GtpCDed = gtp_context_new_teids(GtpC),
+    #gtpc{local_ip = LocalIP,
+          local_data_tei = SgwUTEI,
+          remote_control_tei = RemoteCntlTEI} = GtpCDed,
+    DedEBI = 6,
+
+    %% Echo back PGW GTP-U F-TEID and add SGW GTP-U F-TEID
+    PgwUFTEID =
+        if PgwUIP4 /= undefined, size(PgwUIP4) =:= 4 ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI, ipv4 = PgwUIP4};
+           PgwUIP6 /= undefined, size(PgwUIP6) =:= 16 ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI, ipv6 = PgwUIP6};
+           true ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI}
+        end,
+    SgwUFTEID =
+        case LocalIP of
+            {_,_,_,_} ->
+                #v2_fully_qualified_tunnel_endpoint_identifier{
+                   instance = 3, interface_type = ?'S5/S8-U SGW',
+                   key = SgwUTEI, ipv4 = smf_inet:ip2bin(LocalIP)};
+            {_,_,_,_,_,_,_,_} ->
+                #v2_fully_qualified_tunnel_endpoint_identifier{
+                   instance = 3, interface_type = ?'S5/S8-U SGW',
+                   key = SgwUTEI, ipv6 = smf_inet:ip2bin(LocalIP)}
+        end,
+    CBRespIEs = [#v2_cause{v2_cause = request_accepted},
+                 #v2_bearer_context{
+                    group = [#v2_cause{v2_cause = request_accepted},
+                             #v2_eps_bearer_id{eps_bearer_id = DedEBI},
+                             PgwUFTEID,
+                             SgwUFTEID]}],
+    CBResp = #gtp{version = v2, type = create_bearer_response,
+                  tei = RemoteCntlTEI, seq_no = CBSeqNo, ie = CBRespIEs},
+    send_pdu(Cntl, GtpC, CBResp),
+
+    %% Allow response to be processed
+    ct:sleep(200),
+
+    %% Verify the bearer was installed with QCI/ARP key -- the dedicated
+    %% bearer creation itself does not depend on the arming flag.
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{qci_arp, 1, {2, 1, 0}} := DedEBI}, BearerMap),
+    ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap),
+
+    %% Verify the dedicated bearer descriptor was stored
+    #{dedicated := Dedicated} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{DedEBI := #ded_bearer{ebi = DedEBI, qci = 1, arp = {2, 1, 0}}}, Dedicated),
+
+    %% Verify that NO Gx CCR-Update confirming SUCCESSFUL_RESOURCE_ALLOCATION
+    %% was sent -- the PCRF did not arm Resource-Allocation-Notification on
+    %% this rule, so the report must be gated (TS 29.212 4.5.2.0).
+    Armed = lists:filter(
+	      fun({_, {smf_aaa_pcf, ccr_update, [_, _, SOpts, _]}, _}) ->
+		      maps:get('Event-Trigger', SOpts, undefined) =:=
+			  ?'DIAMETER_GX_EVENT-TRIGGER_SUCCESSFUL_RESOURCE_ALLOCATION';
+		 (_) -> false
+	      end, meck:history(smf_aaa_pcf)),
+    ?equal([], Armed),
+
+    %% The default bearer's session-level QoS-Information (QCI 8) must survive
+    %% dedicated bearer creation unclobbered, whether or not a report is sent.
     #{aaa_session := Sess} = smf_context:test_cmd(gtp, CtxKey, info),
     ?match(#{'QoS-Class-Identifier' := 8}, maps:get('QoS-Information', Sess)),
 
