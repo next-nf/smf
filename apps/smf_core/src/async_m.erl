@@ -7,6 +7,9 @@
 -behaviour(monad).
 -export(['>>='/2, return/1, fail/1]).
 -export([run/3]).
+-export([get_state/0, put_state/1, modify_state/1,
+         get_data/0, put_data/1, modify_data/1,
+         await/1, lift/1]).
 
 -export_type([async_m/0, result/0]).
 
@@ -39,3 +42,30 @@ fail(E) ->
 -spec run(async_m(), term(), term()) -> {result(), term(), term()}.
 run(M, S, D) ->
     M(S, D).
+
+-spec get_state() -> async_m().
+get_state() -> fun(S, D) -> {{ok, S}, S, D} end.
+
+-spec put_state(term()) -> async_m().
+put_state(S1) -> fun(_S, D) -> {{ok, ok}, S1, D} end.
+
+-spec modify_state(fun((term()) -> term())) -> async_m().
+modify_state(F) -> fun(S, D) -> {{ok, ok}, F(S), D} end.
+
+-spec get_data() -> async_m().
+get_data() -> fun(S, D) -> {{ok, D}, S, D} end.
+
+-spec put_data(term()) -> async_m().
+put_data(D1) -> fun(S, _D) -> {{ok, ok}, S, D1} end.
+
+-spec modify_data(fun((term()) -> term())) -> async_m().
+modify_data(F) -> fun(S, D) -> {{ok, ok}, S, F(D)} end.
+
+-spec await(term()) -> async_m().
+await(ReqId) -> fun(S, D) -> {{await, ReqId, []}, S, D} end.
+
+-spec lift(ok | {ok, term()} | {error, term()} | term()) -> async_m().
+lift(ok)          -> return(ok);
+lift({ok, V})     -> return(V);
+lift({error, E})  -> fail(E);
+lift(V)           -> return(V).
