@@ -608,7 +608,7 @@ handle_response({create_bearer, PgwFTEID},
 				   retry_bearers :=
 				       maps:remove(PgwFTEID,
 						   maps:get(retry_bearers, Data0, #{}))},
-		    Data = report_bearer_establishment(PgwBI, QCI, ARP, Data1),
+		    Data = report_successful_resource_allocation(QCI, ARP, Data1),
 		    {keep_state, Data};
 		error ->
 		    keep_state_and_data
@@ -1313,25 +1313,42 @@ rekey_default_qci_arp(DefaultEBI, NewARP, #{bearers := BearerMap} = Data) ->
 	    Data
     end.
 
-%% Report new dedicated bearer to PCRF via Gx CCR-Update
-%% with Bearer-Operation = ESTABLISHMENT and the PGW-assigned Bearer-Identifier.
-report_bearer_establishment(PgwBI, QCI, {PL, PCI, PVI},
-			    #{pcf := PCF0, aaa_session := S0} = Data) ->
-    ARP = #{'Priority-Level' => PL,
-	    'Pre-emption-Capability' => PCI,
-	    'Pre-emption-Vulnerability' => PVI},
-    SOpts = #{'Bearer-Identifier' => PgwBI,
-	      'Bearer-Operation' =>
-		  ?'DIAMETER_GX_BEARER-OPERATION_ESTABLISHMENT',
-	      'QoS-Information' =>
-		  #{'QoS-Class-Identifier' => QCI,
-		    'Allocation-Retention-Priority' => ARP}},
-    Now = erlang:monotonic_time(),
-    case smf_aaa_pcf:ccr_update(PCF0, S0, SOpts, #{now => Now, async => true}) of
-	{ok, PCF1, S1, _Events} ->
-	    Data#{pcf := PCF1, aaa_session := S1};
+%% TS 29.212 §4.5.2.0 / §5.3.7 value 22: confirm a successful network-initiated
+%% resource allocation to the PCRF — but only for rules where the PCRF armed the
+%% confirmation (Resource-Allocation-Notification). Report the bound rule(s) ACTIVE
+%% with the SUCCESSFUL_RESOURCE_ALLOCATION event trigger; send nothing when unarmed.
+%% Deliberately carries NO QoS-Information: that is the default bearer's session-level
+%% QoS and would be clobbered by session_merge with the dedicated bearer's QoS.
+report_successful_resource_allocation(QCI, ARP,
+				      #{pcc := PCC, pcf := PCF0, aaa_session := S0} = Data) ->
+    Armed = [N || N <- affected_pcc_rules(QCI, ARP, PCC),
+		  rule_wants_alloc_notification(N, PCC)],
+    case Armed of
+	[] ->
+	    Data;
 	_ ->
-	    Data
+	    Names = lists:flatmap(fun(N) when is_list(N) -> N; (N) -> [N] end, Armed),
+	    Report = #{'Charging-Rule-Name' => Names,
+		       'PCC-Rule-Status'    => [?'DIAMETER_GX_PCC-RULE-STATUS_ACTIVE']},
+	    SOpts = #{'Charging-Rule-Report' => [Report],
+		      'Event-Trigger' =>
+			  ?'DIAMETER_GX_EVENT-TRIGGER_SUCCESSFUL_RESOURCE_ALLOCATION'},
+	    Now = erlang:monotonic_time(),
+	    case smf_aaa_pcf:ccr_update(PCF0, S0, SOpts, #{now => Now, async => true}) of
+		{ok, PCF1, S1, _Events} -> Data#{pcf := PCF1, aaa_session := S1};
+		_                       -> Data
+	    end
+    end.
+
+%% True when the PCRF armed the allocation confirmation for this rule
+%% (Resource-Allocation-Notification = ENABLE_NOTIFICATION, retained on the stored
+%% rule by smf_pcc_context:update_pcc_rule/4). Name is a stored-rule map key.
+rule_wants_alloc_notification(Name, #pcc_ctx{rules = Rules}) ->
+    case maps:get(Name, Rules, undefined) of
+	#{'Resource-Allocation-Notification' := V} when is_list(V) ->
+	    lists:member(?'DIAMETER_GX_RESOURCE-ALLOCATION-NOTIFICATION_ENABLE_NOTIFICATION', V);
+	_ ->
+	    false
     end.
 
 %% Inform the PCRF of an updated default-bearer EPS Bearer QoS / APN-AMBR
