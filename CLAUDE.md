@@ -6,6 +6,14 @@ Target version is OTP 28.3. Before running any Erlang/OTP or rebar3 commands, fi
 . $(kerl list installations | awk '/^otp-28\.3 /{print $2}')/activate
 ```
 
+# Implementation guides
+
+Tracked developer docs live in `docs/knowledge/`. Read the relevant one before working in that area:
+
+- `docs/knowledge/async-m.md` — the `async_m` monad: how the context `gen_statem` runs non-blocking
+  multi-step procedures (send request → `await` reply → resume). Read it before writing any async/await
+  flow in `gtp_context`, converting a blocking external call, or touching the `async_pending` registry.
+
 # Git workflow
 
 - Commit every conceptual step separately, don't batch unrelated changes
