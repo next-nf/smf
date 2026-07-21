@@ -25,7 +25,7 @@
 -export([to_session/3, from_session/2]).
 
 %% async diameter bridge (see smf_aaa_pcf.erl / async_m)
--export([ccr_initial_issue/3, fold_cca/5]).
+-export([ccr_initial_issue/3, ccr_update_issue/3, fold_cca/5]).
 
 -export([get_state_atom/1]).
 -ignore_xref([from_session/2, get_state_atom/1]).
@@ -111,11 +111,9 @@ invoke(_Service, {_, 'CCR-Initial'}, Session0, Events, Opts,
     {Request, Session, State} = ccr_initial_pre_send(Session0, Opts, State0),
     await_response(send_request(Request, Opts), Session, Events, State, Opts);
 
-invoke(_Service, {_, 'CCR-Update'}, Session, Events, Opts,
+invoke(_Service, {_, 'CCR-Update'}, Session0, Events, Opts,
        #state{state = started} = State0) ->
-    State = inc_request_number(State0),
-    RecType = ?'DIAMETER_GX_CC-REQUEST-TYPE_UPDATE_REQUEST',
-    Request = make_CCR(RecType, Session, Opts, State),
+    {Request, Session, State} = ccr_update_pre_send(Session0, Opts, State0),
     await_response(send_request(Request, Opts), Session, Events, State, Opts);
 
 invoke(_Service, {_, 'CCR-Terminate'}, Session, Events, Opts,
@@ -185,6 +183,24 @@ ccr_initial_pre_send(Session0, Opts, State0) ->
 -spec ccr_initial_issue(map(), map(), #state{}) -> {reference(), map(), #state{}}.
 ccr_initial_issue(Session0, Opts, State0) ->
     {Request, Session, State} = ccr_initial_pre_send(Session0, Opts, State0),
+    Promise = send_request(Request, Opts),
+    {Promise, Session, State}.
+
+%% pre-send half of CCR-Update: #state{} transition + make_CCR. Shared by
+%% invoke/6 (blocking path) and ccr_update_issue/3 (async_m path) so the
+%% two can't diverge.
+ccr_update_pre_send(Session, Opts, State0) ->
+    State = inc_request_number(State0),
+    RecType = ?'DIAMETER_GX_CC-REQUEST-TYPE_UPDATE_REQUEST',
+    Request = make_CCR(RecType, Session, Opts, State),
+    {Request, Session, State}.
+
+%% ccr_update_issue/3 — the async_m counterpart of invoke/6's CCR-Update
+%% clause: runs the same pre-send steps, but hands back the Promise instead
+%% of blocking on await_response/parking it in #state.pending.
+-spec ccr_update_issue(map(), map(), #state{}) -> {reference(), map(), #state{}}.
+ccr_update_issue(Session0, Opts, State0) ->
+    {Request, Session, State} = ccr_update_pre_send(Session0, Opts, State0),
     Promise = send_request(Request, Opts),
     {Promise, Session, State}.
 
