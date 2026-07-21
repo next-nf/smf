@@ -13,6 +13,9 @@
 -export([validate_handler/1, validate_service/3, validate_procedure/5,
 	 initialize_handler/1, initialize_service/2, invoke/6, handle_response/6]).
 
+%% async_m mock API
+-export([ccr_initial_issue/3, ccr_update_issue/3]).
+
 -export([get_state_atom/1]).
 -ignore_xref([get_state_atom/1]).
 
@@ -57,6 +60,44 @@ invoke(_Service, _Procedure, Session, Events, Opts, State) ->
 %% handle_response/6
 handle_response(_Promise, _Msg, Session, Events, _Opts, State) ->
     {ok, Session, Events, State}.
+
+%% ccr_initial_issue/3 — async_m mock counterpart of invoke/6: resolves the
+%% canned answer exactly as invoke/6 does, but instead of processing it
+%% inline, hands back a Promise and delivers the raw CCA to Owner
+%% (self() at call time), the same way a real Gx handler's issue/3 would.
+-spec ccr_initial_issue(map(), map(), term()) -> {reference(), map(), term()}.
+ccr_initial_issue(Session, Opts, State) ->
+    issue(Session, Opts, State).
+
+%% ccr_update_issue/3 — see ccr_initial_issue/3.
+-spec ccr_update_issue(map(), map(), term()) -> {reference(), map(), term()}.
+ccr_update_issue(Session, Opts, State) ->
+    issue(Session, Opts, State).
+
+%% issue/3 — shared by ccr_initial_issue/3 and ccr_update_issue/3: resolve
+%% the canned answer's AVP map exactly as invoke/6 does (#{answers :=
+%% Answers, answer := Answer}), shape it as a raw ['CCA' | Avps] matching
+%% smf_aaa_gx:handle_cca/5's pattern, and deliver it to Owner.
+issue(Session, #{answers := Answers, answer := Answer} = Opts, State) ->
+    AVPs =
+	case Answers of
+	    #{Answer := #{avps := A}} -> A;
+	    _ -> #{}
+	end,
+    Promise = make_ref(),
+    Owner = self(),
+    Owner ! {'$reply', Promise, smf_aaa_gx, ['CCA' | to_raw_cca_avps(AVPs)], Opts},
+    {Promise, Session, State}.
+
+%% to_raw_cca_avps/1 — shape a canned answer's AVP map as the raw CCA AVPs
+%% smf_aaa_gx:handle_cca/5 pattern-matches: 'Result-Code' list-wrapped
+%% ([RC]); everything else (including repeated AVPs like
+%% Charging-Rule-Install/-Remove) passes through unchanged, since the
+%% static config already list-wraps those.
+to_raw_cca_avps(#{'Result-Code' := RC} = AVPs) when is_integer(RC) ->
+    AVPs#{'Result-Code' => [RC]};
+to_raw_cca_avps(AVPs) ->
+    AVPs.
 
 %%%===================================================================
 %%% Options Validation
