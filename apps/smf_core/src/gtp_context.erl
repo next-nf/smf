@@ -623,6 +623,17 @@ handle_event(info, {'$reply', Promise, _Handler, Msg, _Opts}, #{async_pending :=
   when is_map_key(Promise, P) ->
     async_dispatch(Promise, Msg, State, Data);
 
+%% Serialize the fire-and-forget Gx reply path behind an in-flight async_m
+%% procedure. This {'$reply'} is NOT the parked procedure's own (that case is
+%% handled just above) — it answers an earlier fire-and-forget CCR-Update
+%% (report_* with async => true) that shares the pcf/aaa_session the procedure
+%% captured before its await. Handling it now would mutate pcf/aaa_session
+%% directly, and the procedure's terminal write-back (from its pre-await
+%% snapshot) would silently revert it. Postpone until async_pending drains.
+handle_event(info, {'$reply', _Promise, _Handler, _Msg, _Opts}, #{async_pending := P}, _Data)
+  when map_size(P) =/= 0 ->
+    {keep_state_and_data, [postpone]};
+
 handle_event(info, {'$reply', Promise, Handler, Msg, _Opts}, _State, Data) ->
     {Data1, Events} = handle_aaa_reply(Handler, Promise, Msg, Data),
     case Events of
