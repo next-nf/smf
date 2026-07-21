@@ -40,7 +40,8 @@ all() ->
      decode_tad_operations,
      flow_info_to_tft_map_no_sdf,
      flow_info_to_tft_map_captures_sdf,
-     flow_info_to_tft_map_bare_binary_sdf].
+     flow_info_to_tft_map_bare_binary_sdf,
+     pf_ids_to_sdf_test].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -514,4 +515,16 @@ flow_info_to_tft_map_bare_binary_sdf(_Config) ->
                   'Packet-Filter-Identifier' => <<"sdf-x">>}],
     {_Bin, _Filters, SdfToPf} = smf_tft:flow_info_to_tft_map(FlowInfo),
     ?assertMatch(#{<<"sdf-x">> := _}, SdfToPf),
+    ok.
+
+pf_ids_to_sdf_test(_Config) ->
+    Map = #{<<"sdfA">> => 0, <<"sdfB">> => 1, <<"sdfC">> => 2},
+    %% happy path: ids resolve back to their SDF handles, in input order
+    {ok, [<<"sdfC">>, <<"sdfA">>]} = smf_tft:pf_ids_to_sdf([2, 0], Map),
+    {ok, []} = smf_tft:pf_ids_to_sdf([], Map),
+    %% unknown id -> loud error (UE asked to delete a filter we don't hold)
+    {error, {unknown_pf_id, 7}} = smf_tft:pf_ids_to_sdf([0, 7], Map),
+    %% non-injective forward map -> not invertible -> loud error (TODO(#32))
+    Dup = #{<<"sdfA">> => 0, <<"sdfB">> => 0},
+    {error, ambiguous_sdf_to_pf} = smf_tft:pf_ids_to_sdf([0], Dup),
     ok.

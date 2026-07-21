@@ -7,6 +7,7 @@
 -export([new/2,
 	 ccr_initial/4, ccr_update/4, ccr_terminate/4,
 	 ccr_initial_issue/4, ccr_update_issue/4,
+	 merge_ctx/2,
 	 terminate/3,
 	 handle_reply/4]).
 -ignore_xref([terminate/3]).
@@ -46,6 +47,15 @@ ccr_initial_issue(Ctx, Session, SOpts, Opts) ->
 %% async_m do-block across the await and get folded by smf_aaa_gx:fold_cca/5.
 ccr_update_issue(Ctx, Session, SOpts, Opts) ->
     issue(Ctx, Session, SOpts, {gx, 'CCR-Update'}, Opts).
+
+%% merge_ctx/2 — fold_cca (smf_aaa_gx:wrap_ctx/1) returns a #pcf_ctx wrapping
+%% only the handler that ran, with app_id undefined. Merge its updated handler
+%% state back into the original context, preserving app_id and sibling handlers,
+%% so a later issue/5 still resolves the application. The async_m counterpart of
+%% invoke/6's in-place Ctx#pcf_ctx{handlers = ...} update.
+-spec merge_ctx(#pcf_ctx{}, #pcf_ctx{}) -> #pcf_ctx{}.
+merge_ctx(#pcf_ctx{handlers = H0} = Ctx0, #pcf_ctx{handlers = H1}) ->
+    Ctx0#pcf_ctx{handlers = maps:merge(H0, H1)}.
 
 terminate(Ctx, Session, Opts) ->
     invoke(Ctx, Session, #{'Termination-Cause' => error}, terminate, Opts).
