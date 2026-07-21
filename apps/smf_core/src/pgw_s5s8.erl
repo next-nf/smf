@@ -512,13 +512,14 @@ handle_request(ReqKey,
 	    %% TS 23.401 5.4.5 step 5: the UE removes specific packet filters from a
 	    %% dedicated bearer. Report the removed SDF filters to the PCRF (Gx
 	    %% CCR-Update) and let its decision govern; when the bearer's last rule
-	    %% is gone, deactivate it echoing the PTI (#22 Increment 2). Runs async:
-	    %% park on the CCA, ack/fail in the callbacks.
+	    %% is gone, deactivate it echoing the PTI (#22 Inc2), else re-provision
+	    %% PFCP and emit an Update Bearer with the surviving TFT (#22 Inc3). Runs
+	    %% async: park on the CCA (and the PFCP modify), ack/fail in the callbacks.
 	    Proc = ue_delete_filters_proc(EBI, TADContents, PTI, AccessTunnel),
-	    OkFun = fun(V, S, D) -> br_delete_ok(V, S, D, ReqKey, Context) end,
+	    OkFun = fun(V, S, D) -> br_ok(V, S, D, ReqKey, Context) end,
 	    ErrFun = fun(E, S, D) ->
-			     br_delete_err(E, S, D, ReqKey, Request,
-					   AccessTunnel, LinkedEBI, PTI, Context)
+			     br_err(E, S, D, ReqKey, Request,
+				    AccessTunnel, LinkedEBI, PTI, Context)
 		     end,
 	    async_m:run_async(Proc, OkFun, ErrFun, State, Data);
        true ->
@@ -1119,7 +1120,7 @@ initiate_ue_delete_dedicated_bearer(PTI, EBI, Tunnel, Data) ->
 ue_delete_filters_proc(EBI, PfIds, PTI, AccessTunnel) ->
     do([async_m ||
 	   #{pcf := PCF0, aaa_session := Session0, pcc := PCC0,
-	     bearers := BearerMap, dedicated := Dedicated} <- async_m:get_data(),
+	     bearers := BearerMap, dedicated := Dedicated, pfcp := PCtx0} <- async_m:get_data(),
 	   #ded_bearer{sdf_to_pf = SdfToPf} = maps:get(EBI, Dedicated),
 	   SdfHandles <- async_m:lift(smf_tft:pf_ids_to_sdf(PfIds, SdfToPf)),
 	   PFs = [#{'Packet-Filter-Identifier' => H} || H <- SdfHandles],
@@ -1137,19 +1138,60 @@ ue_delete_filters_proc(EBI, PfIds, PTI, AccessTunnel) ->
 	   ok <- async_m:lift(ccr_result(Result)),
 	   PCF1 = smf_aaa_pcf:merge_ctx(PCF0, FoldCtx),
 	   RuleBase = smf_charging:rulebase(),
-	   %% TODO(#22): remove-only fold. Increment 2 handles the emptying case, so
-	   %% a co-occurring {pcc, install, _} in the same CCA (a PCRF proposing a
-	   %% replacement rule) is silently dropped. Increment 3 (the Update outcome)
-	   %% must run an install pass too, like the RAR handler in gtp_context.
+	   %% Fold BOTH passes: a delete may also carry a PCRF-proposed replacement
+	   %% rule in the same CCA (closes the Inc2 remove-only TODO(#22)).
 	   {PCC1, _} = smf_pcc_context:gx_events_to_pcc_ctx(Events, remove, RuleBase, PCC0),
-	   RemovedEBIs = smf_gsn_lib:detect_removed_bearers(PCC0, PCC1, BearerMap),
-	   ok <- async_m:lift(assert_bearer_emptied(EBI, RemovedEBIs)),
+	   {PCC2, _} = smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC1),
+	   %% Commit the Gx/PCC results (shared by both outcomes).
 	   async_m:modify_data(
-	     fun(D) ->
-		     D1 = D#{pcf := PCF1, aaa_session := Session1, pcc := PCC1},
-		     initiate_ue_delete_dedicated_bearer(PTI, EBI, AccessTunnel, D1)
-	     end)
+	     fun(D) -> D#{pcf := PCF1, aaa_session := Session1, pcc := PCC2} end),
+	   %% One PTI-correlated single-bearer outcome.
+	   ue_delete_outcome(
+	     lists:member(EBI, smf_gsn_lib:detect_removed_bearers(PCC0, PCC2, BearerMap)),
+	     EBI, PTI, AccessTunnel, PCC2, BearerMap, PCtx0, Dedicated)
        ]).
+
+%% Empty: the bearer's last bound rule is gone -> single-bearer deactivation
+%% echoing the PTI (Increment 2 behaviour, unchanged).
+ue_delete_outcome(true, EBI, PTI, AccessTunnel, _PCC2, _BearerMap, _PCtx0, _Dedicated) ->
+    async_m:modify_data(
+      fun(D) -> initiate_ue_delete_dedicated_bearer(PTI, EBI, AccessTunnel, D) end);
+%% Non-empty: surviving rules -> re-provision PFCP (drop the removed rule's PDRs),
+%% then a PTI-echoing Update Bearer Request with the recomputed TFT (Increment 3).
+ue_delete_outcome(false, EBI, PTI, AccessTunnel, PCC2, BearerMap, PCtx0, Dedicated) ->
+    do([async_m ||
+	   Issued <- async_m:lift(
+		       smf_pfcp_context:modify_session_async(PCC2, [], #{}, BearerMap, PCtx0)),
+	   {PCtx1, _, _} <- await_pfcp_modify(Issued),
+	   async_m:modify_data(
+	     fun(D) -> emit_ue_update_bearer(EBI, PTI, AccessTunnel, PCC2, Dedicated, PCtx1, D) end)
+       ]).
+
+%% Local mirror of gtp_context:await_modify/1 — await the async PFCP modify reply
+%% (or short-circuit when no PFCP change was needed). A non-accepted reply makes
+%% modify_session_result return {error, #ctx_err{FATAL}}, routed to br_err.
+await_pfcp_modify({request, ReqId, PCtx1}) ->
+    do([async_m || Reply <- async_m:await(ReqId),
+		   async_m:lift(smf_pfcp_context:modify_session_result(Reply, PCtx1))]);
+await_pfcp_modify({no_request, PCtx1}) ->
+    async_m:return({PCtx1, undefined, #{}}).
+
+%% Recompute the target bearer's surviving descriptor and emit the PTI-echoing
+%% Update Bearer Request (reusing the network-initiated send path; PTI rides
+%% ExtraIEs, NewDesc staged for commit on the Update Bearer response).
+emit_ue_update_bearer(EBI, PTI, AccessTunnel, PCC2, Dedicated, PCtx1, D) ->
+    TargetDesc = maps:get(EBI, Dedicated),
+    case smf_gsn_lib:detect_modified_bearers(PCC2, #{EBI => TargetDesc}) of
+	[{_, QoS, FlowInfo, NewDesc}] ->
+	    PTIie = #v2_procedure_transaction_id{pti = PTI},
+	    send_dedicated_bearers_update(rule_change, [{EBI, QoS, FlowInfo}],
+					  [PTIie], #{EBI => NewDesc}, AccessTunnel),
+	    D#{pfcp := PCtx1};
+	[] ->
+	    %% PCRF accepted but left this bearer's rules unchanged -> no TFT change
+	    %% to signal (realistically unreachable for an accepted delete). Ack only.
+	    D#{pfcp := PCtx1}
+    end.
 
 %% The PCRF accepted iff fold_cca reports a success Result. smf_aaa_gx:fold_cca/5
 %% surfaces handle_cca/7's first tuple element: a <3000 Result-Code yields the
@@ -1158,28 +1200,26 @@ ue_delete_filters_proc(EBI, PfIds, PTI, AccessTunnel) ->
 ccr_result(ok)    -> ok;
 ccr_result(Other) -> {error, {pcrf_rejected, Other}}.
 
-%% Increment 2 handles only the emptying outcome. A delete that leaves the
-%% bearer with rules is the Update-TFT outcome -> Increment 3.
-assert_bearer_emptied(EBI, RemovedEBIs) ->
-    case lists:member(EBI, RemovedEBIs) of
-	true  -> ok;
-	false -> {error, {bearer_not_emptied, EBI}}  %% TODO(#22): Update outcome, Inc3
-    end.
-
-%% The Delete Bearer Request (echoing the PTI) was emitted inside the procedure.
-%% Ack the Bearer Resource Command like the create/delete_existing_tft branches,
-%% and return {next_state,...} so the drained async_pending (a State-term change)
-%% re-delivers any events postponed while the procedure was parked.
-br_delete_ok(_V, State, Data, ReqKey, Context) ->
+%% The Update/Delete Bearer Request IS the follow-on procedure; ack the command
+%% and return {next_state,...} so the drained async_pending re-delivers postponed
+%% events. Shared by both outcomes.
+br_ok(_V, State, Data, ReqKey, Context) ->
     gtp_context:request_finished(ReqKey),
     Actions = context_idle_action([], Context),
     {next_state, State, Data, Actions}.
 
-%% Any procedure error (unknown/ambiguous filter, PCRF reject, non-empty bearer)
-%% -> Bearer Resource Failure Indication echoing the PTI (TS 29.274 7.2.14) —
-%% the exact IEs the old synchronous reject branch built.
-br_delete_err(_Reason, State, Data, ReqKey, Request,
-	      AccessTunnel, LinkedEBI, PTI, Context) ->
+%% A PFCP-modify FATAL failure surfaces as a #ctx_err VALUE (modify_session_result
+%% returns {error, #ctx_err{}}); re-throw so async_dispatch's #ctx_err catch runs
+%% handle_ctx_error -> {stop, normal, Data} (the pilot's behaviour; a PFCP failure
+%% after the Gx commit is a genuine inconsistency, not a recoverable reject).
+br_err(#ctx_err{} = E, _State, _Data, _ReqKey, _Request,
+       _AccessTunnel, _LinkedEBI, _PTI, _Context) ->
+    throw(E);
+%% Recoverable (Gx reject / unknown or ambiguous filter) -> Bearer Resource Failure
+%% Indication echoing the PTI (TS 29.274 7.2.14) — the exact IEs the old
+%% synchronous reject branch built.
+br_err(_Reason, State, Data, ReqKey, Request,
+       AccessTunnel, LinkedEBI, PTI, Context) ->
     ResponseIEs = [#v2_cause{v2_cause = request_rejected},
 		   #v2_eps_bearer_id{eps_bearer_id = LinkedEBI},
 		   #v2_procedure_transaction_id{pti = PTI}],

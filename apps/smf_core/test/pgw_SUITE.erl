@@ -448,6 +448,16 @@
 				  'Charging-Rule-Remove' =>
 				      [#{'Charging-Rule-Name' => [<<"ded-rule-1">>]}]
 				 }},
+		      %% CCR-U remove answer for the UE delete_packet_filters Update
+		      %% outcome: removes ONE of a two-rule dedicated bearer's rules
+		      %% (ded-rule-1), leaving ded-rule-2 bound so the bearer survives
+		      %% with a shrunken TFT (#22 Increment 3).
+		      'Update-Gx-Remove-One' =>
+			  #{avps =>
+				#{'Result-Code' => 2001,
+				  'Charging-Rule-Remove' =>
+				      [#{'Charging-Rule-Name' => [<<"ded-rule-1">>]}]
+				 }},
 		      'Final-Gx' => #{avps => #{'Result-Code' => 2001}},
 
 		      'Initial-Gx-Fail-1' =>
@@ -771,6 +781,7 @@ common() ->
      bearer_resource_command_reject,
      bearer_resource_command_delete,
      ue_delete_packet_filters_deletes_bearer,
+     ue_delete_packet_filters_updates_bearer,
      ue_delete_packet_filters_reject,
      mme_delete_bearer_command,
      mme_delete_bearer_command_multi,
@@ -1093,6 +1104,7 @@ init_per_testcase(bearer_resource_command_delete, Config) ->
     Config;
 init_per_testcase(TestCase, Config)
   when TestCase == ue_delete_packet_filters_deletes_bearer;
+       TestCase == ue_delete_packet_filters_updates_bearer;
        TestCase == ue_delete_packet_filters_reject ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
@@ -8334,6 +8346,195 @@ establish_ded_bearer_with_pf(GtpC, Cntl, CtxKey) ->
     %% The bound SDF filter must have produced a TFT packet-filter id to remove.
     ?match([_ | _], PfIds),
     {GtpCDed, DedEBI, PfIds}.
+
+%% Like establish_ded_bearer_with_pf/3 but binds TWO PCC rules
+%% (ded-rule-1 / ded-rule-2) sharing the bearer's {QCI, ARP}, each carrying its
+%% own SDF filter with a distinct Gx Packet-Filter-Identifier (pf-1 / pf-2). Both
+%% rules bind onto the ONE dedicated bearer, so its #ded_bearer.sdf_to_pf holds
+%% two entries -- the setup for the delete-that-leaves-survivors Update outcome
+%% (#22 Increment 3). Returns {GtpCDed, DedEBI, PfIdOf1, PfIdOf2}, the two TFT
+%% packet-filter ids (from sdf_to_pf) of pf-1 and pf-2.
+establish_ded_bearer_two_rules(GtpC, Cntl, CtxKey) ->
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun =
+        fun(Request, Result, Avps, SOpts) ->
+                Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+                          session = SessionOpts, events = []},
+
+    QoSInfo = [#{'QoS-Class-Identifier' => 1,
+                 'Allocation-Retention-Priority' =>
+                     #{'Priority-Level' => 2,
+                       'Pre-emption-Capability' => 1,
+                       'Pre-emption-Vulnerability' => 0}}],
+    DedRule1 = #{'Charging-Rule-Name' => <<"ded-rule-1">>,
+                 'Flow-Information' =>
+                     [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+                        'Flow-Direction' => [2],
+                        'Packet-Filter-Identifier' => [<<"pf-1">>]}],
+                 'QoS-Information' => QoSInfo,
+                 'Metering-Method' => [1],
+                 'Precedence' => [100],
+                 'Online' => [0],
+                 'Offline' => [0]},
+    DedRule2 = #{'Charging-Rule-Name' => <<"ded-rule-2">>,
+                 'Flow-Information' =>
+                     [#{'Flow-Description' => [<<"permit out ip from 10.0.0.0/8 to assigned">>],
+                        'Flow-Direction' => [2],
+                        'Packet-Filter-Identifier' => [<<"pf-2">>]}],
+                 'QoS-Information' => QoSInfo,
+                 'Metering-Method' => [1],
+                 'Precedence' => [110],
+                 'Online' => [0],
+                 'Offline' => [0]},
+    DedRules = #{'Charging-Rule-Definition' => [DedRule1, DedRule2],
+                 'Resource-Allocation-Notification' => [0]},
+    Server ! AAAReq#aaa_request{events = [{pcc, install, [DedRules]}]},
+
+    {_, Resp0, _, _} =
+        receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+        after 5000 -> ct:fail(rar_timeout)
+        end,
+    ?equal(ok, Resp0),
+
+    CBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = create_bearer_request}, CBReq),
+    #gtp{seq_no = CBSeqNo,
+         ie = #{{v2_bearer_context, 0} :=
+                    #v2_bearer_context{
+                       group = #{{v2_fully_qualified_tunnel_endpoint_identifier, 1} :=
+                                     #v2_fully_qualified_tunnel_endpoint_identifier{
+                                        interface_type = ?'S5/S8-U PGW',
+                                        key = PgwUTEI,
+                                        ipv4 = PgwUIP4,
+                                        ipv6 = PgwUIP6},
+                                 {v2_charging_id, 0} := #v2_charging_id{}
+                                }
+                      }}} = CBReq,
+
+    GtpCDed = gtp_context_new_teids(GtpC),
+    #gtpc{local_ip = LocalIP,
+          local_data_tei = SgwUTEI,
+          remote_control_tei = RemoteCntlTEI} = GtpCDed,
+    DedEBI = 6,
+
+    PgwUFTEID =
+        if PgwUIP4 /= undefined, size(PgwUIP4) =:= 4 ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI, ipv4 = PgwUIP4};
+           PgwUIP6 /= undefined, size(PgwUIP6) =:= 16 ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI, ipv6 = PgwUIP6};
+           true ->
+               #v2_fully_qualified_tunnel_endpoint_identifier{
+                  instance = 2, interface_type = ?'S5/S8-U PGW',
+                  key = PgwUTEI}
+        end,
+    SgwUFTEID =
+        case LocalIP of
+            {_,_,_,_} ->
+                #v2_fully_qualified_tunnel_endpoint_identifier{
+                   instance = 3, interface_type = ?'S5/S8-U SGW',
+                   key = SgwUTEI, ipv4 = smf_inet:ip2bin(LocalIP)};
+            {_,_,_,_,_,_,_,_} ->
+                #v2_fully_qualified_tunnel_endpoint_identifier{
+                   instance = 3, interface_type = ?'S5/S8-U SGW',
+                   key = SgwUTEI, ipv6 = smf_inet:ip2bin(LocalIP)}
+        end,
+    CBRespIEs = [#v2_cause{v2_cause = request_accepted},
+                 #v2_bearer_context{
+                    group = [#v2_cause{v2_cause = request_accepted},
+                             #v2_eps_bearer_id{eps_bearer_id = DedEBI},
+                             PgwUFTEID,
+                             SgwUFTEID]}],
+    CBResp = #gtp{version = v2, type = create_bearer_response,
+                  tei = RemoteCntlTEI, seq_no = CBSeqNo, ie = CBRespIEs},
+    send_pdu(Cntl, GtpC, CBResp),
+
+    ct:sleep(200),
+
+    #{bearers := BearerMap, dedicated := Dedicated} =
+        smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap),
+    #{DedEBI := #ded_bearer{rules = Rules, sdf_to_pf = SdfToPf}} = Dedicated,
+    %% Both rules bound the one bearer, and each SDF filter produced a distinct
+    %% TFT packet-filter id, so sdf_to_pf holds exactly two entries.
+    ?equal([<<"ded-rule-1">>, <<"ded-rule-2">>], lists:sort(Rules)),
+    ?equal(2, map_size(SdfToPf)),
+    PfIdOf1 = maps:get(<<"pf-1">>, SdfToPf),
+    PfIdOf2 = maps:get(<<"pf-2">>, SdfToPf),
+    {GtpCDed, DedEBI, PfIdOf1, PfIdOf2}.
+
+%%--------------------------------------------------------------------
+ue_delete_packet_filters_updates_bearer() ->
+    [{doc, "Check that a Bearer Resource Command whose TAD deletes SOME (not all) "
+      "packet filters of a dedicated bearer drives a Gx CCR-Update and, when the "
+      "PCRF removes only one of the bearer's bound rules, emits a single Update "
+      "Bearer Request echoing the PTI with the recomputed (shrunken) TFT rather "
+      "than a Delete Bearer Request; the Update Bearer Response commits the "
+      "one-rule descriptor (TS 23.401 5.4.5, #22 Increment 3)"}].
+ue_delete_packet_filters_updates_bearer(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+
+    {GtpCDed, DedEBI, PfIdOf1, _PfIdOf2} =
+        establish_ded_bearer_two_rules(GtpC, Cntl, CtxKey),
+
+    %% Now make the CCR-Update remove ONE of the two bound rules (ded-rule-1),
+    %% leaving ded-rule-2 -> the bearer survives with a shrunken TFT.
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Update'}, 'Update-Gx-Remove-One'}]),
+
+    PTI = 10,
+    {_GtpC2, _BRCReq} =
+        bearer_resource_command({delete_pf, DedEBI, [PfIdOf1], PTI}, GtpC),
+
+    %% The PGW parks on the CCR-U await, the mock removes one rule, the bearer
+    %% still has a bound rule -> re-provision PFCP (harness UPF mock auto-answers
+    %% the session_modification), then exactly one Update Bearer Request on the
+    %% control socket echoing the UE PTI and carrying the surviving TFT.
+    UBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = update_bearer_request,
+                ie = #{{v2_procedure_transaction_id, 0} :=
+                           #v2_procedure_transaction_id{pti = PTI},
+                       {v2_bearer_context, 0} :=
+                           #v2_bearer_context{
+                              group = #{{v2_eps_bearer_id, 0} :=
+                                            #v2_eps_bearer_id{eps_bearer_id = DedEBI},
+                                        {v2_eps_bearer_level_traffic_flow_template, 0} :=
+                                            #v2_eps_bearer_level_traffic_flow_template{}}}}},
+           UBReq),
+
+    %% Accept the Update Bearer Request to complete the exchange.
+    send_pdu(Cntl, GtpCDed, make_response(UBReq, simple, GtpCDed)),
+
+    ct:sleep(200),
+
+    %% The shrunken descriptor was committed on the Update Bearer Response: only
+    %% ded-rule-2 survives, and its lone SDF filter leaves one sdf_to_pf entry.
+    #{dedicated := #{DedEBI := #ded_bearer{rules = Rules1, sdf_to_pf = SdfToPf1}}} =
+        smf_context:test_cmd(gtp, CtxKey, info),
+    ?equal([<<"ded-rule-2">>], Rules1),
+    ?equal(1, map_size(SdfToPf1)),
+
+    %% ...and NO Delete Bearer Request was sent.
+    ?equal(timeout, recv_pdu(Cntl, undefined, 100, fun(Why) -> Why end)),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
 
 %%--------------------------------------------------------------------
 ue_delete_packet_filters_deletes_bearer() ->
