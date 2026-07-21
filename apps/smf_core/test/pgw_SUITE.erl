@@ -8594,7 +8594,7 @@ ue_delete_packet_filters_reject() ->
       "Request. NOTE: the intended PCRF-Result-Code rejection trigger is blocked "
       "by a foundation defect -- smf_aaa_gx:handle_cca/7's failure clause does "
       "State#state{...} and crashes on the async static mock's `undefined` state "
-      "(#45/#48); the unknown-filter trigger drives the identical br_delete_err "
+      "(#45/#48); the unknown-filter trigger drives the identical br_err "
       "Failure Indication path without going through fold_cca's failure clause"}].
 ue_delete_packet_filters_reject(Config) ->
     Cntl = whereis(gtpc_client_server),
@@ -8607,7 +8607,7 @@ ue_delete_packet_filters_reject(Config) ->
 
     %% Name a packet-filter id the bearer's sdf_to_pf does not hold: the
     %% procedure's pf_ids_to_sdf/2 lift fails ({unknown_pf_id, _}) and
-    %% short-circuits to br_delete_err before any CCR-Update is issued.
+    %% short-circuits to br_err before any CCR-Update is issued.
     PTI = 9,
     {GtpC2, BRCReq} =
         bearer_resource_command({delete_pf, DedEBI, [15], PTI}, GtpC),
