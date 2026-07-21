@@ -782,7 +782,10 @@ common() ->
      gx_rar_gy_interaction,
      tdf_app_id,
      gtp_idle_timeout_pfcp_session_loss,
-     up_inactivity_timer].
+     up_inactivity_timer,
+     pfcp_async_update_credits,
+     pfcp_gate_serializes,
+     pfcp_reentrant_during_await].
 
 sx_fail() ->
     [sx_connect_fail].
@@ -1134,6 +1137,15 @@ init_per_testcase(gtp_idle_timeout_pfcp_session_loss, Config) ->
     smf_test_lib:set_apn_key(inactivity_timeout, 300),
     setup_per_testcase(Config),
     Config;
+init_per_testcase(TestCase, Config)
+  when TestCase == pfcp_async_update_credits;
+       TestCase == pfcp_gate_serializes;
+       TestCase == pfcp_reentrant_during_await ->
+    setup_per_testcase(Config),
+    smf_test_lib:set_online_charging(true),
+    smf_test_lib:load_aaa_answer_config([{{gy, 'CCR-Initial'}, 'Initial-OCS'},
+			    {{gy, 'CCR-Update'},  'Update-OCS'}]),
+    Config;
 init_per_testcase(_, Config) ->
     setup_per_testcase(Config),
     Config.
@@ -1260,6 +1272,16 @@ end_per_testcase(gtp_idle_timeout_pfcp_session_loss, Config) ->
     end_per_testcase(Config);
 end_per_testcase(aa_pool_select_fail, Config) ->
     ok = meck:delete(smf_aaa_auth, authenticate, 4),
+    end_per_testcase(Config);
+end_per_testcase(TestCase, Config)
+  when TestCase == pfcp_gate_serializes;
+       TestCase == pfcp_reentrant_during_await ->
+    %% failure-safe teardown: re-enable the UPF and restore sx retransmit even if
+    %% the case body failed before reaching its inline cleanup (else a held UPF /
+    %% leaked meck expectation poisons later cases). catch: harmless on the
+    %% success path where the body already cleaned up.
+    catch smf_test_sx_up:enable('pgw-u01'),
+    catch restore_sx_retransmit(),
     end_per_testcase(Config);
 end_per_testcase(_, Config) ->
     end_per_testcase(Config).
@@ -8570,6 +8592,153 @@ dedicated_bearer_session_delete(Config) ->
     meck_validate(Config),
     ok.
 
+%%--------------------------------------------------------------------
+pfcp_async_update_credits() ->
+    [{doc, "A Gy credit update drives an async PFCP session modification, "
+      "and async_pending drains back to empty once the reply lands"}].
+pfcp_async_update_credits(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    {ok, PCtx} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
+
+    trigger_gy_credit_update(PCtx, #{'VOLTH' => []}),
+
+    ok = wait_until(fun() -> has_session_modification_request('pgw-u01') end, 50, 100),
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 0 end, 50, 100),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+pfcp_gate_serializes() ->
+    [{doc, "A second Gy credit update is postponed while the first async PFCP "
+      "modify is still in flight, and both drain once the UPF replies"}].
+pfcp_gate_serializes(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    {ok, PCtx} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
+
+    ok = slow_down_sx_retransmit(),
+    smf_test_sx_up:disable('pgw-u01'),
+
+    trigger_gy_credit_update(PCtx, #{'VOLTH' => []}),
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 1 end, 50, 100),
+
+    %% a second procedure-initiating credit event arrives while the first is
+    %% still parked -- it must be gated (postponed), not run concurrently
+    trigger_gy_credit_update(PCtx, #{'VOLQU' => []}),
+    timer:sleep(200),
+    ?equal(1, async_pending_size(CtxKey)),
+
+    smf_test_sx_up:enable('pgw-u01'),
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 0 end, 100, 100),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok = restore_sx_retransmit(),
+    ok.
+
+%%--------------------------------------------------------------------
+pfcp_reentrant_during_await() ->
+    [{doc, "The context FSM keeps servicing non-gated queries while a PFCP "
+      "modify procedure is parked awaiting its reply"}].
+pfcp_reentrant_during_await(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    {ok, PCtx} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
+
+    ok = slow_down_sx_retransmit(),
+    smf_test_sx_up:disable('pgw-u01'),
+
+    trigger_gy_credit_update(PCtx, #{'VOLTH' => []}),
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 1 end, 50, 100),
+
+    %% the parked procedure must not block servicing of a non-gated,
+    %% reentrant request -- this round-trips through the FSM's mailbox
+    {ok, _Session} = smf_context:test_cmd(gtp, CtxKey, session),
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+
+    smf_test_sx_up:enable('pgw-u01'),
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 0 end, 100, 100),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok = restore_sx_retransmit(),
+    ok.
+
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+%% online_urr_match_spec/0 -- select URRs tracking 'online' (Gy) charging,
+%% mirrors the MatchSpec used by volume_threshold/1.
+online_urr_match_spec() ->
+    ets:fun2ms(fun({Id, {'online', _}}) -> Id end).
+
+%% trigger_gy_credit_update/2 -- drive a PFCP usage report (from the fake UPF)
+%% carrying the given usage_report_trigger, which the SMF turns into a Gy
+%% CCR-Update and, on a CCA carrying quota, an internal
+%% {session, {update_credits, _}, _} event -- the async PFCP pilot path.
+trigger_gy_credit_update(PCtx, Trigger) ->
+    ok = smf_test_sx_up:usage_report('pgw-u01', PCtx, online_urr_match_spec(),
+                                     #{usage_report_trigger => Trigger}).
+
+has_session_modification_request(Role) ->
+    lists:any(fun(#pfcp{type = session_modification_request}) -> true;
+                 (_) -> false
+              end, smf_test_sx_up:history(Role)).
+
+async_pending_size(CtxKey) ->
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    {State, _Data} = sys:get_state(Server),
+    map_size(maps:get(async_pending, State)).
+
+%% slow_down_sx_retransmit/0, restore_sx_retransmit/0 -- shrink the Sx
+%% request T1/N1 (mirrors sx_timeout/1) so a held-then-released request
+%% retransmits quickly instead of waiting out the default 30s x 5 bound.
+slow_down_sx_retransmit() ->
+    meck:expect(smf_sx_socket, call,
+                fun(Peer, _T1, _N1, Msg, CbInfo) ->
+                        meck:passthrough([Peer, 100, 50, Msg, CbInfo])
+                end).
+
+restore_sx_retransmit() ->
+    meck:delete(smf_sx_socket, call, 5).
+
+%% wait_until/3 -- poll Fun() up to Retries times, sleeping SleepMs between
+%% attempts, until it returns true.
+wait_until(Fun, Retries, SleepMs) when Retries > 0 ->
+    case Fun() of
+        true ->
+            ok;
+        _ ->
+            timer:sleep(SleepMs),
+            wait_until(Fun, Retries - 1, SleepMs)
+    end;
+wait_until(Fun, 0, _SleepMs) ->
+    case Fun() of
+        true -> ok;
+        _ -> {error, timeout}
+    end.

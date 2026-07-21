@@ -353,6 +353,32 @@ init({[Socket, Info, Version, Interface,
     {ok, State, LoopData} = Interface:init(Opts, Data),
     gen_statem:enter_loop(?MODULE, LoopOpts, State, LoopData).
 
+%% Coarse procedure gate: postpone procedure-initiating events while a PFCP
+%% procedure is still in flight (async_pending non-empty). Re-delivered once the
+%% registry drains: mutating async_pending is itself a state-term change, which is
+%% what makes gen_statem retry the postponed events — so the gate reads it directly.
+handle_event(internal, {session, {update_credits, _}, _}, #{async_pending := P}, _Data)
+  when map_size(P) =/= 0 ->
+    {keep_state_and_data, [postpone]};
+handle_event(cast, {handle_message, _Request, #gtp{}, _Resent}, #{async_pending := P}, _Data)
+  when map_size(P) =/= 0 ->
+    {keep_state_and_data, [postpone]};
+%% AAA-driven RAR/ASR and the PFCP timer also mutate the shared PCtx, so they
+%% must not interleave with an in-flight PFCP procedure. Postponing them while a
+%% procedure is parked reproduces the old blocking behaviour (they waited in the
+%% mailbox during a synchronous modify). No deadlock: the awaited PFCP reply does
+%% not depend on answering these. (A future async-Gx step will refine this to
+%% answer the RAA immediately and queue only the resulting procedure.)
+handle_event(info, #aaa_request{procedure = {_, 'RAR'}}, #{async_pending := P}, _Data)
+  when map_size(P) =/= 0 ->
+    {keep_state_and_data, [postpone]};
+handle_event(info, #aaa_request{procedure = {_, 'ASR'}}, #{async_pending := P}, _Data)
+  when map_size(P) =/= 0 ->
+    {keep_state_and_data, [postpone]};
+handle_event(info, {timeout, _TRef, pfcp_timer}, #{async_pending := P}, _Data)
+  when map_size(P) =/= 0 ->
+    {keep_state_and_data, [postpone]};
+
 handle_event({call, From}, info, _, Data) ->
     {keep_state_and_data, [{reply, From, Data}]};
 
@@ -615,19 +641,9 @@ handle_event(info, {update_session, Session, Events}, _State, _Data) ->
     Actions = [{next_event, internal, {session, Ev, Session}} || Ev <- Events],
     {keep_state_and_data, Actions};
 
-handle_event(internal, {session, {update_credits, _} = CreditEv, _}, _State,
-	     #{context := Context, pfcp := PCtx0,
-	       tunnels := #{'Access' := AccessTunnel}, bearers := BearerMap,
-	       pcc := PCC0} = Data) ->
-    Now = erlang:monotonic_time(),
-
-    {PCC, _PCCErrors} = smf_pcc_context:gy_events_to_pcc_ctx(Now, [CreditEv], PCC0),
-    {PCtx, _, _} =
-	case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
-	    {ok, Result1} -> Result1;
-	    {error, Err1} -> throw(Err1#ctx_err{context = Context, tunnel = AccessTunnel})
-	end,
-    {keep_state, Data#{pfcp := PCtx, pcc := PCC}};
+handle_event(internal, {session, {update_credits, _} = CreditEv, _}, State, Data) ->
+    async_m:run_async(update_credits_proc(CreditEv),
+		      fun update_credits_ok/3, fun update_credits_err/3, State, Data);
 
 %% Enable AAA to provide reason for session stop
 handle_event(internal, {session, {stop, Reason}, _Session}, State, Data) ->
@@ -848,6 +864,30 @@ handle_aaa_reply(Handler, Promise, Msg,
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+%% update_credits_proc/1 — async_m procedure: apply a Gy credit update to the
+%% PCC context and issue the resulting PFCP session modification asynchronously.
+update_credits_proc(CreditEv) ->
+    do([async_m ||
+	   #{pfcp := PCtx0, bearers := BearerMap, pcc := PCC0} <- async_m:get_data(),
+	   Now = erlang:monotonic_time(),
+	   {PCC, _PCCErrors} = smf_pcc_context:gy_events_to_pcc_ctx(Now, [CreditEv], PCC0),
+	   Issued <- async_m:lift(smf_pfcp_context:modify_session_async(PCC, [], #{}, BearerMap, PCtx0)),
+	   {PCtx, _, _} <- await_modify(Issued),
+	   async_m:modify_data(_#{pfcp => PCtx, pcc => PCC})
+       ]).
+
+await_modify({request, ReqId, PCtx1}) ->
+    do([async_m || Reply <- async_m:await(ReqId),
+		   async_m:lift(smf_pfcp_context:modify_session_result(Reply, PCtx1))]);
+await_modify({no_request, PCtx1}) ->
+    async_m:return({PCtx1, undefined, #{}}).
+
+%% Return the async_m-threaded State (async_pending now drained) as the next
+%% state so the drain is a state-term change — that's what re-delivers the events
+%% postponed by the gate while this procedure was in flight.
+update_credits_ok(_V, State, Data) -> {next_state, State, Data}.
+update_credits_err(#ctx_err{} = E, State, Data) -> handle_ctx_error(E, [], State, Data).
 
 register_request(Handler, Server, #request{key = ReqKey}) ->
     gtp_context_reg:register([ReqKey], Handler, Server).
