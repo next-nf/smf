@@ -6,6 +6,7 @@
 
 -export([new/2,
 	 gy_ccr_initial/4, gy_ccr_update/4, gy_ccr_terminate/4,
+	 gy_ccr_initial_issue/4,
 	 rf_initial/4, rf_update/4, rf_terminate/4,
 	 terminate/3,
 	 handle_reply/4]).
@@ -32,6 +33,13 @@ gy_ccr_update(Ctx, Session, SOpts, Opts) ->
 
 gy_ccr_terminate(Ctx, Session, SOpts, Opts) ->
     invoke(Ctx, Session, SOpts, {gy, 'CCR-Terminate'}, Opts).
+
+%% gy_ccr_initial_issue/4 — the async_m counterpart of gy_ccr_initial/4: runs
+%% the CCR-Initial pre-send half on the Gy handler and returns the Promise
+%% instead of blocking for the CCA. Session_at_send/State_at_send ride the
+%% async_m do-block across the await and get folded by smf_aaa_ro:fold_cca/5.
+gy_ccr_initial_issue(Ctx, Session, SOpts, Opts) ->
+    issue(Ctx, Session, SOpts, {gy, 'CCR-Initial'}, Opts).
 
 rf_initial(Ctx, Session, SOpts, Opts) ->
     invoke(Ctx, Session, SOpts, {rf, 'Initial'}, Opts).
@@ -70,6 +78,20 @@ invoke(#charging_ctx{app_id = AppId, handlers = Handlers0} = Ctx,
 	{Result, Session2, Events, Handlers1} ->
 	    {Result, Ctx#charging_ctx{handlers = Handlers1}, Session2, Events}
     end.
+
+%% issue/5 — single-handler counterpart of invoke/5 for the async_m
+%% pre-send path: no pipeline fan-out, no Events accumulator — just the one
+%% handler's CCR-Initial pre-send + send_request, returning its Promise.
+issue(#charging_ctx{app_id = AppId, handlers = Handlers0}, Session0, SOpts, Procedure, Opts0) ->
+    Opts = Opts0#{now => maps:get(now, Opts0, erlang:monotonic_time())},
+    Session1 = smf_aaa_session:session_merge(Session0, SOpts),
+    #{procedures := Procedures} = smf_aaa:get_application(AppId),
+    [SvcOpts = #{service := Service} | _] = smf_aaa_session:get_services(Procedure, Procedures),
+    Svc = smf_aaa:get_service(Service),
+    StepOpts = maps:merge(Opts, maps:merge(Svc, SvcOpts)),
+    Handler = maps:get(handler, Svc),
+    HState0 = maps:get(Handler, Handlers0, undefined),
+    Handler:ccr_initial_issue(Session1, StepOpts, HState0).
 
 run_pipeline(_Procedure, [], Session, Events, _Opts, Handlers) ->
     {ok, Session, Events, Handlers};

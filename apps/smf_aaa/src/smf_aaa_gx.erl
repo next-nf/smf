@@ -24,6 +24,9 @@
 	 initialize_handler/1, initialize_service/2, invoke/6, handle_response/6]).
 -export([to_session/3, from_session/2]).
 
+%% async diameter bridge (see smf_aaa_pcf.erl / async_m)
+-export([ccr_initial_issue/3, fold_cca/5]).
+
 -export([get_state_atom/1]).
 -ignore_xref([from_session/2, get_state_atom/1]).
 
@@ -105,11 +108,7 @@ invoke(_Service, init, Session, Events, _Opts, _State) ->
 
 invoke(_Service, {_, 'CCR-Initial'}, Session0, Events, Opts,
        #state{state = stopped} = State0) ->
-    State = inc_request_number(State0#state{state = started}),
-    Keys = ['InPackets', 'OutPackets', 'InOctets', 'OutOctets', 'Acct-Session-Time'],
-    Session = maps:without(Keys, Session0),
-    RecType = ?'DIAMETER_GX_CC-REQUEST-TYPE_INITIAL_REQUEST',
-    Request = make_CCR(RecType, Session, Opts, State),
+    {Request, Session, State} = ccr_initial_pre_send(Session0, Opts, State0),
     await_response(send_request(Request, Opts), Session, Events, State, Opts);
 
 invoke(_Service, {_, 'CCR-Update'}, Session, Events, Opts,
@@ -164,6 +163,41 @@ handle_response(Promise, Msg, Session, Events, Opts, #state{pending = Promise} =
     handle_cca(Msg, Session, Events, Opts, State#state{pending = undefined});
 handle_response(_Promise, _Msg, Session, Events, _Opts, State) ->
     {ok, Session, Events, State}.
+
+%%%===================================================================
+%%% async_m diameter bridge
+%%%===================================================================
+
+%% pre-send half of CCR-Initial: #state{} transition + volume-key strip +
+%% make_CCR. Shared by invoke/6 (blocking path) and ccr_initial_issue/3
+%% (async_m path) so the two can't diverge.
+ccr_initial_pre_send(Session0, Opts, State0) ->
+    State = inc_request_number(State0#state{state = started}),
+    Keys = ['InPackets', 'OutPackets', 'InOctets', 'OutOctets', 'Acct-Session-Time'],
+    Session = maps:without(Keys, Session0),
+    RecType = ?'DIAMETER_GX_CC-REQUEST-TYPE_INITIAL_REQUEST',
+    Request = make_CCR(RecType, Session, Opts, State),
+    {Request, Session, State}.
+
+%% ccr_initial_issue/3 — the async_m counterpart of invoke/6's CCR-Initial
+%% clause: runs the same pre-send steps, but hands back the Promise instead
+%% of blocking on await_response/parking it in #state.pending.
+-spec ccr_initial_issue(map(), map(), #state{}) -> {reference(), map(), #state{}}.
+ccr_initial_issue(Session0, Opts, State0) ->
+    {Request, Session, State} = ccr_initial_pre_send(Session0, Opts, State0),
+    Promise = send_request(Request, Opts),
+    {Promise, Session, State}.
+
+%% fold_cca/5 — the async_m counterpart of await_response's blocking
+%% handle_cca call: fold a raw CCA (or diameter error) into the session and
+%% events, re-wrapping the resulting #state{} into a #pcf_ctx{} exactly as
+%% the fire-and-forget handle_reply/4 path (smf_aaa_pcf.erl) does.
+fold_cca(Msg, Session, Events, Opts, State) ->
+    {Result, Session1, Events1, State1} = handle_cca(Msg, Session, Events, Opts, State),
+    {Result, Session1, Events1, wrap_ctx(State1)}.
+
+wrap_ctx(State) ->
+    #pcf_ctx{handlers = #{?MODULE => State}}.
 
 %%===================================================================
 %% DIAMETER handler callbacks

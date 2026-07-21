@@ -614,6 +614,15 @@ handle_event(info, #aaa_request{procedure = {_, 'RAR'}} = Request, _State,
     smf_aaa_session:aaa_reply(Request, {error, unknown_session}, #{}, Session),
     keep_state_and_data;
 
+%% The diameter async bridge: smf_aaa_diameter_srv:send_request/4 posts the
+%% same {'$reply', Promise, Handler, Msg, Opts} regardless of whether the
+%% caller is the fire-and-forget AAA path (below) or an async_m procedure
+%% parked on await(Promise) (Promise registered in async_pending). Route to
+%% async_m first — it drains the specific ReqId; anything else falls through.
+handle_event(info, {'$reply', Promise, _Handler, Msg, _Opts}, #{async_pending := P} = State, Data)
+  when is_map_key(Promise, P) ->
+    async_dispatch(Promise, Msg, State, Data);
+
 handle_event(info, {'$reply', Promise, Handler, Msg, _Opts}, _State, Data) ->
     {Data1, Events} = handle_aaa_reply(Handler, Promise, Msg, Data),
     case Events of
