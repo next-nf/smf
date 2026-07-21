@@ -11,6 +11,8 @@
 -compile({parse_transform, cut}).
 
 -export([create_session/5,
+	 create_session_async/5,
+	 create_session_result/4,
 	 modify_session/5,
 	 modify_session_async/5,
 	 modify_session_result/2,
@@ -208,6 +210,45 @@ session_establishment_request(Handler, PCC, PCtx0, BearerMap0, Ctx) ->
 	_ ->
 	    {error, ?CTX_ERR(?FATAL, system_failure)}
     end.
+
+%% create_session_async/5 — same rule build as create_session/5, but issues the request
+%% asynchronously and returns a request id instead of blocking.
+create_session_async(Handler, PCC, PCtx0, BearerMap0, Ctx)
+  when is_record(PCC, pcc_ctx) ->
+    register_ctx_ids(Handler, BearerMap0, PCtx0),
+    {ok, CntlNode, _, _} = smf_sx_socket:id(),
+
+    PCtx1 = pctx_update_from_ctx(PCtx0, Ctx),
+    {SxRules, SxErrors, PCtx2} = build_sx_rules(PCC, #{}, PCtx1, BearerMap0),
+    ?LOG(debug, "SxRules: ~p~n", [SxRules]),
+    ?LOG(debug, "SxErrors: ~p~n", [SxErrors]),
+    ?LOG(debug, "CtxPending: ~p~n", [Ctx]),
+
+    IEs0 = pfcp_pctx_update(PCtx2, PCtx0, SxRules),
+    IEs1 = update_m_rec(smf_pfcp:f_seid(PCtx2, CntlNode), IEs0),
+    IEs = pfcp_user_id(Ctx, IEs1),
+    ?LOG(debug, "IEs: ~p~n", [IEs]),
+
+    session_establishment_request_async(PCtx2, IEs).
+
+session_establishment_request_async(PCtx, IEs) ->
+    Req = #pfcp{version = v1, type = session_establishment_request, seq_no = 0, ie = IEs},
+    ReqId = smf_sx_node:send_request(PCtx, Req),
+    {ok, {request, ReqId, PCtx}}.
+
+%% create_session_result/4 — decode the async reply into the same shape create_session/5
+%% returns. Unlike modify, accept must thread BearerMap and re-register ctx ids using the
+%% response's F-TEIDs, mirroring what session_establishment_request/5 does on accept.
+create_session_result(#pfcp{version = v1, type = session_establishment_response,
+			     ie = #{pfcp_cause := 'Request accepted',
+				    f_seid := #f_seid{}} = RespIEs},
+		       Handler, BearerMap0, PCtx0) ->
+    SessionInfo = session_info(RespIEs),
+    {BearerMap, PCtx} = update_bearer(RespIEs, BearerMap0, PCtx0),
+    register_ctx_ids(Handler, BearerMap, PCtx),
+    {ok, {update_dp_seid(RespIEs, PCtx), BearerMap, SessionInfo}};
+create_session_result(_Other, _Handler, _BearerMap0, _PCtx0) ->
+    {error, ?CTX_ERR(?FATAL, system_failure)}.
 
 %% session_modification_request/2
 session_modification_request(PCtx, ReqIEs)
