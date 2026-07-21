@@ -1137,6 +1137,10 @@ ue_delete_filters_proc(EBI, PfIds, PTI, AccessTunnel) ->
 	   ok <- async_m:lift(ccr_result(Result)),
 	   PCF1 = smf_aaa_pcf:merge_ctx(PCF0, FoldCtx),
 	   RuleBase = smf_charging:rulebase(),
+	   %% TODO(#22): remove-only fold. Increment 2 handles the emptying case, so
+	   %% a co-occurring {pcc, install, _} in the same CCA (a PCRF proposing a
+	   %% replacement rule) is silently dropped. Increment 3 (the Update outcome)
+	   %% must run an install pass too, like the RAR handler in gtp_context.
 	   {PCC1, _} = smf_pcc_context:gx_events_to_pcc_ctx(Events, remove, RuleBase, PCC0),
 	   RemovedEBIs = smf_gsn_lib:detect_removed_bearers(PCC0, PCC1, BearerMap),
 	   ok <- async_m:lift(assert_bearer_emptied(EBI, RemovedEBIs)),
