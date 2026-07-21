@@ -6,7 +6,7 @@
 
 -export([new/2,
 	 ccr_initial/4, ccr_update/4, ccr_terminate/4,
-	 ccr_initial_issue/4,
+	 ccr_initial_issue/4, ccr_update_issue/4,
 	 terminate/3,
 	 handle_reply/4]).
 -ignore_xref([terminate/3]).
@@ -40,6 +40,13 @@ ccr_terminate(Ctx, Session, SOpts, Opts) ->
 ccr_initial_issue(Ctx, Session, SOpts, Opts) ->
     issue(Ctx, Session, SOpts, {gx, 'CCR-Initial'}, Opts).
 
+%% ccr_update_issue/4 — the async_m counterpart of ccr_update/4: runs the
+%% CCR-Update pre-send half on the Gx handler and returns the Promise
+%% instead of blocking for the CCA. Session_at_send/State_at_send ride the
+%% async_m do-block across the await and get folded by smf_aaa_gx:fold_cca/5.
+ccr_update_issue(Ctx, Session, SOpts, Opts) ->
+    issue(Ctx, Session, SOpts, {gx, 'CCR-Update'}, Opts).
+
 terminate(Ctx, Session, Opts) ->
     invoke(Ctx, Session, #{'Termination-Cause' => error}, terminate, Opts).
 
@@ -70,7 +77,8 @@ invoke(#pcf_ctx{app_id = AppId, handlers = Handlers0} = Ctx,
 
 %% issue/5 — single-handler counterpart of invoke/5 for the async_m
 %% pre-send path: no pipeline fan-out, no Events accumulator — just the one
-%% handler's CCR-Initial pre-send + send_request, returning its Promise.
+%% handler's CCR-Initial/CCR-Update pre-send + send_request, returning its
+%% Promise.
 issue(#pcf_ctx{app_id = AppId, handlers = Handlers0}, Session0, SOpts, Procedure, Opts0) ->
     Opts = Opts0#{now => maps:get(now, Opts0, erlang:monotonic_time())},
     Session1 = smf_aaa_session:session_merge(Session0, SOpts),
@@ -80,7 +88,11 @@ issue(#pcf_ctx{app_id = AppId, handlers = Handlers0}, Session0, SOpts, Procedure
     StepOpts = maps:merge(Opts, maps:merge(Svc, SvcOpts)),
     Handler = maps:get(handler, Svc),
     HState0 = maps:get(Handler, Handlers0, undefined),
-    Handler:ccr_initial_issue(Session1, StepOpts, HState0).
+    IssueFun = issue_fun(Procedure),
+    Handler:IssueFun(Session1, StepOpts, HState0).
+
+issue_fun({_, 'CCR-Initial'}) -> ccr_initial_issue;
+issue_fun({_, 'CCR-Update'}) -> ccr_update_issue.
 
 run_pipeline(_Procedure, [], Session, Events, _Opts, Handlers) ->
     {ok, Session, Events, Handlers};
