@@ -93,7 +93,8 @@ all() ->
      handle_failure,
      handle_answer_error,
      re_auth_request,
-     terminate
+     terminate,
+     packet_filter_delete_encoding
     ].
 
 init_per_suite(Config0) ->
@@ -482,6 +483,21 @@ handle_3xxx_error_async(Config) ->
     %% make sure nothing crashed
     ?match(0, outstanding_reqs()),
     meck_validate(Config),
+    ok.
+
+packet_filter_delete_encoding() ->
+    [{doc, "Packet-Filter-Operation/Information encode into CCR AVPs"}].
+packet_filter_delete_encoding(_Config) ->
+    Session = #{'Packet-Filter-Operation' =>
+                    ?'DIAMETER_GX_PACKET-FILTER-OPERATION_DELETION',
+                'Packet-Filter-Information' =>
+                    [#{'Packet-Filter-Identifier' => <<16#0A>>},
+                     #{'Packet-Filter-Identifier' => <<16#0B>>}]},
+    Avps = smf_aaa_gx:from_session(Session, #{}),
+    #{'Packet-Filter-Operation' := [0]} = Avps,
+    #{'Packet-Filter-Information' :=
+          [#{'Packet-Filter-Identifier' := <<16#0A>>},
+           #{'Packet-Filter-Identifier' := <<16#0B>>}]} = Avps,
     ok.
 
 %%%===================================================================

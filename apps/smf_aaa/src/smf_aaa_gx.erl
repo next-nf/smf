@@ -506,8 +506,14 @@ from_session('3GPP-MSISDN', MSISDN, Avps) ->
 from_session('Network-Request-Support', Value, Avps) ->
     Avps#{'Network-Request-Support' => [Value]};
 
-%% 'Packet-Filter-Information'
-%% 'Packet-Filter-Operation'
+%% 'Packet-Filter-Information' — repeated grouped AVP (TS 29.212 §5.3.55); the
+%% caller supplies the list of groups, each carrying the SDF Packet-Filter-Identifier.
+from_session('Packet-Filter-Information', Groups, Avps) when is_list(Groups) ->
+    Avps#{'Packet-Filter-Information' => Groups};
+
+%% 'Packet-Filter-Operation' — single AVP (TS 29.212 §5.3.56).
+from_session('Packet-Filter-Operation', Value, Avps) ->
+    Avps#{'Packet-Filter-Operation' => [Value]};
 
 %% 'Bearer-Identifier'
 from_session('Bearer-Identifier', Value, Avps) ->
