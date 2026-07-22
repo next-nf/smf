@@ -96,7 +96,8 @@ all() ->
      re_auth_request,
      terminate,
      packet_filter_delete_encoding,
-     packet_filter_add_wire_roundtrip
+     packet_filter_add_wire_roundtrip,
+     packet_filter_modify_wire_roundtrip
     ].
 
 init_per_suite(Config0) ->
@@ -547,6 +548,49 @@ packet_filter_add_wire_roundtrip(_Config) ->
       'Flow-Direction' := [2]} = DecGroup,
     %% the UE's TFT filter id is still omitted on the wire
     false = maps:is_key('Packet-Filter-Identifier', DecGroup),
+    ok.
+
+packet_filter_modify_wire_roundtrip() ->
+    [{doc, "flow_info_to_pf_modify_group/2's output (Packet-Filter-Identifier + "
+	   "content together, for a MODIFICATION) survives a REAL diameter "
+	   "encode/decode through the Gx dictionary"}].
+packet_filter_modify_wire_roundtrip(_Config) ->
+    Mod = diameter_3gpp_ts29_212,
+    FI = #{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+           'Flow-Direction' => [2],
+           'Precedence' => [100],
+           'Packet-Filter-Identifier' => [<<7:8>>]},   %% UE TFT id (ignored by the builder)
+    Group = smf_tft:flow_info_to_pf_modify_group(FI, <<"sdf-A">>),
+
+    Avps = #{'Session-Id' => <<"test;1;2">>,
+             'Origin-Host' => <<"host.example.com">>,
+             'Origin-Realm' => <<"example.com">>,
+             'Destination-Realm' => <<"dest.example.com">>,
+             'Auth-Application-Id' => Mod:id(),
+             'CC-Request-Type' => 1,
+             'CC-Request-Number' => 0,
+             'Packet-Filter-Operation' =>
+                 ?'DIAMETER_GX_PACKET-FILTER-OPERATION_MODIFICATION',
+             'Packet-Filter-Information' => [Group]},
+
+    Pkt = diameter_codec:encode(Mod, ['CCR' | Avps]),
+    true = is_binary(Pkt#diameter_packet.bin),
+
+    DecPkt = diameter_codec:decode(Mod, #{decode_format => map,
+					  string_decode => false},
+				   Pkt#diameter_packet.bin),
+    ?equal([], DecPkt#diameter_packet.errors),
+
+    ['CCR' | DecAvps] = DecPkt#diameter_packet.msg,
+    #{'Packet-Filter-Operation' := [2],
+      'Packet-Filter-Information' := [DecGroup]} = DecAvps,
+
+    %% for a MODIFICATION the group carries BOTH the SDF handle (WHICH filter)
+    %% and the new content — list-wrapped on decode per the map decode format.
+    #{'Packet-Filter-Identifier' := [<<"sdf-A">>],
+      'Packet-Filter-Content' := [<<"permit out ip from any to assigned">>],
+      'Precedence' := [100],
+      'Flow-Direction' := [2]} = DecGroup,
     ok.
 
 %%%===================================================================
