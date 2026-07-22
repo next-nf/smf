@@ -458,6 +458,36 @@
 				  'Charging-Rule-Remove' =>
 				      [#{'Charging-Rule-Name' => [<<"ded-rule-1">>]}]
 				 }},
+		      %% CCR-U install answer for the UE add_packet_filters Update
+		      %% outcome: installs a SECOND rule (ded-rule-2) sharing the
+		      %% established dedicated bearer's {QCI, ARP} (QCI 1 / PL 2, PCI 1,
+		      %% PVI 0, cf. establish_ded_bearer_with_pf/3), so
+		      %% detect_modified_bearers sees the bearer's descriptor grow
+		      %% rather than detect_new_bearers creating a Create Bearer
+		      %% (#22 Increment 4).
+		      'Update-Gx-Add-One' =>
+			  #{avps =>
+				#{'Result-Code' => 2001,
+				  'Charging-Rule-Install' =>
+				      [#{'Charging-Rule-Definition' =>
+					     [#{'Charging-Rule-Name' => <<"ded-rule-2">>,
+						'Flow-Information' =>
+						    [#{'Flow-Description' =>
+							   [<<"permit out tcp from any to assigned 5060">>],
+						       'Flow-Direction' => [1],
+						       'Packet-Filter-Identifier' => [<<"pf-2">>]}],
+						'QoS-Information' =>
+						    [#{'QoS-Class-Identifier' => 1,
+						       'Allocation-Retention-Priority' =>
+							   #{'Priority-Level' => 2,
+							     'Pre-emption-Capability' => 1,
+							     'Pre-emption-Vulnerability' => 0}}],
+						'Metering-Method' => [1],
+						'Precedence' => [110],
+						'Online' => [0],
+						'Offline' => [0]}]
+					}]
+				 }},
 		      'Final-Gx' => #{avps => #{'Result-Code' => 2001}},
 
 		      'Initial-Gx-Fail-1' =>
@@ -783,6 +813,7 @@ common() ->
      ue_delete_packet_filters_deletes_bearer,
      ue_delete_packet_filters_updates_bearer,
      ue_delete_packet_filters_reject,
+     ue_add_packet_filters_updates_bearer,
      mme_delete_bearer_command,
      mme_delete_bearer_command_multi,
      dedicated_bearer_session_delete,
@@ -1105,7 +1136,8 @@ init_per_testcase(bearer_resource_command_delete, Config) ->
 init_per_testcase(TestCase, Config)
   when TestCase == ue_delete_packet_filters_deletes_bearer;
        TestCase == ue_delete_packet_filters_updates_bearer;
-       TestCase == ue_delete_packet_filters_reject ->
+       TestCase == ue_delete_packet_filters_reject;
+       TestCase == ue_add_packet_filters_updates_bearer ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -8627,6 +8659,85 @@ ue_delete_packet_filters_reject(Config) ->
     ?equal(timeout, recv_pdu(Cntl, undefined, 100, fun(Why) -> Why end)),
 
     delete_session(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+ue_add_packet_filters_updates_bearer() ->
+    [{doc, "Check that a Bearer Resource Command whose TAD adds a new packet "
+      "filter to a dedicated bearer drives a Gx CCR-Update ADDITION and, when "
+      "the PCRF installs a rule/flow that grows the bearer's TFT, emits a "
+      "single Update Bearer Request echoing the PTI with the expanded "
+      "(two-filter) TFT rather than a Create Bearer Request; the Update "
+      "Bearer Response commits the two-rule descriptor "
+      "(TS 23.401 5.4.5, #22 Increment 4)"}].
+ue_add_packet_filters_updates_bearer(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+
+    {GtpCDed, DedEBI, _PfIds} = establish_ded_bearer_with_pf(GtpC, Cntl, CtxKey),
+
+    %% Now make the CCR-Update install a second rule (ded-rule-2), sharing the
+    %% established bearer's {QCI, ARP} -> the bearer survives and grows a
+    %% second TFT entry rather than triggering a Create Bearer.
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Update'}, 'Update-Gx-Add-One'}]),
+
+    PTI = 11,
+    FlowSpec = #{id => 1, direction => downlink, precedence => 90,
+                 components => [{protocol, 6}, {remote_port, 5060}]},
+    {_GtpC2, _BRCReq} =
+        bearer_resource_command({add_pf, DedEBI, FlowSpec, PTI}, GtpC),
+
+    %% The PGW parks on the CCR-U await, the mock installs the new rule, the
+    %% bearer's descriptor grows -> re-provision PFCP (harness UPF mock
+    %% auto-answers the session_modification), then exactly one Update Bearer
+    %% Request on the control socket echoing the UE PTI and carrying the
+    %% expanded (two-filter) TFT.
+    UBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = update_bearer_request,
+                ie = #{{v2_procedure_transaction_id, 0} :=
+                           #v2_procedure_transaction_id{pti = PTI},
+                       {v2_bearer_context, 0} :=
+                           #v2_bearer_context{
+                              group = #{{v2_eps_bearer_id, 0} :=
+                                            #v2_eps_bearer_id{eps_bearer_id = DedEBI},
+                                        {v2_eps_bearer_level_traffic_flow_template, 0} :=
+                                            #v2_eps_bearer_level_traffic_flow_template{}}}}},
+           UBReq),
+
+    #gtp{ie = #{{v2_bearer_context, 0} :=
+                    #v2_bearer_context{
+                       group = #{{v2_eps_bearer_level_traffic_flow_template, 0} :=
+                                     #v2_eps_bearer_level_traffic_flow_template{
+                                        value = TFTBin}}}}} = UBReq,
+    #{filters := TFTFilters} = smf_tft:decode(TFTBin),
+    ?equal(2, length(TFTFilters)),
+
+    %% Accept the Update Bearer Request to complete the exchange.
+    send_pdu(Cntl, GtpCDed, make_response(UBReq, simple, GtpCDed)),
+
+    ct:sleep(200),
+
+    %% The grown descriptor was committed on the Update Bearer Response: both
+    %% ded-rule-1 and ded-rule-2 are bound, and each SDF filter contributes a
+    %% sdf_to_pf entry.
+    #{dedicated := #{DedEBI := #ded_bearer{rules = Rules1, sdf_to_pf = SdfToPf1}}} =
+        smf_context:test_cmd(gtp, CtxKey, info),
+    ?equal([<<"ded-rule-1">>, <<"ded-rule-2">>], lists:sort(Rules1)),
+    ?equal(2, map_size(SdfToPf1)),
+
+    %% ...and NO Create Bearer Request was sent.
+    ?equal(timeout, recv_pdu(Cntl, undefined, 100, fun(Why) -> Why end)),
+
+    delete_session(GtpC),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4tunnels(?TIMEOUT),
