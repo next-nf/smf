@@ -41,7 +41,8 @@ all() ->
      flow_info_to_tft_map_no_sdf,
      flow_info_to_tft_map_captures_sdf,
      flow_info_to_tft_map_bare_binary_sdf,
-     pf_ids_to_sdf_test].
+     pf_ids_to_sdf_test,
+     flow_info_to_pf_add_group_test].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -527,4 +528,19 @@ pf_ids_to_sdf_test(_Config) ->
     %% non-injective forward map -> not invertible -> loud error (TODO(#32))
     Dup = #{<<"sdfA">> => 0, <<"sdfB">> => 0},
     {error, ambiguous_sdf_to_pf} = smf_tft:pf_ids_to_sdf([0], Dup),
+    ok.
+
+flow_info_to_pf_add_group_test(_Config) ->
+    %% a flow-info map as filter_to_flow_info/1 now produces (list-wrapped members)
+    FI = #{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+           'Flow-Direction' => [2],
+           'Precedence' => [100],
+           'Packet-Filter-Identifier' => [<<3:8>>]},
+    Group = smf_tft:flow_info_to_pf_add_group(FI),
+    %% ADD group: content (bare), precedence, direction; NO Packet-Filter-Identifier
+    #{'Packet-Filter-Content' := <<"permit out ip from any to assigned">>,
+      'Precedence' := 100,
+      'Flow-Direction' := 2} = Group,
+    false = maps:is_key('Packet-Filter-Identifier', Group),
+    false = maps:is_key('Flow-Description', Group),
     ok.

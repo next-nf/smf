@@ -9,10 +9,12 @@
 
 -export([encode/1, decode/1,
 	 flow_info_to_tft/1, flow_info_to_tft_map/1, tft_to_flow_info/1, decode_tad/1,
-	 parse_flow_description/1, format_flow_description/1, pf_ids_to_sdf/2]).
+	 parse_flow_description/1, format_flow_description/1, pf_ids_to_sdf/2,
+	 flow_info_to_pf_add_group/1]).
 -ignore_xref([encode/1, decode/1,
 	      flow_info_to_tft/1, flow_info_to_tft_map/1, tft_to_flow_info/1, decode_tad/1,
-	      parse_flow_description/1, format_flow_description/1, pf_ids_to_sdf/2]).
+	      parse_flow_description/1, format_flow_description/1, pf_ids_to_sdf/2,
+	      flow_info_to_pf_add_group/1]).
 
 %%%===================================================================
 %%% API
@@ -410,7 +412,7 @@ get_extra_components(FlowInfo) ->
     TOS ++ SPI ++ FL.
 
 filter_to_flow_info(#{id := Id, direction := Direction,
-		      precedence := _Precedence, components := Components}) ->
+		      precedence := Precedence, components := Components}) ->
     FlowDir = case Direction of
 		  downlink      -> 1;
 		  uplink        -> 2;
@@ -420,6 +422,7 @@ filter_to_flow_info(#{id := Id, direction := Direction,
     Desc = format_flow_description({direction_to_flow_dir(Direction), Components}),
     Base = #{'Flow-Description' => [Desc],
 	     'Flow-Direction' => [FlowDir],
+	     'Precedence' => [Precedence],
 	     'Packet-Filter-Identifier' => [<<Id:8>>]},
     add_optional_avps(Components, Base).
 
@@ -427,6 +430,28 @@ direction_to_flow_dir(downlink)      -> out;
 direction_to_flow_dir(uplink)        -> in;
 direction_to_flow_dir(bidirectional) -> out;
 direction_to_flow_dir(pre_rel7)      -> out.
+
+%% flow_info_to_pf_add_group/1 — a flow-info map (from filter_to_flow_info/1) ->
+%% a Gx Packet-Filter-Information group for a UE-requested ADD (TS 29.212 §4.5.2).
+%% Reports filter CONTENT: Packet-Filter-Content (the IPFilterRule, same bytes as
+%% Flow-Description) + Precedence + Flow-Direction (+ optional ToS/SPI/Flow-Label).
+%% Omits Packet-Filter-Identifier — the UE's 4-bit TFT id is not a PCRF SDF handle;
+%% the PCRF assigns the identifier for an add. Grouped-AVP members are bare values
+%% (cf. the Subscription-Id group in smf_aaa_gx:from_session).
+-spec flow_info_to_pf_add_group(map()) -> map().
+flow_info_to_pf_add_group(#{'Flow-Description' := [Desc], 'Flow-Direction' := [Dir]} = FI) ->
+    Base = #{'Packet-Filter-Content' => Desc, 'Flow-Direction' => Dir},
+    Base1 = case FI of
+                #{'Precedence' := [Prec]} -> Base#{'Precedence' => Prec};
+                _ -> Base
+            end,
+    lists:foldl(
+      fun(K, Acc) ->
+              case FI of
+                  #{K := [V]} -> Acc#{K => V};
+                  _           -> Acc
+              end
+      end, Base1, ['ToS-Traffic-Class', 'Security-Parameter-Index', 'Flow-Label']).
 
 add_optional_avps([], Map) -> Map;
 add_optional_avps([{tos_traffic_class, T, M} | Rest], Map) ->
