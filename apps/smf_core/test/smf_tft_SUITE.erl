@@ -42,7 +42,8 @@ all() ->
      flow_info_to_tft_map_captures_sdf,
      flow_info_to_tft_map_bare_binary_sdf,
      pf_ids_to_sdf_test,
-     flow_info_to_pf_add_group_test].
+     flow_info_to_pf_add_group_test,
+     flow_info_to_pf_modify_group_test].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -542,5 +543,19 @@ flow_info_to_pf_add_group_test(_Config) ->
       'Precedence' := 100,
       'Flow-Direction' := 2} = Group,
     false = maps:is_key('Packet-Filter-Identifier', Group),
+    false = maps:is_key('Flow-Description', Group),
+    ok.
+
+flow_info_to_pf_modify_group_test(_Config) ->
+    FI = #{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+           'Flow-Direction' => [2],
+           'Precedence' => [100],
+           'Packet-Filter-Identifier' => [<<7:8>>]},   %% the UE TFT id (ignored by the builder)
+    Group = smf_tft:flow_info_to_pf_modify_group(FI, <<"sdf-A">>),
+    %% MODIFICATION group: content + the SDF handle (WHICH filter), not the UE id
+    #{'Packet-Filter-Content' := <<"permit out ip from any to assigned">>,
+      'Precedence' := 100,
+      'Flow-Direction' := 2,
+      'Packet-Filter-Identifier' := <<"sdf-A">>} = Group,
     false = maps:is_key('Flow-Description', Group),
     ok.

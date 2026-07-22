@@ -10,7 +10,7 @@
 -export([encode/1, decode/1,
 	 flow_info_to_tft/1, flow_info_to_tft_map/1, tft_to_flow_info/1, decode_tad/1,
 	 parse_flow_description/1, format_flow_description/1, pf_ids_to_sdf/2,
-	 flow_info_to_pf_add_group/1]).
+	 flow_info_to_pf_add_group/1, flow_info_to_pf_modify_group/2]).
 -ignore_xref([encode/1, decode/1,
 	      flow_info_to_tft/1, flow_info_to_tft_map/1, tft_to_flow_info/1, decode_tad/1,
 	      parse_flow_description/1, format_flow_description/1, pf_ids_to_sdf/2,
@@ -452,6 +452,16 @@ flow_info_to_pf_add_group(#{'Flow-Description' := [Desc], 'Flow-Direction' := [D
                   _           -> Acc
               end
       end, Base1, ['ToS-Traffic-Class', 'Security-Parameter-Index', 'Flow-Label']).
+
+%% flow_info_to_pf_modify_group/2 — a flow-info map + the SDF handle of the filter
+%% being replaced -> a Gx Packet-Filter-Information MODIFICATION group (TS 29.212
+%% §4.5.2): the ADD content group PLUS Packet-Filter-Identifier naming WHICH
+%% existing filter to modify (the SDF handle, from inverting sdf_to_pf — NOT the
+%% UE's 4-bit TFT id). Members bare (per the ADD wire round-trip).
+-spec flow_info_to_pf_modify_group(map(), binary()) -> map().
+flow_info_to_pf_modify_group(FI, SdfHandle) ->
+    Group = flow_info_to_pf_add_group(FI),
+    Group#{'Packet-Filter-Identifier' => SdfHandle}.
 
 add_optional_avps([], Map) -> Map;
 add_optional_avps([{tos_traffic_class, T, M} | Rest], Map) ->
