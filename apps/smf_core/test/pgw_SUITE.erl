@@ -541,6 +541,37 @@
 						'Offline' => [0]}]
 					}]
 				 }},
+		      %% CCR-U install answer for the UE QoS-change path: re-installs
+		      %% the dedicated bearer's rule (ded-rule-1, same filter) with a
+		      %% new GBR in QoS-Information. establish_ded_bearer_with_pf/3
+		      %% installs ded-rule-1 with NO GBR, so this is a GBR 0 -> 2000000
+		      %% delta -> detect_modified_bearers sees the bearer QoS change ->
+		      %% Update Bearer with the new Bearer QoS (#22 Increment 6).
+		      'Update-Gx-Qos-Change' =>
+			  #{avps =>
+				#{'Result-Code' => 2001,
+				  'Charging-Rule-Install' =>
+				      [#{'Charging-Rule-Definition' =>
+					     [#{'Charging-Rule-Name' => <<"ded-rule-1">>,
+						'Flow-Information' =>
+						    [#{'Flow-Description' =>
+							   [<<"permit out ip from any to assigned">>],
+						       'Flow-Direction' => [2],
+						       'Packet-Filter-Identifier' => [<<"pf-1">>]}],
+						'QoS-Information' =>
+						    [#{'QoS-Class-Identifier' => 1,
+						       'Guaranteed-Bitrate-UL' => 2000000,
+						       'Guaranteed-Bitrate-DL' => 2000000,
+						       'Allocation-Retention-Priority' =>
+							   #{'Priority-Level' => 2,
+							     'Pre-emption-Capability' => 1,
+							     'Pre-emption-Vulnerability' => 0}}],
+						'Metering-Method' => [1],
+						'Precedence' => [100],
+						'Online' => [0],
+						'Offline' => [0]}]
+					}]
+				 }},
 		      'Final-Gx' => #{avps => #{'Result-Code' => 2001}},
 
 		      'Initial-Gx-Fail-1' =>
@@ -869,6 +900,7 @@ common() ->
      ue_add_packet_filters_updates_bearer,
      ue_add_packet_filters_reports_unknown_rule,
      ue_replace_packet_filters_updates_bearer,
+     ue_qos_change_updates_bearer,
      mme_delete_bearer_command,
      mme_delete_bearer_command_multi,
      dedicated_bearer_session_delete,
@@ -1194,7 +1226,8 @@ init_per_testcase(TestCase, Config)
        TestCase == ue_delete_packet_filters_reject;
        TestCase == ue_add_packet_filters_updates_bearer;
        TestCase == ue_add_packet_filters_reports_unknown_rule;
-       TestCase == ue_replace_packet_filters_updates_bearer ->
+       TestCase == ue_replace_packet_filters_updates_bearer;
+       TestCase == ue_qos_change_updates_bearer ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -8933,6 +8966,67 @@ ue_replace_packet_filters_updates_bearer(Config) ->
     ?equal(1, map_size(SdfToPf1)),
 
     %% ...and NO Delete or Create Bearer Request was sent.
+    ?equal(timeout, recv_pdu(Cntl, undefined, 100, fun(Why) -> Why end)),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+ue_qos_change_updates_bearer() ->
+    [{doc, "Check that a Bearer Resource Command whose TAD is no_tft_operation "
+      "(a UE-requested QoS/GBR change, no filter change) drives a Gx CCR-Update "
+      "carrying QoS-Information and, when the PCRF re-installs the bearer's rule "
+      "with a new GBR, emits a single Update Bearer Request echoing the PTI and "
+      "carrying the new Bearer QoS, without a Create or Delete Bearer "
+      "(TS 23.401 5.4.5, #22 Increment 6)"}].
+ue_qos_change_updates_bearer(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+
+    {GtpCDed, DedEBI, _PfIds} = establish_ded_bearer_with_pf(GtpC, Cntl, CtxKey),
+
+    %% CCR-U re-installs ded-rule-1 with a new GBR -> bearer QoS changes.
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Update'}, 'Update-Gx-Qos-Change'}]),
+
+    PTI = 12,
+    ReqQoS = #{'QoS-Class-Identifier' => 1,
+	       'Guaranteed-Bitrate-UL' => 2000000,
+	       'Guaranteed-Bitrate-DL' => 2000000},
+    {_GtpC2, _BRCReq} =
+	bearer_resource_command({qos_change, DedEBI, ReqQoS, PTI}, GtpC),
+
+    %% The PGW parks on the CCR-U await, the mock re-installs the rule with the
+    %% new GBR, the bearer's descriptor QoS changes -> re-provision PFCP (UPF
+    %% mock auto-answers), then exactly one Update Bearer Request echoing the PTI
+    %% and carrying the new Bearer QoS (GBR 2000 kbps).
+    UBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = update_bearer_request,
+		ie = #{{v2_procedure_transaction_id, 0} :=
+			   #v2_procedure_transaction_id{pti = PTI},
+		       {v2_bearer_context, 0} :=
+			   #v2_bearer_context{
+			      group = #{{v2_eps_bearer_id, 0} :=
+					    #v2_eps_bearer_id{eps_bearer_id = DedEBI},
+					{v2_bearer_level_quality_of_service, 0} :=
+					    #v2_bearer_level_quality_of_service{
+					       guaranteed_bit_rate_for_uplink   = 2000,
+					       guaranteed_bit_rate_for_downlink = 2000}}}}},
+	   UBReq),
+
+    %% Accept the Update Bearer Request to complete the exchange.
+    send_pdu(Cntl, GtpCDed, make_response(UBReq, simple, GtpCDed)),
+    ct:sleep(200),
+
+    %% ...and NO Create/Delete Bearer Request was sent.
     ?equal(timeout, recv_pdu(Cntl, undefined, 100, fun(Why) -> Why end)),
 
     delete_session(GtpC),

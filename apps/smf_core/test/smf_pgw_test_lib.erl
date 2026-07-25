@@ -754,6 +754,36 @@ make_request(bearer_resource_command, {replace_pf, TargetEBI, FlowSpec, PTI},
     #gtp{version = v2, type = bearer_resource_command, tei = RemoteCntlTEI,
 	 seq_no = SeqNo bor 16#800000, ie = IEs};
 
+make_request(bearer_resource_command, {qos_change, TargetEBI, ReqQoS, PTI},
+	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
+		   local_ip = LocalIP,
+		   local_control_tei = LocalCntlTEI,
+		   remote_control_tei = RemoteCntlTEI}) ->
+    %% UE requests a QoS/GBR change on an existing dedicated bearer with no TFT
+    %% change (no_tft_operation, TS 24.008 §10.5.6.12 / TS 23.401 §5.4.5). The
+    %% requested QoS rides the Flow QoS IE.
+    TADBin = smf_tft:encode(#{operation => no_tft_operation,
+			      filters => [], parameters => []}),
+    QCI  = maps:get('QoS-Class-Identifier', ReqQoS, 9),
+    MBRu = maps:get('Max-Requested-Bandwidth-UL', ReqQoS, 0),
+    MBRd = maps:get('Max-Requested-Bandwidth-DL', ReqQoS, 0),
+    GBRu = maps:get('Guaranteed-Bitrate-UL', ReqQoS, 0),
+    GBRd = maps:get('Guaranteed-Bitrate-DL', ReqQoS, 0),
+    IEs = [#v2_recovery{restart_counter = RCnt},
+	   #v2_eps_bearer_id{instance = 0, eps_bearer_id = 5},
+	   #v2_procedure_transaction_id{pti = PTI},
+	   #v2_traffic_aggregation_description{value = TADBin},
+	   #v2_eps_bearer_id{instance = 1, eps_bearer_id = TargetEBI},
+	   #v2_flow_quality_of_service{label = QCI,
+				       maximum_bit_rate_for_uplink   = MBRu div 1000,
+				       maximum_bit_rate_for_downlink = MBRd div 1000,
+				       guaranteed_bit_rate_for_uplink   = GBRu div 1000,
+				       guaranteed_bit_rate_for_downlink = GBRd div 1000},
+	   fq_teid(0, ?'S5/S8-C SGW', LocalCntlTEI, LocalIP)
+	  ],
+    #gtp{version = v2, type = bearer_resource_command, tei = RemoteCntlTEI,
+	 seq_no = SeqNo bor 16#800000, ie = IEs};
+
 make_request(change_notification_request, simple,
 	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
 		   remote_control_tei = RemoteCntlTEI,
