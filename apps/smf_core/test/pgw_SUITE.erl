@@ -544,9 +544,12 @@
 		      %% CCR-U install answer for the UE QoS-change path: re-installs
 		      %% the dedicated bearer's rule (ded-rule-1, same filter) with a
 		      %% new GBR in QoS-Information. establish_ded_bearer_with_pf/3
-		      %% installs ded-rule-1 with NO GBR, so this is a GBR 0 -> 2000000
+		      %% installs ded-rule-1 with NO GBR, so this is a GBR 0 -> 3000000
 		      %% delta -> detect_modified_bearers sees the bearer QoS change ->
-		      %% Update Bearer with the new Bearer QoS (#22 Increment 6).
+		      %% Update Bearer with the new Bearer QoS (#22 Increment 6). The
+		      %% authorized GBR (3000000) deliberately differs from the UE's
+		      %% requested GBR (2000000, cf. the test's ReqQoS) so the e2e proves
+		      %% the Update Bearer carries the PCRF-AUTHORIZED QoS, not the echo.
 		      'Update-Gx-Qos-Change' =>
 			  #{avps =>
 				#{'Result-Code' => 2001,
@@ -560,8 +563,8 @@
 						       'Packet-Filter-Identifier' => [<<"pf-1">>]}],
 						'QoS-Information' =>
 						    [#{'QoS-Class-Identifier' => 1,
-						       'Guaranteed-Bitrate-UL' => 2000000,
-						       'Guaranteed-Bitrate-DL' => 2000000,
+						       'Guaranteed-Bitrate-UL' => 3000000,
+						       'Guaranteed-Bitrate-DL' => 3000000,
 						       'Allocation-Retention-Priority' =>
 							   #{'Priority-Level' => 2,
 							     'Pre-emption-Capability' => 1,
@@ -9018,8 +9021,8 @@ ue_qos_change_updates_bearer(Config) ->
 					    #v2_eps_bearer_id{eps_bearer_id = DedEBI},
 					{v2_bearer_level_quality_of_service, 0} :=
 					    #v2_bearer_level_quality_of_service{
-					       guaranteed_bit_rate_for_uplink   = 2000,
-					       guaranteed_bit_rate_for_downlink = 2000}}}}},
+					       guaranteed_bit_rate_for_uplink   = 3000,
+					       guaranteed_bit_rate_for_downlink = 3000}}}}},
 	   UBReq),
 
     %% Accept the Update Bearer Request to complete the exchange.

@@ -480,7 +480,7 @@ handle_request(ReqKey,
     BCM = maps:get('Bearer-Control-Mode', Session,
 		   ?'DIAMETER_GX_BEARER-CONTROL-MODE_UE_ONLY'),
     if EBI =:= 0, BCM =:= ?'DIAMETER_GX_BEARER-CONTROL-MODE_UE_NW' ->
-	    QoS = extract_flow_qos(IEs),
+	    QoS = ReqQoS,
 	    QCI = maps:get('QoS-Class-Identifier', QoS, 9),
 	    ARP0 = maps:get('Allocation-Retention-Priority', QoS, #{}),
 	    PL = maps:get('Priority-Level', ARP0, 1),
