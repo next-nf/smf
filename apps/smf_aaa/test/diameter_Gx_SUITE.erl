@@ -18,6 +18,7 @@
 -compile([nowarn_export_all, export_all]).
 
 -include_lib("common_test/include/ct.hrl").
+-include_lib("diameter/include/diameter.hrl").
 -include_lib("diameter/include/diameter_gen_base_rfc6733.hrl").
 -include_lib("gtplib/include/gtp_packet.hrl").
 -include("../include/diameter_3gpp_ts29_212.hrl").
@@ -93,7 +94,10 @@ all() ->
      handle_failure,
      handle_answer_error,
      re_auth_request,
-     terminate
+     terminate,
+     packet_filter_delete_encoding,
+     packet_filter_add_wire_roundtrip,
+     packet_filter_modify_wire_roundtrip
     ].
 
 init_per_suite(Config0) ->
@@ -482,6 +486,111 @@ handle_3xxx_error_async(Config) ->
     %% make sure nothing crashed
     ?match(0, outstanding_reqs()),
     meck_validate(Config),
+    ok.
+
+packet_filter_delete_encoding() ->
+    [{doc, "Packet-Filter-Operation/Information encode into CCR AVPs"}].
+packet_filter_delete_encoding(_Config) ->
+    Session = #{'Packet-Filter-Operation' =>
+                    ?'DIAMETER_GX_PACKET-FILTER-OPERATION_DELETION',
+                'Packet-Filter-Information' =>
+                    [#{'Packet-Filter-Identifier' => <<16#0A>>},
+                     #{'Packet-Filter-Identifier' => <<16#0B>>}]},
+    Avps = smf_aaa_gx:from_session(Session, #{}),
+    #{'Packet-Filter-Operation' := [0]} = Avps,
+    #{'Packet-Filter-Information' :=
+          [#{'Packet-Filter-Identifier' := <<16#0A>>},
+           #{'Packet-Filter-Identifier' := <<16#0B>>}]} = Avps,
+    ok.
+
+packet_filter_add_wire_roundtrip() ->
+    [{doc, "flow_info_to_pf_add_group/1's output survives a REAL diameter "
+	   "encode/decode through the Gx dictionary (not just the mock "
+	   "AVP-map-building path from_session/2 exercises)"}].
+packet_filter_add_wire_roundtrip(_Config) ->
+    Mod = diameter_3gpp_ts29_212,
+    %% a flow-info map as filter_to_flow_info/1 produces
+    FI = #{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+           'Flow-Direction' => [2],
+           'Precedence' => [100],
+           'Packet-Filter-Identifier' => [<<3:8>>]},
+    Group = smf_tft:flow_info_to_pf_add_group(FI),
+
+    Avps = #{'Session-Id' => <<"test;1;2">>,
+             'Origin-Host' => <<"host.example.com">>,
+             'Origin-Realm' => <<"example.com">>,
+             'Destination-Realm' => <<"dest.example.com">>,
+             'Auth-Application-Id' => Mod:id(),
+             'CC-Request-Type' => 1,
+             'CC-Request-Number' => 0,
+             'Packet-Filter-Information' => [Group]},
+
+    %% encode() and decode() go all the way through the generated diameter
+    %% dictionary's codec — an actual binary wire encoding, not the mock
+    %% path (from_session/2 alone, as packet_filter_delete_encoding tests).
+    Pkt = diameter_codec:encode(Mod, ['CCR' | Avps]),
+    true = is_binary(Pkt#diameter_packet.bin),
+
+    DecPkt = diameter_codec:decode(Mod, #{decode_format => map,
+					  string_decode => false},
+				   Pkt#diameter_packet.bin),
+    ?equal([], DecPkt#diameter_packet.errors),
+
+    ['CCR' | DecAvps] = DecPkt#diameter_packet.msg,
+    #{'Packet-Filter-Information' := [DecGroup]} = DecAvps,
+
+    %% content, precedence and direction survive the wire. diameter's map
+    %% decode format list-wraps optional (0-1 arity) grouped members — the
+    %% same convention filter_to_flow_info/1 already uses — regardless of
+    %% whether the encode-side map presented them bare or list-wrapped.
+    #{'Packet-Filter-Content' := [<<"permit out ip from any to assigned">>],
+      'Precedence' := [100],
+      'Flow-Direction' := [2]} = DecGroup,
+    %% the UE's TFT filter id is still omitted on the wire
+    false = maps:is_key('Packet-Filter-Identifier', DecGroup),
+    ok.
+
+packet_filter_modify_wire_roundtrip() ->
+    [{doc, "flow_info_to_pf_modify_group/2's output (Packet-Filter-Identifier + "
+	   "content together, for a MODIFICATION) survives a REAL diameter "
+	   "encode/decode through the Gx dictionary"}].
+packet_filter_modify_wire_roundtrip(_Config) ->
+    Mod = diameter_3gpp_ts29_212,
+    FI = #{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+           'Flow-Direction' => [2],
+           'Precedence' => [100],
+           'Packet-Filter-Identifier' => [<<7:8>>]},   %% UE TFT id (ignored by the builder)
+    Group = smf_tft:flow_info_to_pf_modify_group(FI, <<"sdf-A">>),
+
+    Avps = #{'Session-Id' => <<"test;1;2">>,
+             'Origin-Host' => <<"host.example.com">>,
+             'Origin-Realm' => <<"example.com">>,
+             'Destination-Realm' => <<"dest.example.com">>,
+             'Auth-Application-Id' => Mod:id(),
+             'CC-Request-Type' => 1,
+             'CC-Request-Number' => 0,
+             'Packet-Filter-Operation' =>
+                 ?'DIAMETER_GX_PACKET-FILTER-OPERATION_MODIFICATION',
+             'Packet-Filter-Information' => [Group]},
+
+    Pkt = diameter_codec:encode(Mod, ['CCR' | Avps]),
+    true = is_binary(Pkt#diameter_packet.bin),
+
+    DecPkt = diameter_codec:decode(Mod, #{decode_format => map,
+					  string_decode => false},
+				   Pkt#diameter_packet.bin),
+    ?equal([], DecPkt#diameter_packet.errors),
+
+    ['CCR' | DecAvps] = DecPkt#diameter_packet.msg,
+    #{'Packet-Filter-Operation' := [2],
+      'Packet-Filter-Information' := [DecGroup]} = DecAvps,
+
+    %% for a MODIFICATION the group carries BOTH the SDF handle (WHICH filter)
+    %% and the new content — list-wrapped on decode per the map decode format.
+    #{'Packet-Filter-Identifier' := [<<"sdf-A">>],
+      'Packet-Filter-Content' := [<<"permit out ip from any to assigned">>],
+      'Precedence' := [100],
+      'Flow-Direction' := [2]} = DecGroup,
     ok.
 
 %%%===================================================================
