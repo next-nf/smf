@@ -614,20 +614,11 @@ handle_event(info, #aaa_request{procedure = {_, 'RAR'}} = Request, _State,
     smf_aaa_session:aaa_reply(Request, {error, unknown_session}, #{}, Session),
     keep_state_and_data;
 
-%% The diameter async bridge: smf_aaa_diameter_srv:send_request/4 posts the
-%% same {'$reply', Promise, Handler, Msg, Opts} regardless of whether the
-%% caller is the fire-and-forget AAA path (below) or an async_m procedure
-%% parked on await(Promise) (Promise registered in async_pending). Route to
-%% async_m first — it drains the specific ReqId; anything else falls through.
-handle_event(info, {'$reply', Promise, _Handler, Msg, _Opts}, #{async_pending := P} = State, Data)
-  when is_map_key(Promise, P) ->
-    async_dispatch(Promise, Msg, State, Data);
-
 %% Serialize the fire-and-forget Gx reply path behind an in-flight async_m
-%% procedure. This {'$reply'} is NOT the parked procedure's own (that case is
-%% handled just above) — it answers an earlier fire-and-forget CCR-Update
-%% (report_* with async => true) that shares the pcf/aaa_session the procedure
-%% captured before its await. Handling it now would mutate pcf/aaa_session
+%% procedure. A {'$reply'} only ever answers a fire-and-forget CCR-Update
+%% (report_* with async => true) — a parked procedure awaits a {'$async_reply'}
+%% ReqId, not a {'$reply'} Promise. It shares the pcf/aaa_session the procedure
+%% captured before its await; handling it now would mutate pcf/aaa_session
 %% directly, and the procedure's terminal write-back (from its pre-await
 %% snapshot) would silently revert it. Postpone until async_pending drains.
 handle_event(info, {'$reply', _Promise, _Handler, _Msg, _Opts}, #{async_pending := P}, _Data)
