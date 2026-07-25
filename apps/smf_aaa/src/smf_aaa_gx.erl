@@ -105,18 +105,12 @@ invoke(_Service, init, Session, Events, _Opts, _State) ->
 
 invoke(_Service, {_, 'CCR-Initial'}, Session0, Events, Opts,
        #state{state = stopped} = State0) ->
-    State = inc_request_number(State0#state{state = started}),
-    Keys = ['InPackets', 'OutPackets', 'InOctets', 'OutOctets', 'Acct-Session-Time'],
-    Session = maps:without(Keys, Session0),
-    RecType = ?'DIAMETER_GX_CC-REQUEST-TYPE_INITIAL_REQUEST',
-    Request = make_CCR(RecType, Session, Opts, State),
+    {Request, Session, State} = ccr_initial_pre_send(Session0, Opts, State0),
     await_response(send_request(Request, Opts), Session, Events, State, Opts);
 
-invoke(_Service, {_, 'CCR-Update'}, Session, Events, Opts,
+invoke(_Service, {_, 'CCR-Update'}, Session0, Events, Opts,
        #state{state = started} = State0) ->
-    State = inc_request_number(State0),
-    RecType = ?'DIAMETER_GX_CC-REQUEST-TYPE_UPDATE_REQUEST',
-    Request = make_CCR(RecType, Session, Opts, State),
+    {Request, Session, State} = ccr_update_pre_send(Session0, Opts, State0),
     await_response(send_request(Request, Opts), Session, Events, State, Opts);
 
 invoke(_Service, {_, 'CCR-Terminate'}, Session, Events, Opts,
@@ -164,6 +158,28 @@ handle_response(Promise, Msg, Session, Events, Opts, #state{pending = Promise} =
     handle_cca(Msg, Session, Events, Opts, State#state{pending = undefined});
 handle_response(_Promise, _Msg, Session, Events, _Opts, State) ->
     {ok, Session, Events, State}.
+
+%%%===================================================================
+%%% CCR pre-send helpers
+%%%===================================================================
+
+%% pre-send half of CCR-Initial: #state{} transition + volume-key strip +
+%% make_CCR. Used by invoke/6.
+ccr_initial_pre_send(Session0, Opts, State0) ->
+    State = inc_request_number(State0#state{state = started}),
+    Keys = ['InPackets', 'OutPackets', 'InOctets', 'OutOctets', 'Acct-Session-Time'],
+    Session = maps:without(Keys, Session0),
+    RecType = ?'DIAMETER_GX_CC-REQUEST-TYPE_INITIAL_REQUEST',
+    Request = make_CCR(RecType, Session, Opts, State),
+    {Request, Session, State}.
+
+%% pre-send half of CCR-Update: #state{} transition + make_CCR. Shared by
+%% invoke/6 (blocking path).
+ccr_update_pre_send(Session, Opts, State0) ->
+    State = inc_request_number(State0),
+    RecType = ?'DIAMETER_GX_CC-REQUEST-TYPE_UPDATE_REQUEST',
+    Request = make_CCR(RecType, Session, Opts, State),
+    {Request, Session, State}.
 
 %%===================================================================
 %% DIAMETER handler callbacks
@@ -456,8 +472,14 @@ from_session('3GPP-MSISDN', MSISDN, Avps) ->
 from_session('Network-Request-Support', Value, Avps) ->
     Avps#{'Network-Request-Support' => [Value]};
 
-%% 'Packet-Filter-Information'
-%% 'Packet-Filter-Operation'
+%% 'Packet-Filter-Information' — repeated grouped AVP (TS 29.212 §5.3.55); the
+%% caller supplies the list of groups, each carrying the SDF Packet-Filter-Identifier.
+from_session('Packet-Filter-Information', Groups, Avps) when is_list(Groups) ->
+    Avps#{'Packet-Filter-Information' => Groups};
+
+%% 'Packet-Filter-Operation' — single AVP (TS 29.212 §5.3.56).
+from_session('Packet-Filter-Operation', Value, Avps) ->
+    Avps#{'Packet-Filter-Operation' => [Value]};
 
 %% 'Bearer-Identifier'
 from_session('Bearer-Identifier', Value, Avps) ->
