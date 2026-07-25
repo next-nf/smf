@@ -9,10 +9,12 @@
 
 -export([encode/1, decode/1,
 	 flow_info_to_tft/1, flow_info_to_tft_map/1, tft_to_flow_info/1, decode_tad/1,
-	 parse_flow_description/1, format_flow_description/1]).
+	 parse_flow_description/1, format_flow_description/1, pf_ids_to_sdf/2,
+	 flow_info_to_pf_add_group/1, flow_info_to_pf_modify_group/2]).
 -ignore_xref([encode/1, decode/1,
 	      flow_info_to_tft/1, flow_info_to_tft_map/1, tft_to_flow_info/1, decode_tad/1,
-	      parse_flow_description/1, format_flow_description/1]).
+	      parse_flow_description/1, format_flow_description/1, pf_ids_to_sdf/2,
+	      flow_info_to_pf_add_group/1]).
 
 %%%===================================================================
 %%% API
@@ -342,6 +344,31 @@ sdf_filter_id(#{'Packet-Filter-Identifier' := [Id | _]}) -> Id;
 sdf_filter_id(#{'Packet-Filter-Identifier' := Id}) when is_binary(Id) -> Id;
 sdf_filter_id(_) -> undefined.
 
+%% pf_ids_to_sdf/2 — invert #ded_bearer.sdf_to_pf for a UE-requested delete.
+%% Given the TFT packet-filter ids (0..15) a Bearer Resource Command asks to
+%% remove and the bearer's sdf_to_pf map (#{SDF-handle => TFT-id}), return the
+%% Gx SDF Packet-Filter-Identifier handles the CCR-U must reference (TS 29.212
+%% §4.5.2). Fails loudly rather than guessing: the forward map is not guaranteed
+%% injective (TODO(#32)), so a shared TFT id makes it non-invertible; and a
+%% requested id we do not hold is a malformed command. The caller turns either
+%% error into a Bearer Resource Failure Indication.
+-spec pf_ids_to_sdf([0..15], #{binary() => 0..15}) ->
+          {ok, [binary()]} | {error, ambiguous_sdf_to_pf | {unknown_pf_id, 0..15}}.
+pf_ids_to_sdf(PfIds, SdfToPf) ->
+    Rev = maps:fold(fun(Sdf, Pf, Acc) -> Acc#{Pf => Sdf} end, #{}, SdfToPf),
+    case map_size(Rev) =:= map_size(SdfToPf) of
+        false -> {error, ambiguous_sdf_to_pf};
+        true  -> pf_ids_to_sdf(PfIds, Rev, [])
+    end.
+
+pf_ids_to_sdf([], _Rev, Acc) ->
+    {ok, lists:reverse(Acc)};
+pf_ids_to_sdf([Id | Rest], Rev, Acc) ->
+    case Rev of
+        #{Id := Sdf} -> pf_ids_to_sdf(Rest, Rev, [Sdf | Acc]);
+        #{}          -> {error, {unknown_pf_id, Id}}
+    end.
+
 flow_info_to_filter(FlowInfo, Id, Precedence) ->
     Direction = get_flow_direction(FlowInfo),
     BaseComponents = get_flow_components(FlowInfo),
@@ -385,7 +412,7 @@ get_extra_components(FlowInfo) ->
     TOS ++ SPI ++ FL.
 
 filter_to_flow_info(#{id := Id, direction := Direction,
-		      precedence := _Precedence, components := Components}) ->
+		      precedence := Precedence, components := Components}) ->
     FlowDir = case Direction of
 		  downlink      -> 1;
 		  uplink        -> 2;
@@ -395,6 +422,7 @@ filter_to_flow_info(#{id := Id, direction := Direction,
     Desc = format_flow_description({direction_to_flow_dir(Direction), Components}),
     Base = #{'Flow-Description' => [Desc],
 	     'Flow-Direction' => [FlowDir],
+	     'Precedence' => [Precedence],
 	     'Packet-Filter-Identifier' => [<<Id:8>>]},
     add_optional_avps(Components, Base).
 
@@ -402,6 +430,38 @@ direction_to_flow_dir(downlink)      -> out;
 direction_to_flow_dir(uplink)        -> in;
 direction_to_flow_dir(bidirectional) -> out;
 direction_to_flow_dir(pre_rel7)      -> out.
+
+%% flow_info_to_pf_add_group/1 — a flow-info map (from filter_to_flow_info/1) ->
+%% a Gx Packet-Filter-Information group for a UE-requested ADD (TS 29.212 §4.5.2).
+%% Reports filter CONTENT: Packet-Filter-Content (the IPFilterRule, same bytes as
+%% Flow-Description) + Precedence + Flow-Direction (+ optional ToS/SPI/Flow-Label).
+%% Omits Packet-Filter-Identifier — the UE's 4-bit TFT id is not a PCRF SDF handle;
+%% the PCRF assigns the identifier for an add. Grouped-AVP members are bare values
+%% (cf. the Subscription-Id group in smf_aaa_gx:from_session).
+-spec flow_info_to_pf_add_group(map()) -> map().
+flow_info_to_pf_add_group(#{'Flow-Description' := [Desc], 'Flow-Direction' := [Dir]} = FI) ->
+    Base = #{'Packet-Filter-Content' => Desc, 'Flow-Direction' => Dir},
+    Base1 = case FI of
+                #{'Precedence' := [Prec]} -> Base#{'Precedence' => Prec};
+                _ -> Base
+            end,
+    lists:foldl(
+      fun(K, Acc) ->
+              case FI of
+                  #{K := [V]} -> Acc#{K => V};
+                  _           -> Acc
+              end
+      end, Base1, ['ToS-Traffic-Class', 'Security-Parameter-Index', 'Flow-Label']).
+
+%% flow_info_to_pf_modify_group/2 — a flow-info map + the SDF handle of the filter
+%% being replaced -> a Gx Packet-Filter-Information MODIFICATION group (TS 29.212
+%% §4.5.2): the ADD content group PLUS Packet-Filter-Identifier naming WHICH
+%% existing filter to modify (the SDF handle, from inverting sdf_to_pf — NOT the
+%% UE's 4-bit TFT id). Members bare (per the ADD wire round-trip).
+-spec flow_info_to_pf_modify_group(map(), binary()) -> map().
+flow_info_to_pf_modify_group(FI, SdfHandle) ->
+    Group = flow_info_to_pf_add_group(FI),
+    Group#{'Packet-Filter-Identifier' => SdfHandle}.
 
 add_optional_avps([], Map) -> Map;
 add_optional_avps([{tos_traffic_class, T, M} | Rest], Map) ->

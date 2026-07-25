@@ -40,7 +40,10 @@ all() ->
      decode_tad_operations,
      flow_info_to_tft_map_no_sdf,
      flow_info_to_tft_map_captures_sdf,
-     flow_info_to_tft_map_bare_binary_sdf].
+     flow_info_to_tft_map_bare_binary_sdf,
+     pf_ids_to_sdf_test,
+     flow_info_to_pf_add_group_test,
+     flow_info_to_pf_modify_group_test].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -514,4 +517,45 @@ flow_info_to_tft_map_bare_binary_sdf(_Config) ->
                   'Packet-Filter-Identifier' => <<"sdf-x">>}],
     {_Bin, _Filters, SdfToPf} = smf_tft:flow_info_to_tft_map(FlowInfo),
     ?assertMatch(#{<<"sdf-x">> := _}, SdfToPf),
+    ok.
+
+pf_ids_to_sdf_test(_Config) ->
+    Map = #{<<"sdfA">> => 0, <<"sdfB">> => 1, <<"sdfC">> => 2},
+    %% happy path: ids resolve back to their SDF handles, in input order
+    {ok, [<<"sdfC">>, <<"sdfA">>]} = smf_tft:pf_ids_to_sdf([2, 0], Map),
+    {ok, []} = smf_tft:pf_ids_to_sdf([], Map),
+    %% unknown id -> loud error (UE asked to delete a filter we don't hold)
+    {error, {unknown_pf_id, 7}} = smf_tft:pf_ids_to_sdf([0, 7], Map),
+    %% non-injective forward map -> not invertible -> loud error (TODO(#32))
+    Dup = #{<<"sdfA">> => 0, <<"sdfB">> => 0},
+    {error, ambiguous_sdf_to_pf} = smf_tft:pf_ids_to_sdf([0], Dup),
+    ok.
+
+flow_info_to_pf_add_group_test(_Config) ->
+    %% a flow-info map as filter_to_flow_info/1 now produces (list-wrapped members)
+    FI = #{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+           'Flow-Direction' => [2],
+           'Precedence' => [100],
+           'Packet-Filter-Identifier' => [<<3:8>>]},
+    Group = smf_tft:flow_info_to_pf_add_group(FI),
+    %% ADD group: content (bare), precedence, direction; NO Packet-Filter-Identifier
+    #{'Packet-Filter-Content' := <<"permit out ip from any to assigned">>,
+      'Precedence' := 100,
+      'Flow-Direction' := 2} = Group,
+    false = maps:is_key('Packet-Filter-Identifier', Group),
+    false = maps:is_key('Flow-Description', Group),
+    ok.
+
+flow_info_to_pf_modify_group_test(_Config) ->
+    FI = #{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+           'Flow-Direction' => [2],
+           'Precedence' => [100],
+           'Packet-Filter-Identifier' => [<<7:8>>]},   %% the UE TFT id (ignored by the builder)
+    Group = smf_tft:flow_info_to_pf_modify_group(FI, <<"sdf-A">>),
+    %% MODIFICATION group: content + the SDF handle (WHICH filter), not the UE id
+    #{'Packet-Filter-Content' := <<"permit out ip from any to assigned">>,
+      'Precedence' := 100,
+      'Flow-Direction' := 2,
+      'Packet-Filter-Identifier' := <<"sdf-A">>} = Group,
+    false = maps:is_key('Flow-Description', Group),
     ok.
