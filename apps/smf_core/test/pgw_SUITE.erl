@@ -937,6 +937,7 @@ common() ->
      gtp_idle_timeout_pfcp_session_loss,
      up_inactivity_timer,
      pfcp_async_update_credits,
+     gx_rar_answers_raa_while_parked,
      teardown_queues_behind_procedure,
      async_error_drains_gate,
      pfcp_gate_serializes,
@@ -1309,6 +1310,7 @@ init_per_testcase(TestCase, Config)
        TestCase == pfcp_gate_serializes;
        TestCase == pfcp_reentrant_during_await;
        TestCase == teardown_queues_behind_procedure;
+       TestCase == gx_rar_answers_raa_while_parked;
        TestCase == async_error_drains_gate ->
     setup_per_testcase(Config),
     smf_test_lib:set_online_charging(true),
@@ -1446,6 +1448,7 @@ end_per_testcase(TestCase, Config)
   when TestCase == pfcp_gate_serializes;
        TestCase == pfcp_reentrant_during_await;
        TestCase == teardown_queues_behind_procedure;
+       TestCase == gx_rar_answers_raa_while_parked;
        TestCase == async_error_drains_gate ->
     %% failure-safe teardown: re-enable the UPF, restore sx retransmit and drop
     %% the injected modify_session_result expectation even if the case body
@@ -9526,6 +9529,59 @@ pfcp_async_update_credits(Config) ->
     wait4contexts(?TIMEOUT),
 
     meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gx_rar_answers_raa_while_parked() ->
+    [{doc, "A Gx RAR arriving while a procedure is parked must be acknowledged "
+      "at once -- only the bearer work it implies queues (architecture section "
+      "3). The RAA is the PCRF's flow control: TS 29.212 4.5.2.0 says it will "
+      "not send another RAR for the session until this one is acknowledged."}].
+gx_rar_answers_raa_while_parked(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    {ok, PCtx} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    %% Hold the UPF so a procedure stays parked across the RAR.
+    ok = slow_down_sx_retransmit(),
+    smf_test_sx_up:disable('pgw-u01'),
+
+    trigger_gy_credit_update(PCtx, #{'VOLTH' => []}),
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 1 end, 50, 100),
+
+    Self = self(),
+    ResponseFun =
+        fun(Request, Result, Avps, SOpts) ->
+                Self ! {'$response', Request, Result, Avps, SOpts} end,
+    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+                          session = SessionOpts, events = []},
+
+    %% The discriminating assertion: the RAA arrives while the procedure is
+    %% still parked. Before the split the whole RAR was postponed, so nothing
+    %% came back until the gate freed.
+    receive
+        {'$response', _, RAAResult, _, _} ->
+            ?equal(ok, RAAResult)
+    after 2000 ->
+            ct:fail(raa_not_answered_while_parked)
+    end,
+    ?equal(1, async_pending_size(CtxKey)),
+
+    smf_test_sx_up:enable('pgw-u01'),
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 0 end, 100, 100),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok = restore_sx_retransmit(),
     ok.
 
 %%--------------------------------------------------------------------

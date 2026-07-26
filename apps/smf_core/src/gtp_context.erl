@@ -367,9 +367,15 @@ handle_event(cast, {handle_message, _Request, #gtp{}, _Resent}, #{async_pending 
 %% must not interleave with an in-flight PFCP procedure. Postponing them while a
 %% procedure is parked reproduces the old blocking behaviour (they waited in the
 %% mailbox during a synchronous modify). No deadlock: the awaited PFCP reply does
-%% not depend on answering these. (A future async-Gx step will refine this to
-%% answer the RAA immediately and queue only the resulting procedure.)
-handle_event(info, #aaa_request{procedure = {_, 'RAR'}}, #{async_pending := P}, _Data)
+%% not depend on answering these.
+%%
+%% {gx, 'RAR'} is deliberately NOT postponed: it answers the RAA from pure
+%% validation and emits {gx_rar_apply, ...} for the work it implies, and THAT is
+%% what the gate postpones (architecture section 3 -- the protocol answer goes out
+%% at once, the implied bearer procedure queues). {gy, 'RAR'} still queues whole:
+%% it answers early too, but runs triggered_charging_event/4 inline, which touches
+%% the shared PCtx.
+handle_event(info, #aaa_request{procedure = {gy, 'RAR'}}, #{async_pending := P}, _Data)
   when map_size(P) =/= 0 ->
     {keep_state_and_data, [postpone]};
 handle_event(info, #aaa_request{procedure = {_, 'ASR'}}, #{async_pending := P}, _Data)
@@ -536,11 +542,7 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 				handler = Handler, session = Avps,
 				events = ReqEvents} = Request,
 	     #{session := connected} = _State,
-	     #{context := Context, pfcp := PCtx0,
-	       tunnels := #{'Access' := AccessTunnel}, bearers := BearerMap,
-	       interface := Interface,
-	       aaa_session := S0, pcf := _PCF0,
-	       charging := C0, aaa_auth := A0, pcc := PCC0} = Data) ->
+	     #{aaa_session := S0, pcc := PCC0} = Data) ->
     Events = case Handler of
 		 undefined -> ReqEvents;
 		 _ ->
@@ -559,9 +561,6 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 %%% 5. apply granted quotas to PCC rules, remove PCC rules without quotas
 %%% 6. install new PCC rules which have granted quota
 %%% 7. report remove and not installed (lack of quota) PCC rules on Gx
-    Now = erlang:monotonic_time(),
-    ReqOps = #{now => Now},
-
     RuleBase = smf_charging:rulebase(),
 
 %%% step 1a:
@@ -570,6 +569,34 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 %%% step 1b:
     {PCC2, PCCErrors2} =
 	smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC1),
+
+%%% Validation is complete and needed no external I/O, so the RAA goes out now:
+%%% TS 29.212 4.5.12 puts validation-stage failures in the RAA and resource-
+%%% allocation-stage failures in a later CCR. PCC2 is committed to Data before
+%%% answering so that a second RAR -- which the PCRF may send as soon as it has
+%%% this RAA (4.5.2.0) -- validates on top of it rather than against stale state.
+    GxReport2 = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors2),
+    smf_aaa_session:aaa_reply(Request, ok, GxReport2, S0),
+
+%%% The resource-allocation half is the bearer procedure this RAR implies, so it
+%%% queues behind any running procedure (architecture section 3) instead of
+%%% running here. With nothing parked the internal event is processed before any
+%%% other message, so ordering is unchanged.
+    {keep_state, Data#{pcc := PCC2},
+     [{next_event, internal, {gx_rar_apply, PCC0, PCC1, PCC2}}]};
+
+handle_event(internal, {gx_rar_apply, _PCC0, _PCC1, _PCC2}, #{async_pending := P}, _Data)
+  when map_size(P) =/= 0 ->
+    {keep_state_and_data, [postpone]};
+
+handle_event(internal, {gx_rar_apply, PCC0, PCC1, PCC2}, _State,
+	     #{context := Context, pfcp := PCtx0,
+	       tunnels := #{'Access' := AccessTunnel}, bearers := BearerMap,
+	       interface := Interface,
+	       aaa_session := S0, pcf := PCF0,
+	       charging := C0, aaa_auth := A0} = Data) ->
+    Now = erlang:monotonic_time(),
+    ReqOps = #{now => Now},
 
 %%% step 2
 %%% step 3:
@@ -603,10 +630,21 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 %%% step 7:
     %% TODO Charging-Rule-Report for successfully installed/removed rules
 
-    GxReport = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors2 ++ PCCErrors4),
-    smf_aaa_session:aaa_reply(Request, ok, GxReport, S3),
-    Data1 = Data#{pfcp := PCtx, pcc := PCC4,
-		  aaa_session := S3, charging := C2, aaa_auth := A1},
+%%% These are resource-allocation-stage failures (rules left without granted
+%%% credit), which TS 29.212 4.5.12 puts in a new CCR rather than the RAA -- and
+%%% the RAA has already gone out. Fire-and-forget, like the establishment path.
+    GxReport4 = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors4),
+    {PCF1, S4} =
+	if map_size(GxReport4) /= 0 ->
+	       {ok, PCFa, Sa, _} =
+		   smf_aaa_pcf:ccr_update(PCF0, S3, GxReport4, ReqOps#{async => true}),
+	       {PCFa, Sa};
+	   true ->
+	       {PCF0, S3}
+	end,
+
+    Data1 = Data#{pfcp := PCtx, pcc := PCC4, pcf := PCF1,
+		  aaa_session := S4, charging := C2, aaa_auth := A1},
     Data2 = Interface:handle_dedicated_bearer_changes(PCC0, PCC4, Data1),
     {keep_state, Data2};
 
