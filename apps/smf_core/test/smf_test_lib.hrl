@@ -34,6 +34,7 @@
 -import('smf_test_lib', [outstanding_requests/0, wait4tunnels/1, wait4contexts/1,
 			  active_contexts/0, hexstr2bin/1, maps_key_length/2]).
 -import('smf_test_lib', [get_metric/4]).
+-import('smf_test_lib', [wait_until/3]).
 
 -endif.
 

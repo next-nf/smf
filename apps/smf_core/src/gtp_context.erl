@@ -378,6 +378,15 @@ handle_event(cast, {handle_message, _Request, #gtp{}, _Resent}, #{async_pending 
 handle_event(info, #aaa_request{procedure = {gy, 'RAR'}}, #{async_pending := P}, _Data)
   when map_size(P) =/= 0 ->
     {keep_state_and_data, [postpone]};
+%% ...but a Gx RAR IS postponed while a previous RAR's apply is still outstanding.
+%% Validation commits its PCC2 to Data before answering, so a second RAR validating
+%% in that window builds on it correctly -- but the in-flight apply would then write
+%% back a PCC4 derived from its own captured PCC2 and clobber that validation. One
+%% apply at a time removes the window. This is much narrower than gating on
+%% async_pending: a RAR arriving while an unrelated procedure is parked is still
+%% answered at once.
+handle_event(info, #aaa_request{procedure = {gx, 'RAR'}}, #{rar_apply_pending := true}, _Data) ->
+    {keep_state_and_data, [postpone]};
 handle_event(info, #aaa_request{procedure = {_, 'ASR'}}, #{async_pending := P}, _Data)
   when map_size(P) =/= 0 ->
     {keep_state_and_data, [postpone]};
@@ -541,7 +550,7 @@ handle_event(info, #aaa_request{procedure = {_, 'ASR'} = Procedure} = Request,
 handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 				handler = Handler, session = Avps,
 				events = ReqEvents} = Request,
-	     #{session := connected} = _State,
+	     #{session := connected} = State,
 	     #{aaa_session := S0, pcc := PCC0} = Data) ->
     Events = case Handler of
 		 undefined -> ReqEvents;
@@ -582,71 +591,16 @@ handle_event(info, #aaa_request{procedure = {gx, 'RAR'},
 %%% queues behind any running procedure (architecture section 3) instead of
 %%% running here. With nothing parked the internal event is processed before any
 %%% other message, so ordering is unchanged.
-    {keep_state, Data#{pcc := PCC2},
+    {next_state, State#{rar_apply_pending := true}, Data#{pcc := PCC2},
      [{next_event, internal, {gx_rar_apply, PCC0, PCC1, PCC2}}]};
 
 handle_event(internal, {gx_rar_apply, _PCC0, _PCC1, _PCC2}, #{async_pending := P}, _Data)
   when map_size(P) =/= 0 ->
     {keep_state_and_data, [postpone]};
 
-handle_event(internal, {gx_rar_apply, PCC0, PCC1, PCC2}, _State,
-	     #{context := Context, pfcp := PCtx0,
-	       tunnels := #{'Access' := AccessTunnel}, bearers := BearerMap,
-	       interface := Interface,
-	       aaa_session := S0, pcf := PCF0,
-	       charging := C0, aaa_auth := A0} = Data) ->
-    Now = erlang:monotonic_time(),
-    ReqOps = #{now => Now},
-
-%%% step 2
-%%% step 3:
-    {PCtx1, UsageReport, _} =
-	case smf_pfcp_context:modify_session(PCC1, [], #{}, BearerMap, PCtx0) of
-	    {ok, Result1} -> Result1;
-	    {error, Err1} -> throw(Err1#ctx_err{context = Context, tunnel = AccessTunnel})
-	end,
-
-%%% step 4:
-    ChargeEv = {online, 'RAR'},   %% made up value, not use anywhere...
-    {Online, Offline, Monitor} =
-	smf_pfcp_context:usage_report_to_charging_events(UsageReport, ChargeEv, PCtx1),
-
-    {A1, S1} = smf_gsn_lib:process_accounting_monitor_events(ChargeEv, Monitor, Now, A0, S0),
-    GyReqServices = smf_pcc_context:gy_credit_request(Online, PCC0, PCC2),
-    {C1, S2, GyEvs} =
-	smf_gsn_lib:process_online_charging_events(ChargeEv, GyReqServices, C0, S1, ReqOps),
-    {C2, S3} = smf_gsn_lib:process_offline_charging_events(ChargeEv, Offline, Now, C1, S2),
-
-%%% step 5:
-    {PCC4, PCCErrors4} = smf_pcc_context:gy_events_to_pcc_ctx(Now, GyEvs, PCC2),
-
-%%% step 6:
-    {PCtx, _, _} =
-	case smf_pfcp_context:modify_session(PCC4, [], #{}, BearerMap, PCtx1) of
-	    {ok, Result2} -> Result2;
-	    {error, Err2} -> throw(Err2#ctx_err{context = Context, tunnel = AccessTunnel})
-	end,
-
-%%% step 7:
-    %% TODO Charging-Rule-Report for successfully installed/removed rules
-
-%%% These are resource-allocation-stage failures (rules left without granted
-%%% credit), which TS 29.212 4.5.12 puts in a new CCR rather than the RAA -- and
-%%% the RAA has already gone out. Fire-and-forget, like the establishment path.
-    GxReport4 = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors4),
-    {PCF1, S4} =
-	if map_size(GxReport4) /= 0 ->
-	       {ok, PCFa, Sa, _} =
-		   smf_aaa_pcf:ccr_update(PCF0, S3, GxReport4, ReqOps#{async => true}),
-	       {PCFa, Sa};
-	   true ->
-	       {PCF0, S3}
-	end,
-
-    Data1 = Data#{pfcp := PCtx, pcc := PCC4, pcf := PCF1,
-		  aaa_session := S4, charging := C2, aaa_auth := A1},
-    Data2 = Interface:handle_dedicated_bearer_changes(PCC0, PCC4, Data1),
-    {keep_state, Data2};
+handle_event(internal, {gx_rar_apply, PCC0, PCC1, PCC2}, State, Data) ->
+    async_m:run_async(gx_rar_apply_proc(PCC0, PCC1, PCC2),
+		      fun gx_rar_apply_ok/3, fun gx_rar_apply_err/3, State, Data);
 
 handle_event(info, #aaa_request{procedure = {gy, 'RAR'},
 				handler = Handler, session = Avps,
@@ -980,6 +934,88 @@ update_credits_proc(CreditEv) ->
 	   {PCtx, _, _} <- await_modify(Issued),
 	   async_m:modify_data(_#{pfcp => PCtx, pcc => PCC})
        ]).
+
+%% gx_rar_apply_proc/3 — async_m procedure: the resource-allocation half of a Gx
+%% RAR. The RAA already went out on validation (see the {gx, 'RAR'} clause), so
+%% this is an ordinary queued bearer procedure: PFCP modify (remove pass), the Gy
+%% charging round, PFCP modify (install pass), then report any allocation-stage
+%% failures. Body is the blocking code it replaces, with the two modify_session
+%% case wrappers dropped — failures now travel the async_m error channel to
+%% gx_rar_apply_err/3, which applies the same #ctx_err{} decoration.
+%%
+%% Data is captured once, as the blocking version did: every field read here is
+%% mutated only by gated events, so none of them can change across an await.
+gx_rar_apply_proc(PCC0, PCC1, PCC2) ->
+    do([async_m ||
+	   #{pfcp := PCtx0, bearers := BearerMap, aaa_session := S0,
+	     pcf := PCF0, charging := C0, aaa_auth := A0} <- async_m:get_data(),
+	   Now = erlang:monotonic_time(),
+	   ReqOps = #{now => Now},
+
+%%% step 2
+%%% step 3:
+	   Issued1 <- async_m:lift(
+			smf_pfcp_context:modify_session_async(PCC1, [], #{}, BearerMap, PCtx0)),
+	   {PCtx1, UsageReport, _} <- await_modify(Issued1),
+
+%%% step 4:
+	   ChargeEv = {online, 'RAR'},   %% made up value, not use anywhere...
+	   {Online, Offline, Monitor} =
+	       smf_pfcp_context:usage_report_to_charging_events(UsageReport, ChargeEv, PCtx1),
+	   {A1, S1} = smf_gsn_lib:process_accounting_monitor_events(
+			ChargeEv, Monitor, Now, A0, S0),
+	   GyReqServices = smf_pcc_context:gy_credit_request(Online, PCC0, PCC2),
+	   {C1, S2, GyEvs} = smf_gsn_lib:process_online_charging_events(
+			       ChargeEv, GyReqServices, C0, S1, ReqOps),
+	   {C2, S3} = smf_gsn_lib:process_offline_charging_events(
+			ChargeEv, Offline, Now, C1, S2),
+
+%%% step 5:
+	   {PCC4, PCCErrors4} = smf_pcc_context:gy_events_to_pcc_ctx(Now, GyEvs, PCC2),
+
+%%% step 6:
+	   Issued2 <- async_m:lift(
+			smf_pfcp_context:modify_session_async(PCC4, [], #{}, BearerMap, PCtx1)),
+	   {PCtx, _, _} <- await_modify(Issued2),
+
+%%% step 7:
+	   %% TODO Charging-Rule-Report for successfully installed/removed rules
+	   {PCF1, S4} = rar_report_alloc_failures(PCCErrors4, PCF0, S3, ReqOps),
+
+	   async_m:modify_data(
+	     fun(#{interface := Interface} = D) ->
+		     D1 = D#{pfcp := PCtx, pcc := PCC4, pcf := PCF1,
+			     aaa_session := S4, charging := C2, aaa_auth := A1},
+		     Interface:handle_dedicated_bearer_changes(PCC0, PCC4, D1)
+	     end)
+       ]).
+
+%% Resource-allocation-stage failures (rules left without granted credit), which
+%% TS 29.212 4.5.12 puts in a new CCR rather than the RAA -- and the RAA has
+%% already gone out. Fire-and-forget, like the establishment path.
+rar_report_alloc_failures(PCCErrors, PCF0, Session0, ReqOps) ->
+    GxReport = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors),
+    if map_size(GxReport) /= 0 ->
+	    {ok, PCF, Session, _} =
+		smf_aaa_pcf:ccr_update(PCF0, Session0, GxReport, ReqOps#{async => true}),
+	    {PCF, Session};
+       true ->
+	    {PCF0, Session0}
+    end.
+
+%% As update_credits_ok/3: return the async_m-threaded State so the drained
+%% async_pending re-delivers what the gate postponed.
+gx_rar_apply_ok(_V, State, Data) ->
+    {next_state, State#{rar_apply_pending := false}, Data}.
+
+%% Decorate with the context/tunnel the blocking code attached when it threw, then
+%% route as usual. The old throw happened inside a gen_statem callback with no
+%% enclosing try, so it crashed the context instead of producing an error reply;
+%% going through the error channel fixes that.
+gx_rar_apply_err(#ctx_err{} = E, State,
+		 #{context := Context, tunnels := #{'Access' := AccessTunnel}} = Data) ->
+    handle_ctx_error(E#ctx_err{context = Context, tunnel = AccessTunnel}, [],
+		     State#{rar_apply_pending := false}, Data).
 
 await_modify({request, ReqId, PCtx1}) ->
     do([async_m || Reply <- async_m:await(ReqId),

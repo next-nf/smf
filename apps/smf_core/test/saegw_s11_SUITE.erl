@@ -1863,8 +1863,14 @@ gx_rar_gy_interaction(Config) ->
     {ok, PCR1} = smf_context:test_cmd(gtp, CtxKey, pcc_rules),
     ?match(#{<<"r-0001">> := #{}, <<"r-0002">> := #{}}, PCR1),
 
-    {ok, #pfcp_ctx{timers = T2}} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
-    ?equal(2, maps:size(T2)),
+    %% The RAA acknowledges validation, not resource allocation (TS 29.212
+    %% 4.5.12), and the allocation half is now an async procedure -- so the
+    %% PFCP-side state lands shortly after the RAA rather than before it.
+    ok = wait_until(fun() ->
+			    {ok, #pfcp_ctx{timers = T2}} =
+				smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
+			    maps:size(T2) =:= 2
+		    end, 50, 100),
 
     {ok, SOpts1} = smf_context:test_cmd(gtp, CtxKey, session),
     RemoveCR =
@@ -1877,8 +1883,13 @@ gx_rar_gy_interaction(Config) ->
     ?match(#{<<"r-0001">> := #{}}, PCR2),
     ?equal(false, maps:is_key(<<"r-0002">>, PCR2)),
 
+    %% Same as above: the remove's allocation half lands after its RAA.
+    ok = wait_until(fun() ->
+			    {ok, #pfcp_ctx{timers = T}} =
+				smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
+			    maps:size(T) =:= 1
+		    end, 50, 100),
     {ok, #pfcp_ctx{timers = T3}} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
-    ?equal(1, maps:size(T3)),
     ?equal(maps:keys(T1), maps:keys(T3)),
 
     delete_session(GtpC),

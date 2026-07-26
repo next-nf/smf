@@ -20,7 +20,8 @@
 	 meck_init_hut_handle_request/1,
 	 meck_reset/1,
 	 meck_unload/1,
-	 meck_validate/1]).
+	 meck_validate/1,
+	 wait_until/3]).
 -export([init_seq_no/2,
 	 gtp_context/1, gtp_context/2, gtp_context/3,
 	 gtp_context_inc_seq/1,
@@ -1030,3 +1031,19 @@ ext_macro_enb(CC, NC, EMeNB) ->
 
 ext_macro_enb(CC, NC) ->
     ext_macro_enb(CC, NC, rand:uniform(16#1fffff)).
+
+%% wait_until/3 -- poll Fun() up to Retries times, sleeping SleepMs between
+%% attempts, until it returns true.
+wait_until(Fun, Retries, SleepMs) when Retries > 0 ->
+    case Fun() of
+	true ->
+	    ok;
+	_ ->
+	    timer:sleep(SleepMs),
+	    wait_until(Fun, Retries - 1, SleepMs)
+    end;
+wait_until(Fun, 0, _SleepMs) ->
+    case Fun() of
+	true -> ok;
+	_ -> {error, timeout}
+    end.
