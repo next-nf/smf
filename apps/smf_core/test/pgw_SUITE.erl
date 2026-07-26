@@ -439,6 +439,15 @@
 					}]
 				 }},
 		      'Update-Gx' => #{avps => #{'Result-Code' => 2001}},
+		      %% CCR-U rejection answer for the UE resource-modification
+		      %% paths. A real PCRF refusing a UE resource modification's
+		      %% traffic mapping answers Experimental-Result-Code
+		      %% DIAMETER_ERROR_TRAFFIC_MAPPING_INFO_REJECTED (5144)
+		      %% (TS 29.212 5.5.3); smf_aaa_static discriminates on the
+		      %% base Result-Code AVP only, so carry the base permanent
+		      %% failure DIAMETER_UNABLE_TO_COMPLY (5012), which drives the
+		      %% same Code >= 3000 route.
+		      'Update-Gx-Reject' => #{avps => #{'Result-Code' => 5012}},
 		      %% CCR-U remove answer for the UE delete_packet_filters path:
 		      %% removes the dedicated bearer's bound rule (the pipeline turns
 		      %% the Charging-Rule-Remove into a {pcc, remove, _} event).
@@ -900,6 +909,7 @@ common() ->
      ue_delete_packet_filters_deletes_bearer,
      ue_delete_packet_filters_updates_bearer,
      ue_delete_packet_filters_reject,
+     ue_delete_packet_filters_pcrf_reject,
      ue_add_packet_filters_updates_bearer,
      ue_add_packet_filters_reports_unknown_rule,
      ue_replace_packet_filters_updates_bearer,
@@ -1227,6 +1237,7 @@ init_per_testcase(TestCase, Config)
   when TestCase == ue_delete_packet_filters_deletes_bearer;
        TestCase == ue_delete_packet_filters_updates_bearer;
        TestCase == ue_delete_packet_filters_reject;
+       TestCase == ue_delete_packet_filters_pcrf_reject;
        TestCase == ue_add_packet_filters_updates_bearer;
        TestCase == ue_add_packet_filters_reports_unknown_rule;
        TestCase == ue_replace_packet_filters_updates_bearer;
@@ -8716,13 +8727,10 @@ ue_delete_packet_filters_reject() ->
     [{doc, "Check that a delete_packet_filters that the procedure rejects "
       "(here: a packet-filter id the bearer does not hold) returns a Bearer "
       "Resource Failure Indication (Cause/LBI/PTI) and emits no Delete Bearer "
-      "Request. NOTE: the intended PCRF-Result-Code rejection trigger is blocked "
-      "by a foundation defect -- smf_aaa_gx:handle_cca/7's failure clause does "
-      "State#state{...} and crashes on the async static mock's `undefined` state "
-      "(#45/#48); the unknown-filter trigger drives the identical br_err "
-      "Failure Indication path without reaching the pipeline's CCA-failure "
-      "handling. (The async-invoke redesign deleted the async mock path this NOTE "
-      "describes; #50 may now be revisitable with a real PCRF-Result-Code reject.)"}].
+      "Request. This trigger fails synchronously in the procedure's first lift, "
+      "before any CCR-Update is issued; the PCRF-Result-Code rejection, which "
+      "fails AFTER the await, is covered by "
+      "ue_delete_packet_filters_pcrf_reject."}].
 ue_delete_packet_filters_reject(Config) ->
     Cntl = whereis(gtpc_client_server),
     CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
@@ -8753,6 +8761,59 @@ ue_delete_packet_filters_reject(Config) ->
     %% ...and no Delete Bearer Request is sent.
     ?equal(timeout, recv_pdu(Cntl, undefined, 100, fun(Why) -> Why end)),
 
+    delete_session(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+ue_delete_packet_filters_pcrf_reject() ->
+    [{doc, "Check that a delete_packet_filters the PCRF rejects with a "
+      "permanent-failure Result-Code returns a Bearer Resource Failure "
+      "Indication (Cause/LBI/PTI) and emits no bearer signalling. Unlike "
+      "ue_delete_packet_filters_reject the named packet-filter ids are valid, "
+      "so the procedure issues the CCR-Update and parks on the await: this "
+      "covers ccr_result({fail, RC}) and the post-await br_err route."}].
+ue_delete_packet_filters_pcrf_reject(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+
+    {_GtpCDed, DedEBI, PfIds} = establish_ded_bearer_with_pf(GtpC, Cntl, CtxKey),
+
+    %% Now make the CCR-Update fail (the establishment confirmation CCR-U
+    %% above still used the benign 'Update-Gx').
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Update'}, 'Update-Gx-Reject'}]),
+
+    PTI = 10,
+    {GtpC2, BRCReq} =
+        bearer_resource_command({delete_pf, DedEBI, PfIds, PTI}, GtpC),
+
+    %% The PGW parks on the CCR-U await; the mock answers a permanent failure,
+    %% so ccr_result({fail, 5012}) short-circuits the procedure to br_err ->
+    %% Bearer Resource Failure Indication echoing the PTI.
+    Resp = recv_pdu(GtpC2, BRCReq#gtp.seq_no, 5000, ok),
+    ?match(#gtp{type = bearer_resource_failure_indication,
+                ie = #{{v2_cause, 0} :=
+                           #v2_cause{v2_cause = request_rejected},
+                       {v2_eps_bearer_id, 0} :=
+                           #v2_eps_bearer_id{eps_bearer_id = 5},
+                       {v2_procedure_transaction_id, 0} :=
+                           #v2_procedure_transaction_id{pti = PTI}}}, Resp),
+
+    %% ...and the rejected decision commits nothing: neither a Delete nor an
+    %% Update Bearer Request follows.
+    ?equal(timeout, recv_pdu(Cntl, undefined, 100, fun(Why) -> Why end)),
+
+    %% The session survives the rejection: delete_session succeeding here is
+    %% also evidence that br_err's {next_state, ...} drained async_pending,
+    %% leaving the coarse procedure gate open.
     delete_session(GtpC2),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
