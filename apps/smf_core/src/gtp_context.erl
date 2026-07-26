@@ -383,8 +383,12 @@ handle_event(info, {timeout, _TRef, pfcp_timer}, #{async_pending := P}, _Data)
 %% pcf/aaa_session/pcc/pfcp, so a teardown running now would be silently reverted
 %% by that procedure's terminal write-back. The GTP-borne Delete Session Request
 %% is already covered by the handle_message clause above; these are the internal
-%% and administrative entry points. The session-state guard leaves the shutdown
-%% clauses -- which answer immediately -- alone.
+%% and administrative entry points. Every clause guards on the session state so
+%% only a live session queues: the shutdown clauses below must keep answering
+%% immediately, and a context torn down by a failure (UPF DOWN, peer restart)
+%% keeps its registry entry -- nothing drains it, because close_context/4 drops
+%% the pfcp state and deregisters the context, leaving no observable consumer.
+%% Without this guard those two would postpone in shutdown and never re-fire.
 handle_event({call, _From}, {delete_context, _Reason},
 	     #{async_pending := P, session := SState}, _Data)
   when map_size(P) =/= 0, (SState == connected orelse SState == connecting) ->
@@ -393,11 +397,13 @@ handle_event({call, _From}, delete_context,
 	     #{async_pending := P, session := SState}, _Data)
   when map_size(P) =/= 0, (SState == connected orelse SState == connecting) ->
     {keep_state_and_data, [postpone]};
-handle_event(cast, {delete_context, _Reason}, #{async_pending := P}, _Data)
-  when map_size(P) =/= 0 ->
+handle_event(cast, {delete_context, _Reason},
+	     #{async_pending := P, session := SState}, _Data)
+  when map_size(P) =/= 0, (SState == connected orelse SState == connecting) ->
     {keep_state_and_data, [postpone]};
-handle_event({timeout, context_idle}, stop_session, #{async_pending := P}, _Data)
-  when map_size(P) =/= 0 ->
+handle_event({timeout, context_idle}, stop_session,
+	     #{async_pending := P, session := SState}, _Data)
+  when map_size(P) =/= 0, (SState == connected orelse SState == connecting) ->
     {keep_state_and_data, [postpone]};
 
 handle_event({call, From}, info, _, Data) ->
