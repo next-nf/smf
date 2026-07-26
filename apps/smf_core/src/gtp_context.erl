@@ -378,6 +378,27 @@ handle_event(info, #aaa_request{procedure = {_, 'ASR'}}, #{async_pending := P}, 
 handle_event(info, {timeout, _TRef, pfcp_timer}, #{async_pending := P}, _Data)
   when map_size(P) =/= 0 ->
     {keep_state_and_data, [postpone]};
+%% Teardown is an ordinary session-level procedure and queues like any other
+%% (architecture section 4): a parked procedure holds a pre-await snapshot of
+%% pcf/aaa_session/pcc/pfcp, so a teardown running now would be silently reverted
+%% by that procedure's terminal write-back. The GTP-borne Delete Session Request
+%% is already covered by the handle_message clause above; these are the internal
+%% and administrative entry points. The session-state guard leaves the shutdown
+%% clauses -- which answer immediately -- alone.
+handle_event({call, _From}, {delete_context, _Reason},
+	     #{async_pending := P, session := SState}, _Data)
+  when map_size(P) =/= 0, (SState == connected orelse SState == connecting) ->
+    {keep_state_and_data, [postpone]};
+handle_event({call, _From}, delete_context,
+	     #{async_pending := P, session := SState}, _Data)
+  when map_size(P) =/= 0, (SState == connected orelse SState == connecting) ->
+    {keep_state_and_data, [postpone]};
+handle_event(cast, {delete_context, _Reason}, #{async_pending := P}, _Data)
+  when map_size(P) =/= 0 ->
+    {keep_state_and_data, [postpone]};
+handle_event({timeout, context_idle}, stop_session, #{async_pending := P}, _Data)
+  when map_size(P) =/= 0 ->
+    {keep_state_and_data, [postpone]};
 
 handle_event({call, From}, info, _, Data) ->
     {keep_state_and_data, [{reply, From, Data}]};

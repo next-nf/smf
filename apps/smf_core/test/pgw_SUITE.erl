@@ -937,6 +937,7 @@ common() ->
      gtp_idle_timeout_pfcp_session_loss,
      up_inactivity_timer,
      pfcp_async_update_credits,
+     teardown_queues_behind_procedure,
      async_error_drains_gate,
      pfcp_gate_serializes,
      pfcp_reentrant_during_await].
@@ -1307,6 +1308,7 @@ init_per_testcase(TestCase, Config)
   when TestCase == pfcp_async_update_credits;
        TestCase == pfcp_gate_serializes;
        TestCase == pfcp_reentrant_during_await;
+       TestCase == teardown_queues_behind_procedure;
        TestCase == async_error_drains_gate ->
     setup_per_testcase(Config),
     smf_test_lib:set_online_charging(true),
@@ -1443,6 +1445,7 @@ end_per_testcase(aa_pool_select_fail, Config) ->
 end_per_testcase(TestCase, Config)
   when TestCase == pfcp_gate_serializes;
        TestCase == pfcp_reentrant_during_await;
+       TestCase == teardown_queues_behind_procedure;
        TestCase == async_error_drains_gate ->
     %% failure-safe teardown: re-enable the UPF, restore sx retransmit and drop
     %% the injected modify_session_result expectation even if the case body
@@ -9523,6 +9526,58 @@ pfcp_async_update_credits(Config) ->
     wait4contexts(?TIMEOUT),
 
     meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+teardown_queues_behind_procedure() ->
+    [{doc, "An ordinary session-level teardown (delete_context) arriving while "
+      "a procedure is parked must queue behind it, not run immediately and race "
+      "the parked procedure's write-back (architecture section 4)"}].
+teardown_queues_behind_procedure(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    {ok, PCtx} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
+
+    %% Hold the UPF so the procedure stays parked while we drive the teardown.
+    ok = slow_down_sx_retransmit(),
+    smf_test_sx_up:disable('pgw-u01'),
+
+    trigger_gy_credit_update(PCtx, #{'VOLTH' => []}),
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 1 end, 50, 100),
+
+    Self = self(),
+    spawn(fun() -> Self ! {req, smf_context:test_cmd(gtp, CtxKey, delete_context)} end),
+
+    %% The discriminating assertion: the teardown must be postponed, so no
+    %% Delete Bearer Request goes out while the procedure is parked. Before the
+    %% gate clause it was emitted immediately, racing the parked write-back.
+    ?equal(timeout, recv_pdu(Cntl, undefined, 300, fun(Why) -> Why end)),
+
+    smf_test_sx_up:enable('pgw-u01'),
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 0 end, 100, 100),
+
+    %% ...and once the gate frees, the queued teardown runs to completion.
+    Request = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = delete_bearer_request}, Request),
+    send_pdu(Cntl, GtpC, make_response(Request, simple, GtpC)),
+
+    receive
+        {req, {ok, request_accepted}} ->
+            ok;
+        {req, Other} ->
+            ct:fail(Other)
+    after ?TIMEOUT ->
+            ct:fail(timeout)
+    end,
+
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok = restore_sx_retransmit(),
     ok.
 
 %%--------------------------------------------------------------------
