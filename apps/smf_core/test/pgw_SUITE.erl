@@ -8811,6 +8811,11 @@ ue_delete_packet_filters_pcrf_reject(Config) ->
     %% Update Bearer Request follows.
     ?equal(timeout, recv_pdu(Cntl, undefined, 100, fun(Why) -> Why end)),
 
+    %% Nor is anything committed to the context: the procedure short-circuits
+    %% before async_m:modify_data, so the dedicated bearer is untouched.
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?equal(true, is_map_key({'Access', DedEBI}, BearerMap)),
+
     %% The session survives the rejection: delete_session succeeding here is
     %% also evidence that br_err's {next_state, ...} drained async_pending,
     %% leaving the coarse procedure gate open.
