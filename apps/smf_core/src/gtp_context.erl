@@ -640,6 +640,16 @@ handle_event(info, {'$async_reply', ReqId, Result},
 	     #{async_pending := P} = State, Data) when is_map_key(ReqId, P) ->
     async_dispatch(ReqId, Result, State, Data);
 
+%% A reply naming a ReqId that is not pending -- a late duplicate, or one whose
+%% entry some other path already consumed. Ignore it in the driver rather than
+%% letting it fall through to Interface:handle_event/4. Mirrors the untagged
+%% {'$async_down', _} clause below. Every interface happens to have an
+%% `handle_event(info, _Info, ...)` catch-all today, so this is not a behaviour
+%% change -- it makes the ignore a property of the driver instead of an accident
+%% of each interface.
+handle_event(info, {'$async_reply', _ReqId, _Result}, _State, _Data) ->
+    keep_state_and_data;
+
 handle_event(info, {{'$async_down', ReqId}, _MRef, process, _Pid, Reason},
 	     #{async_pending := P} = State, Data) when is_map_key(ReqId, P) ->
     async_dispatch(ReqId, {error, {worker_down, Reason}}, State, Data);
