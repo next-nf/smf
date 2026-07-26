@@ -82,13 +82,18 @@ close_context(Reason, UsageReport, PCtx, Session0, PCF0, Charging0, Auth0) ->
     %%  1. CCR on Gx to get PCC rules
     Now = erlang:monotonic_time(),
     ReqOpts = #{now => Now, async => true},
+    %% Fire-and-forget, like the Gy terminate below. smf_aaa_diameter_srv:send_request/4
+    %% spawns the diameter call before the handler decides whether to wait, and that
+    %% process is not linked to us, so the CCR-T goes out and completes either way --
+    %% waiting only served to log the answer. It waited via await_response/1, whose
+    %% timeout is `infinity`, so a PCRF that never answered hung the context in teardown
+    %% for good, unable to service anything.
+    ?LOG(debug, "Gx terminate issued"),
     {PCF1, Session1} =
-	case smf_aaa_pcf:ccr_terminate(PCF0, Session0, #{}, ReqOpts#{async => false}) of
+	case smf_aaa_pcf:ccr_terminate(PCF0, Session0, #{}, ReqOpts) of
 	    {ok, PCF0a, Session0a, _} ->
-		?LOG(debug, "Gx terminate succeeded"),
 		{PCF0a, Session0a};
 	    _ ->
-		?LOG(warning, "Gx terminate failed"),
 		{PCF0, Session0}
 	end,
 
