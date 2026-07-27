@@ -45,6 +45,11 @@ Primitives:
   update the two threaded components.
 - `await/1` — the suspension point. `await(ReqId)` yields `{await, ReqId, []}`; the procedure resumes
   when a reply tagged `ReqId` arrives.
+- `foldl/3` — `foldl(Fun, Acc0, List)` sequences `Fun(Elem, Acc) -> async_m()` over a list, threading
+  the accumulator. Use it instead of `lists:foldl/3` whenever a step can `await`: suspending inside a
+  plain fold would lose the remaining elements, because the rest of the list lives on the (abandoned)
+  Erlang stack. This works for the same reason the `do`-block does — the recursive bind captures
+  "fold over the rest" as the continuation, so it rides along in `Conts`.
 - `run/3` — run a value once (mostly for tests).
 
 `resume(Conts, Reply)` reconstitutes a suspended computation: it reverses `Conts` (so the **innermost**
