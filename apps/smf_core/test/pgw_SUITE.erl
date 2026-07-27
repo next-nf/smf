@@ -9518,6 +9518,13 @@ mme_delete_bearer_command_multi(Config) ->
     #{bearers := BearerMap2} = smf_context:test_cmd(gtp, CtxKey, info),
     ?match(#{{qci_arp, 2, {3, 1, 0}} := DedEBI2}, BearerMap2),
 
+    SMRCount =
+	fun() ->
+		length([X || #pfcp{type = session_modification_request} = X
+				 <- smf_test_sx_up:history('pgw-u01')])
+	end,
+    SMRBefore = SMRCount(),
+
     %% The MME now commands deactivation of BOTH dedicated bearers in a single
     %% Delete Bearer Command (two Bearer Contexts at instance 0).
     {GtpC2, _DBCReq} = delete_bearer_command({ebis, [DedEBI1, DedEBI2]}, GtpC),
@@ -9531,6 +9538,12 @@ mme_delete_bearer_command_multi(Config) ->
     ?equal(lists:sort([DedEBI1, DedEBI2]),
            lists:sort([E || #v2_eps_bearer_id{eps_bearer_id = E} <- EBIIEs])),
     ?equal(false, is_map_key({v2_procedure_transaction_id, 0}, DBReq#gtp.ie)),
+
+    %% ...and both bearers' rule removals were reconciled into exactly ONE PFCP
+    %% Session Modification Request. modify_session/5 rebuilds the whole rule set
+    %% and sends only the diff, so per-bearer calls would be N requests walking
+    %% the UPF through intermediate states (#79).
+    ?equal(1, SMRCount() - SMRBefore),
 
     %% Answer the batched Delete Bearer Request; both bearers must be released.
     DBResp = make_response(DBReq, simple, GtpC2),
