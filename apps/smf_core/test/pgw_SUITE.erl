@@ -5537,7 +5537,12 @@ gx_invalid_charging_rulebase(Config) ->
 		   [_, _, R, _]}, _}) ->
 		  ?match(
 		     #{'Charging-Rule-Report' :=
-			   [#{'Charging-Rule-Base-Name' := [_]}]}, R),
+			   [#{'Charging-Rule-Base-Name' := [_],
+			      'PCC-Rule-Status' :=
+				  [?'DIAMETER_GX_PCC-RULE-STATUS_INACTIVE'],
+			      'Rule-Failure-Code' :=
+				  [?'DIAMETER_GX_RULE-FAILURE-CODE_UNKNOWN_RULE_NAME']}]},
+		     R),
 		  true;
 	     (_) ->
 		  false
@@ -5571,7 +5576,12 @@ gx_invalid_charging_rule(Config) ->
 		   [_, _, R, _]}, _}) ->
 		  ?match(
 		     #{'Charging-Rule-Report' :=
-			   [#{'Charging-Rule-Name' := [_]}]}, R),
+			   [#{'Charging-Rule-Name' := [_],
+			      'PCC-Rule-Status' :=
+				  [?'DIAMETER_GX_PCC-RULE-STATUS_INACTIVE'],
+			      'Rule-Failure-Code' :=
+				  [?'DIAMETER_GX_RULE-FAILURE-CODE_UNKNOWN_RULE_NAME']}]},
+		     R),
 		  true;
 	     (_) ->
 		  false
