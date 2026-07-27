@@ -1247,9 +1247,11 @@ ue_qos_change_proc(EBI, ReqQoS, PTI, AccessTunnel) ->
 	   {Result, PCF1, Session1, Events} <- await_pipeline(ReqId),
 	   ok <- async_m:lift(ccr_result(Result)),
 	   RuleBase = smf_charging:rulebase(),
-	   {PCC1, _} = smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC0),
+	   {PCC1, PCCErrors} =
+	       smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC0),
+	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),
 	   async_m:modify_data(
-	     fun(D) -> D#{pcf := PCF1, aaa_session := Session1, pcc := PCC1} end),
+	     fun(D) -> D#{pcf := PCF2, aaa_session := Session2, pcc := PCC1} end),
 	   ue_update_outcome(EBI, PTI, AccessTunnel, PCC1, BearerMap, PCtx0, Dedicated)
        ]).
 
