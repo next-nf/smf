@@ -149,23 +149,41 @@ remove_pcc_rules('Charging-Rule-Name', V, Opts, Update) ->
 remove_pcc_rules('Charging-Rule-Base-Name', V, Opts, Update) ->
     lists:foldl(remove_pcc_rule(_, true, Opts, _), Update, V).
 
-credits_to_pcc_rules(K, #{'Online' := [1]} = V, Pools, {Rules, Removed}) ->
+%% A rule whose rating group has no credit pool is dropped from the PCC context —
+%% it stops being enforced. Carry WHY: the OCS Result-Code that denied the group,
+%% so the Gx report can name a Rule-Failure-Code instead of just "gone". A group
+%% the OCS never mentioned at all has no code, hence `undefined`.
+credits_to_pcc_rules(K, #{'Online' := [1]} = V, Pools, Failed, {Rules, Removed}) ->
     RatingGroup = get_rating_group('Online-Rating-Group', V),
     case is_map_key(RatingGroup, Pools) of
 	true ->
 	    {maps:put(K, V, Rules), Removed};
 	false ->
-	    {Rules, [{no_credits, K} | Removed]}
+	    {Rules, [{no_credits, K, maps:get(RatingGroup, Failed, undefined)} | Removed]}
     end;
-credits_to_pcc_rules(K, V, _, {Rules, Removed}) ->
+credits_to_pcc_rules(K, V, _, _, {Rules, Removed}) ->
     {maps:put(K, V, Rules), Removed}.
 
 %% gy_events_to_pcc_ctx/3
 gy_events_to_pcc_ctx(Now, Evs, #pcc_ctx{rules = Rules0, credits = Credits0} = PCC) ->
     Upd = proplists:get_value(update_credits, Evs, []),
     Credits = lists:foldl(smf_gsn_lib:gy_events_to_credits(Now, _, _), Credits0, Upd),
-    {Rules, Removed} = maps:fold(credits_to_pcc_rules(_, _, Credits, _), {#{}, []}, Rules0),
+    Failed = failed_rating_groups(Upd),
+    {Rules, Removed} =
+	maps:fold(credits_to_pcc_rules(_, _, Credits, Failed, _), {#{}, []}, Rules0),
     {PCC#pcc_ctx{rules = Rules, credits = Credits}, Removed}.
+
+%% Rating groups the OCS refused, by Result-Code. gy_events_to_credits/3 drops
+%% such an MSCC from the credit pool and discards the code with it, so recover it
+%% here from the same events.
+failed_rating_groups(Upd) ->
+    lists:foldl(
+      fun(#{'Rating-Group' := [RatingGroup], 'Result-Code' := [RC]}, Acc)
+	    when RC =/= 2001 ->
+	      Acc#{RatingGroup => RC};
+	 (_, Acc) ->
+	      Acc
+      end, #{}, Upd).
 
 %%%===================================================================
 %%% PCC context to Gy events translation functions

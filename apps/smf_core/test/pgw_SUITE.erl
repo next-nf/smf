@@ -12,6 +12,7 @@
 -include_lib("kernel/include/logger.hrl").
 -include_lib("smf_aaa/include/diameter_3gpp_ts32_299.hrl").
 -include_lib("smf_aaa/include/diameter_3gpp_ts29_212.hrl").
+-include_lib("smf_aaa/include/diameter_rfc4006_cc.hrl").
 -include_lib("smf_aaa/include/smf_aaa_3gpp.hrl").
 -include_lib("smf_aaa/include/smf_aaa_session.hrl").
 -include_lib("common_test/include/ct.hrl").
@@ -634,6 +635,17 @@
 				 }},
 		      'Update-OCS-Fail' =>
 			  #{avps => #{'Result-Code' => 3001}},
+		      %% The command succeeds but the OCS denies credit for the
+		      %% rating group, so every rule bound to it loses its credit
+		      %% pool and is dropped from the PCC context (#70).
+		      'Update-OCS-Denied' =>
+			  #{avps =>
+				#{'Result-Code' => 2001,
+				  'Multiple-Services-Credit-Control' =>
+				      [#{'Rating-Group' => [3000],
+					 'Result-Code' =>
+					     [?'RESULT-CODE_END_USER_SERVICE_DENIED']}]
+				 }},
 		      'Update-OCS' =>
 			  #{avps =>
 				#{'Result-Code' => 2001,
@@ -955,6 +967,7 @@ common() ->
      gtp_idle_timeout_pfcp_session_loss,
      up_inactivity_timer,
      pfcp_async_update_credits,
+     gy_credit_denied_reports_rule_inactive,
      gx_rar_apply_is_async,
      gx_rar_answers_raa_while_parked,
      teardown_queues_behind_procedure,
@@ -1323,6 +1336,12 @@ init_per_testcase(gx_rar_bearer_binding_reeval, Config) ->
 init_per_testcase(gtp_idle_timeout_pfcp_session_loss, Config) ->
     smf_test_lib:set_apn_key(inactivity_timeout, 300),
     setup_per_testcase(Config),
+    Config;
+init_per_testcase(gy_credit_denied_reports_rule_inactive, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:set_online_charging(true),
+    smf_test_lib:load_aaa_answer_config([{{gy, 'CCR-Initial'}, 'Initial-OCS'},
+					 {{gy, 'CCR-Update'},  'Update-OCS-Denied'}]),
     Config;
 init_per_testcase(TestCase, Config)
   when TestCase == pfcp_async_update_credits;
@@ -9610,6 +9629,55 @@ pfcp_async_update_credits(Config) ->
 
     ok = wait_until(fun() -> has_session_modification_request('pgw-u01') end, 50, 100),
     ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 0 end, 50, 100),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gy_credit_denied_reports_rule_inactive() ->
+    [{doc, "When the OCS denies credit for a rating group, every PCC rule bound "
+      "to it is dropped from the PCC context and so stops being enforced. Check "
+      "that the PGW tells the PCRF: a Gx CCR-Update carrying a "
+      "Charging-Rule-Report naming the rule INACTIVE with the Rule-Failure-Code "
+      "mapped from the OCS Result-Code (TS 29.212 4.5.12 — a previously "
+      "installed rule that can no longer be enforced goes in a NEW CCR)."}].
+gy_credit_denied_reports_rule_inactive(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+    {ok, PCtx} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
+
+    %% Drive a Gy credit update; the OCS answers END_USER_SERVICE_DENIED for
+    %% rating group 3000, so the rule bound to it loses its credit pool.
+    trigger_gy_credit_update(PCtx, #{'VOLTH' => []}),
+
+    %% Wait on the report itself, not on async_pending: the registry is empty
+    %% both before the procedure starts and after it finishes, so waiting for
+    %% zero would pass before anything had run.
+    Reports =
+	fun() ->
+		[Rep || {_, {smf_aaa_pcf, ccr_update, [_, _, R, _]}, _}
+			    <- meck:history(smf_aaa_pcf),
+			Rep <- maps:get('Charging-Rule-Report', R, [])]
+	end,
+    ok = wait_until(fun() -> Reports() =/= [] end, 50, 100),
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 0 end, 50, 100),
+
+    %% Exactly one Charging-Rule-Report goes to the PCRF, naming the rule
+    %% INACTIVE with END_USER_SERVICE_DENIED (4010) mapped to its Gx
+    %% counterpart CM_END_USER_SERVICE_DENIED (19).
+    ?match([#{'Charging-Rule-Name' := [_],
+	      'PCC-Rule-Status' :=
+		  [?'DIAMETER_GX_PCC-RULE-STATUS_INACTIVE'],
+	      'Rule-Failure-Code' :=
+		  [?'DIAMETER_GX_RULE-FAILURE-CODE_CM_END_USER_SERVICE_DENIED']}],
+	   Reports()),
 
     delete_session(GtpC),
 

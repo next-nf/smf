@@ -925,14 +925,19 @@ handle_aaa_reply(Handler, Promise, Msg,
 
 %% update_credits_proc/1 — async_m procedure: apply a Gy credit update to the
 %% PCC context and issue the resulting PFCP session modification asynchronously.
+%% A credit update that leaves a rule without credit drops it from the PCC context
+%% and so from the UPF. TS 29.212 4.5.12 puts a previously-installed rule that can
+%% no longer be enforced in a NEW CCR as INACTIVE, so report it (#70).
 update_credits_proc(CreditEv) ->
     do([async_m ||
-	   #{pfcp := PCtx0, bearers := BearerMap, pcc := PCC0} <- async_m:get_data(),
+	   #{pfcp := PCtx0, bearers := BearerMap, pcc := PCC0,
+	     pcf := PCF0, aaa_session := S0} <- async_m:get_data(),
 	   Now = erlang:monotonic_time(),
-	   {PCC, _PCCErrors} = smf_pcc_context:gy_events_to_pcc_ctx(Now, [CreditEv], PCC0),
+	   {PCC, PCCErrors} = smf_pcc_context:gy_events_to_pcc_ctx(Now, [CreditEv], PCC0),
+	   {PCF1, S1} = report_rule_failures(PCCErrors, PCF0, S0, #{now => Now}),
 	   Issued <- async_m:lift(smf_pfcp_context:modify_session_async(PCC, [], #{}, BearerMap, PCtx0)),
 	   {PCtx, _, _} <- await_modify(Issued),
-	   async_m:modify_data(_#{pfcp => PCtx, pcc => PCC})
+	   async_m:modify_data(_#{pfcp => PCtx, pcc => PCC, pcf => PCF1, aaa_session => S1})
        ]).
 
 %% gx_rar_apply_proc/3 — async_m procedure: the resource-allocation half of a Gx
@@ -980,7 +985,7 @@ gx_rar_apply_proc(PCC0, PCC1, PCC2) ->
 
 %%% step 7:
 	   %% TODO Charging-Rule-Report for successfully installed/removed rules
-	   {PCF1, S4} = rar_report_alloc_failures(PCCErrors4, PCF0, S3, ReqOps),
+	   {PCF1, S4} = report_rule_failures(PCCErrors4, PCF0, S3, ReqOps),
 
 	   async_m:modify_data(
 	     fun(#{interface := Interface} = D) ->
@@ -990,10 +995,11 @@ gx_rar_apply_proc(PCC0, PCC1, PCC2) ->
 	     end)
        ]).
 
-%% Resource-allocation-stage failures (rules left without granted credit), which
-%% TS 29.212 4.5.12 puts in a new CCR rather than the RAA -- and the RAA has
-%% already gone out. Fire-and-forget, like the establishment path.
-rar_report_alloc_failures(PCCErrors, PCF0, Session0, ReqOps) ->
+%% Rules the PCEF could not keep enforced -- chiefly ones left without granted
+%% credit. TS 29.212 4.5.12 puts these in a NEW CCR (for a RAR, the RAA has
+%% already gone out; on the Gy credit path there was never an answer to use).
+%% Fire-and-forget, like the establishment path.
+report_rule_failures(PCCErrors, PCF0, Session0, ReqOps) ->
     GxReport = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors),
     if map_size(GxReport) /= 0 ->
 	    {ok, PCF, Session, _} =

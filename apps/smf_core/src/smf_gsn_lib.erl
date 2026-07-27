@@ -61,6 +61,7 @@
 -include_lib("smf_aaa/include/smf_aaa_3gpp.hrl").
 -include_lib("smf_aaa/include/diameter_3gpp_ts29_212.hrl").
 -include_lib("smf_aaa/include/diameter_3gpp_ts32_299.hrl").
+-include_lib("smf_aaa/include/diameter_rfc4006_cc.hrl").
 -include("smf_core_config.hrl").
 -include("include/smf.hrl").
 
@@ -244,8 +245,43 @@ pcc_events_to_charging_rule_report({not_found, {rule, Name}}, AVPs) ->
 	  'Rule-Failure-Code'  => [?'DIAMETER_GX_RULE-FAILURE-CODE_UNKNOWN_RULE_NAME']
 	 },
     repeated('Charging-Rule-Report', Report, AVPs);
-pcc_events_to_charging_rule_report(_Ev, AVPs) ->
+%% A rule dropped because the OCS granted its rating group no credit. TS 29.212
+%% §4.5.12: a previously-installed rule that can no longer be enforced is reported
+%% in a new CCR as INACTIVE — otherwise the PCRF goes on believing it is active and
+%% never re-provisions it.
+pcc_events_to_charging_rule_report({no_credits, Name, ResultCode}, AVPs) ->
+    Report0 =
+	#{'Charging-Rule-Name' => [Name],
+	  'PCC-Rule-Status'    => [?'DIAMETER_GX_PCC-RULE-STATUS_INACTIVE']},
+    Report =
+	case credit_failure_code(ResultCode) of
+	    undefined -> Report0;
+	    Code      -> Report0#{'Rule-Failure-Code' => [Code]}
+	end,
+    repeated('Charging-Rule-Report', Report, AVPs);
+pcc_events_to_charging_rule_report(Ev, AVPs) ->
+    ?LOG(warning, "unhandled PCC event, not reported to the PCRF: ~p", [Ev]),
     AVPs.
+
+%% The CM_* half of the §5.3.38 catalogue mirrors the Gy/Ro Result-Codes, so the
+%% OCS's reason maps straight through. Every member of Charging-Rule-Report is
+%% optional (§5.3.18), so when we have no code — the OCS simply never granted the
+%% group — the report still carries name + INACTIVE, which is what tells the PCRF
+%% the rule is gone (§4.5.12 NOTE). Guessing a wrong reason would be worse.
+credit_failure_code(?'RESULT-CODE_END_USER_SERVICE_DENIED') ->
+    ?'DIAMETER_GX_RULE-FAILURE-CODE_CM_END_USER_SERVICE_DENIED';
+credit_failure_code(?'RESULT-CODE_CREDIT_CONTROL_NOT_APPLICABLE') ->
+    ?'DIAMETER_GX_RULE-FAILURE-CODE_CM_CREDIT_CONTROL_NOT_APPLICABLE';
+credit_failure_code(?'RESULT-CODE_USER_UNKNOWN') ->
+    ?'DIAMETER_GX_RULE-FAILURE-CODE_CM_USER_UNKNOWN';
+credit_failure_code(?'RESULT-CODE_RATING_FAILED') ->
+    ?'DIAMETER_GX_RULE-FAILURE-CODE_CM_RATING_FAILED';
+%% DIAMETER_AUTHORIZATION_REJECTED is a base-protocol code (RFC 6733 §7.1.5), not
+%% one of the RFC 4006 credit-control codes, so it has no rfc4006 macro here.
+credit_failure_code(5003) ->
+    ?'DIAMETER_GX_RULE-FAILURE-CODE_CM_AUTHORIZATION_REJECTED';
+credit_failure_code(_) ->
+    undefined.
 
 pcc_events_to_charging_rule_report(Events) ->
     lists:foldl(fun pcc_events_to_charging_rule_report/2, #{}, Events).
