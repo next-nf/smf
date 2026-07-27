@@ -685,8 +685,8 @@ handle_response({create_bearer, _PgwFTEID}, timeout,
 handle_response({delete_dedicated_bearers, EBIs},
 		#gtp{type = delete_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = _Cause}}},
-		_Request, _State,
-		#{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC, dedicated := Ded0} = Data0) ->
+		_Request, State,
+		#{bearers := BearerMap0, dedicated := Ded0} = Data0) ->
     %% TODO(#35): honor the per-bearer Cause in the Delete Bearer Response and release
     %% only accepted EBIs; today the whole batch is released (as the single-EBI clause did).
     BearerMap = lists:foldl(
@@ -694,11 +694,15 @@ handle_response({delete_dedicated_bearers, EBIs},
 			  smf_gsn_lib:remove_bearer_metadata_for_ebi(
 			    EBI, maps:remove({'Access', EBI}, BM))
 		  end, BearerMap0, EBIs),
-    Data1 = Data0#{dedicated := maps:without(EBIs, Ded0)},
-    case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
-	{ok, {PCtx, _, _}} -> {keep_state, Data1#{bearers := BearerMap, pfcp := PCtx}};
-	{error, _}         -> {keep_state, Data1#{bearers := BearerMap}}
-    end;
+    Data1 = Data0#{dedicated := maps:without(EBIs, Ded0),
+		   bearers := BearerMap},
+    %% Re-provision PFCP asynchronously (#65). The bearer removal is committed
+    %% above either way -- this path always treated a failed modification as
+    %% non-fatal -- so only the new PCtx rides on the reply.
+    async_m:run_async(reprovision_proc(BearerMap),
+		      fun(_V, S, D) -> {next_state, S, D} end,
+		      fun(_R, S, D) -> {next_state, S, D} end,
+		      State, Data1);
 
 handle_response({delete_dedicated_bearers, _EBIs}, timeout,
 		#gtp{type = delete_bearer_request}, _State, _Data) ->
@@ -1298,6 +1302,37 @@ ue_update_outcome(EBI, PTI, AccessTunnel, PCC, BearerMap, PCtx0, Dedicated) ->
 	   async_m:modify_data(
 	     fun(D) -> emit_ue_update_bearer(EBI, PTI, AccessTunnel, PCC, Dedicated, PCtx1, D) end)
        ]).
+
+%% reprovision_proc/1 — re-provision the UPF for a bearer-table change that is
+%% already committed to Data. Every batch-C path treats a failed PFCP
+%% modification as non-fatal (it keeps the control-plane change and drops only
+%% the new PCtx), so this never travels the error channel: await_pfcp_modify_opt/1
+%% yields `undefined` on failure and the commit simply leaves `pfcp` alone.
+reprovision_proc(BearerMap) ->
+    do([async_m ||
+	   #{pfcp := PCtx0, pcc := PCC} <- async_m:get_data(),
+	   Issued <- async_m:lift(
+		       smf_pfcp_context:modify_session_async(PCC, [], #{}, BearerMap, PCtx0)),
+	   PCtx <- await_pfcp_modify_opt(Issued),
+	   async_m:modify_data(
+	     fun(D) when PCtx =:= undefined -> D;
+		(D)                         -> D#{pfcp := PCtx}
+	     end)
+       ]).
+
+%% Tolerant sibling of await_pfcp_modify/1: yields the new PCtx, or `undefined`
+%% when the UPF refused, instead of short-circuiting down the error channel.
+await_pfcp_modify_opt({request, ReqId, PCtx1}) ->
+    do([async_m ||
+	   Reply <- async_m:await(ReqId),
+	   async_m:return(
+	     case smf_pfcp_context:modify_session_result(Reply, PCtx1) of
+		 {ok, {PCtx, _, _}} -> PCtx;
+		 {error, _}         -> undefined
+	     end)
+       ]);
+await_pfcp_modify_opt({no_request, PCtx1}) ->
+    async_m:return(PCtx1).
 
 %% Local mirror of gtp_context:await_modify/1 — await the async PFCP modify reply
 %% (or short-circuit when no PFCP change was needed). A non-accepted reply makes
