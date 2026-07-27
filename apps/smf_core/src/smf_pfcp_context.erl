@@ -12,6 +12,8 @@
 
 -export([create_session/5,
 	 modify_session/5,
+	 modify_session_async/5,
+	 modify_session_result/2,
 	 delete_session/2,
 	 session_liveness_check/1,
 	 usage_report_to_charging_events/3,
@@ -52,18 +54,7 @@ create_session(Handler, PCC, PCtx, Bearer, Ctx)
 %% modify_session/5
 modify_session(PCC, URRActions, Opts, BearerMap, PCtx0)
   when is_record(PCC, pcc_ctx), is_record(PCtx0, pfcp_ctx) ->
-    {SxRules0, SxErrors, PCtx} = build_sx_rules(PCC, Opts, PCtx0, BearerMap),
-    SxRules =
-	lists:foldl(
-	  fun({offline, _}, SxR) ->
-		  SxR#{query_urr => build_query_usage_report(offline, PCtx)};
-	     (_, SxR) ->
-		  SxR
-	  end, SxRules0, URRActions),
-
-    ?LOG(debug, "SxRules: ~p~n", [SxRules]),
-    ?LOG(debug, "SxErrors: ~p~n", [SxErrors]),
-    ?LOG(debug, "PCtx: ~p~n", [PCtx]),
+    {PCtx, SxRules} = modification_request_ies(PCC, URRActions, Opts, BearerMap, PCtx0),
     session_modification_request(PCtx, SxRules).
 
 %% delete_session/2
@@ -207,22 +198,56 @@ session_establishment_request(Handler, PCC, PCtx0, BearerMap0, Ctx) ->
 	    {error, ?CTX_ERR(?FATAL, system_failure)}
     end.
 
+%% modification_request_ies/5 — build the session modification rules, including the
+%% offline query URR asked for by URRActions. Shared by the blocking modify_session/5
+%% and the async modify_session_async/5; returns the updated PCtx and the rules to send.
+modification_request_ies(PCC, URRActions, Opts, BearerMap, PCtx0) ->
+    {SxRules0, SxErrors, PCtx} = build_sx_rules(PCC, Opts, PCtx0, BearerMap),
+    SxRules =
+	lists:foldl(
+	  fun({offline, _}, SxR) ->
+		  SxR#{query_urr => build_query_usage_report(offline, PCtx)};
+	     (_, SxR) ->
+		  SxR
+	  end, SxRules0, URRActions),
+
+    ?LOG(debug, "SxRules: ~p~n", [SxRules]),
+    ?LOG(debug, "SxErrors: ~p~n", [SxErrors]),
+    ?LOG(debug, "PCtx: ~p~n", [PCtx]),
+    {PCtx, SxRules}.
+
 %% session_modification_request/2
 session_modification_request(PCtx, ReqIEs)
   when ?is_non_empty_opts(ReqIEs) ->
     Req = #pfcp{version = v1, type = session_modification_request, seq_no = 0, ie = ReqIEs},
-    case smf_sx_node:call(PCtx, Req) of
-	#pfcp{type = session_modification_response,
-	      ie = #{pfcp_cause := 'Request accepted'} = RespIEs} ->
-	    SessionInfo = session_info(RespIEs),
-	    UsageReport = maps:get(usage_report_smr, RespIEs, undefined),
-	    {ok, {PCtx, UsageReport, SessionInfo}};
-	_ ->
-	    {error, ?CTX_ERR(?FATAL, system_failure)}
-    end;
+    modify_session_result(smf_sx_node:call(PCtx, Req), PCtx);
 session_modification_request(PCtx, _ReqIEs) ->
     %% nothing to do
     {ok, {PCtx, undefined, #{}}}.
+
+%% modify_session_async/5 — same rule build as modify_session/5, but issues the request
+%% asynchronously and returns a request id instead of blocking.
+modify_session_async(PCC, URRActions, Opts, BearerMap, PCtx0)
+  when is_record(PCC, pcc_ctx), is_record(PCtx0, pfcp_ctx) ->
+    {PCtx, SxRules} = modification_request_ies(PCC, URRActions, Opts, BearerMap, PCtx0),
+    session_modification_request_async(PCtx, SxRules).
+
+session_modification_request_async(PCtx, ReqIEs) when ?is_non_empty_opts(ReqIEs) ->
+    Req = #pfcp{version = v1, type = session_modification_request, seq_no = 0, ie = ReqIEs},
+    ReqId = smf_sx_node:send_request(PCtx, Req),
+    {ok, {request, ReqId, PCtx}};
+session_modification_request_async(PCtx, _ReqIEs) ->
+    {ok, {no_request, PCtx}}.
+
+%% modify_session_result/2 — decode a session modification response (the blocking call's
+%% or the async reply's) into the same shape modify_session/5 returns.
+modify_session_result(#pfcp{type = session_modification_response,
+			     ie = #{pfcp_cause := 'Request accepted'} = RespIEs}, PCtx) ->
+    SessionInfo = session_info(RespIEs),
+    UsageReport = maps:get(usage_report_smr, RespIEs, undefined),
+    {ok, {PCtx, UsageReport, SessionInfo}};
+modify_session_result(_Other, _PCtx) ->
+    {error, ?CTX_ERR(?FATAL, system_failure)}.
 
 %%%===================================================================
 %%% PCC to Sx translation functions

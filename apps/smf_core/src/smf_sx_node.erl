@@ -16,7 +16,7 @@
 -export([request_connect/3, request_connect/5, wait_connect/1,
 	 attach/1, notify_up/2,
 	 set_defaults/1, set_required_upff/1, add_sx_node/2]).
--export([start_link/5, send/4, call/2,
+-export([start_link/5, send/4, call/2, send_request/2,
 	 handle_request/3, response/3]).
 -export([validate_options/2, validate_defaults/1]).
 -ifdef(TEST).
@@ -109,6 +109,17 @@ call(#pfcp_ctx{node = Node, seid = #seid{dp = SEID}}, #pfcp{} = Request) ->
     gen_statem:call(Node, Request#pfcp{seid = SEID});
 call(#pfcp_ctx{node = Node}, Request) ->
     gen_statem:call(Node, Request).
+
+%% send_request/2 — async counterpart of call/2. Mints ReqId in the CALLER (context) process;
+%% the reply is delivered as {'$async_reply', ReqId, Reply} to that process.
+send_request(#pfcp_ctx{node = Node, seid = #seid{dp = SEID}}, #pfcp{} = Request) ->
+    ReqId = make_ref(),
+    gen_statem:cast(Node, {request_async, self(), ReqId, Request#pfcp{seid = SEID}}),
+    ReqId;
+send_request(#pfcp_ctx{node = Node}, Request) ->
+    ReqId = make_ref(),
+    gen_statem:cast(Node, {request_async, self(), ReqId, Request}),
+    ReqId.
 
 response(Pid, CbData, Response) ->
     gen_statem:cast(Pid, {response, CbData, Response}).
@@ -567,6 +578,15 @@ handle_event(cast, {response, {call, _} = Evt, Reply}, _, _Data) ->
     Actions = pfcp_reply_actions(Evt, Reply),
     {keep_state_and_data, Actions};
 
+%% async response -- mirror of the {response, {call,_}, ...} clauses above
+handle_event(cast, {response, {async, CallerPid, ReqId},
+		    #pfcp{ie = #{pfcp_cause := 'No established Sx Association'}} = Reply}, _, Data) ->
+    CallerPid ! {'$async_reply', ReqId, Reply},
+    {next_state, dead, handle_nodedown(Data)};
+handle_event(cast, {response, {async, CallerPid, ReqId}, Reply}, _, _Data) ->
+    CallerPid ! {'$async_reply', ReqId, Reply},
+    keep_state_and_data;
+
 handle_event(cast, {response, heartbeat, timeout} = R, _, Data) ->
     ?LOG(warning, "PFCP Timeout: ~p", [R]),
     {next_state, dead, handle_nodedown(Data)};
@@ -584,6 +604,18 @@ handle_event({call, _} = Evt, #pfcp{} = Request0, {connected, _},
 
 handle_event({call, _}, Request, _, _Data)
   when is_record(Request, pfcp) ->
+    {keep_state_and_data, postpone};
+
+%% async request -- mirror of the {connected,_} sync clause above
+handle_event(cast, {request_async, CallerPid, ReqId, #pfcp{} = Request0}, {connected, _},
+	     #data{dp = #node{ip = IP}, cfg = #{request := #{timeout := Timeout, retry := Retry}}} = Data) ->
+    Request = augment_mandatory_ie(Request0, Data),
+    smf_sx_socket:call(IP, Timeout, Retry, Request, response_cb({async, CallerPid, ReqId})),
+    keep_state_and_data;
+handle_event(cast, {request_async, CallerPid, ReqId, _Request}, dead, _Data) ->
+    CallerPid ! {'$async_reply', ReqId, {error, dead}},
+    keep_state_and_data;
+handle_event(cast, {request_async, _CallerPid, _ReqId, _Request}, _NotConnected, _Data) ->
     {keep_state_and_data, postpone};
 
 handle_event(cast, {handle_pdu, _Request, #gtp{type=g_pdu, ie = PDU}}, _, Data) ->
