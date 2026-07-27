@@ -215,7 +215,7 @@ handle_request(ReqKey,
 handle_request(ReqKey,
 	       #gtp{type = update_pdp_context_request,
 		    ie = #{?'Quality of Service Profile' := ReqQoSProfile} = IEs} = Request,
-	       _Resent, #{session := connected} = _State,
+	       _Resent, #{session := connected} = State,
 	       #{context := Context, pfcp := PCtx0,
 		 tunnels := #{'Access' := AccessTunnelOld} = Tunnels,
 		 bearers := BearerMap0,
@@ -231,30 +231,14 @@ handle_request(ReqKey,
 
     AccessTunnel = smf_gtp_gsn_lib:update_tunnel_endpoint(AccessTunnelOld, AccessTunnel0),
     {URRActions, S1} = update_session_from_gtp_req(IEs, S0, AccessTunnel, AccessBearer),
-    {PCtx, S2} =
-	if AccessBearer /= AccessBearerOld ->
-		case smf_gtp_gsn_lib:apply_bearer_change(
-		       BearerMap, URRActions, false, PCtx0, PCC) of
-		    {ok, {RPCtx, SessionInfo}} ->
-			{RPCtx, maps:merge(S1, SessionInfo)};
-		    {error, Err2} -> throw(Err2#ctx_err{context = Context, tunnel = AccessTunnel})
-		end;
-	   true ->
-		gtp_context:trigger_usage_report(self(), URRActions, PCtx0),
-		{PCtx0, S1}
-	end,
-
-    ResponseIEs0 = [#cause{value = request_accepted},
-		    context_charging_id(Context),
-		    ReqQoSProfile],
-    ResponseIEs1 = tunnel_elements(AccessTunnel, ResponseIEs0),
-    ResponseIEs = bearer_elements(BearerMap, ResponseIEs1),
-    Response = response(update_pdp_context_response, AccessTunnel, ResponseIEs, Request),
-    gtp_context:send_response(ReqKey, Request, Response),
-
-    DataNew = Data#{pfcp => PCtx, tunnels => Tunnels#{'Access' => AccessTunnel}, bearers => BearerMap, aaa_session => S2},
-    Actions = context_idle_action([], Context),
-    {keep_state, DataNew, Actions};
+    Proc = smf_gtp_gsn_lib:access_bearer_change_proc(
+	     AccessBearer /= AccessBearerOld, BearerMap, URRActions, false, PCtx0, PCC),
+    Req = #{req_key => ReqKey, request => Request, qos_profile => ReqQoSProfile,
+	    context => Context, tunnels => Tunnels, access_tunnel => AccessTunnel,
+	    bearers => BearerMap, aaa_session => S1},
+    OkFun = fun(V, S, D) -> update_pdp_context_ok(V, S, D, Req) end,
+    ErrFun = fun(E, S, D) -> update_pdp_context_err(E, S, D, Req) end,
+    async_m:run_async(Proc, OkFun, ErrFun, State, Data);
 
 handle_request(ReqKey,
 	       #gtp{type = ms_info_change_notification_request, ie = IEs} = Request,
@@ -341,6 +325,33 @@ handle_request(ReqKey,
 handle_request(ReqKey, _Msg, _Resent, _State, _Data) ->
     gtp_context:request_finished(ReqKey),
     keep_state_and_data.
+
+%% The Update PDP Context Response is built from the PFCP result, so it goes out
+%% from here rather than from the handler. {next_state, ...} (not keep_state)
+%% because the drained async_pending re-delivers what the coarse gate postponed.
+update_pdp_context_ok({PCtx, SessionInfo}, State, Data,
+		      #{req_key := ReqKey, request := Request, qos_profile := ReqQoSProfile,
+			context := Context, tunnels := Tunnels, access_tunnel := AccessTunnel,
+			bearers := BearerMap, aaa_session := S1}) ->
+    ResponseIEs0 = [#cause{value = request_accepted},
+		    context_charging_id(Context),
+		    ReqQoSProfile],
+    ResponseIEs1 = tunnel_elements(AccessTunnel, ResponseIEs0),
+    ResponseIEs = bearer_elements(BearerMap, ResponseIEs1),
+    Response = response(update_pdp_context_response, AccessTunnel, ResponseIEs, Request),
+    gtp_context:send_response(ReqKey, Request, Response),
+
+    DataNew = Data#{pfcp => PCtx, tunnels => Tunnels#{'Access' => AccessTunnel},
+		    bearers => BearerMap, aaa_session => maps:merge(S1, SessionInfo)},
+    Actions = context_idle_action([], Context),
+    {next_state, State, DataNew, Actions}.
+
+%% The only failure the procedure can produce is the FATAL #ctx_err from
+%% modify_session_result/2. Decorate and re-throw so async_dispatch's #ctx_err
+%% catch runs handle_ctx_error — exactly what the synchronous branch did.
+update_pdp_context_err(#ctx_err{} = E, _State, _Data,
+		       #{context := Context, access_tunnel := AccessTunnel}) ->
+    throw(E#ctx_err{context = Context, tunnel = AccessTunnel}).
 
 handle_response(alive_check,
 		#gtp{type = update_pdp_context_response,
