@@ -586,7 +586,7 @@ handle_request(ReqKey,
 handle_request(ReqKey,
 	       #gtp{type = delete_bearer_command,
 		    ie = #{?'Bearer Contexts' := BearerContexts}},
-	       _Resent, #{session := connected},
+	       _Resent, #{session := connected} = State,
 	       #{context := Context, tunnels := #{'Access' := AccessTunnel}} = Data0) ->
     %% MME-Initiated Dedicated Bearer Deactivation (TS 23.401 5.4.4.2,
     %% TS 29.274 7.2.17). The PGW does not delete immediately: for each
@@ -606,17 +606,20 @@ handle_request(ReqKey,
 		  prep_commanded_deactivation(BearerContext, DefaultEBI,
 					      AccessTunnel, Acc)
 	  end, {Data0, [], []}, BearerContexts),
-    Data2 = reprovision_bearers(Data1),
     Data = case RuleNames of
-	       [] -> Data2;
-	       _  -> report_rules_inactive(RuleNames, Data2)
+	       [] -> Data1;
+	       _  -> report_rules_inactive(RuleNames, Data1)
 	   end,
     send_dedicated_bearers_delete(EBIs, AccessTunnel),
     %% Like modify_bearer_command, no direct response is sent; the follow-on
     %% Delete Bearer Request carries the procedure forward.
     gtp_context:request_finished(ReqKey),
-    Actions = context_idle_action([], Context),
-    {keep_state, Data, Actions};
+    %% One async re-provision for the whole batch (#65/#79).
+    #{bearers := BearerMap} = Data,
+    async_m:run_async(reprovision_proc(BearerMap),
+		      fun(_V, S, D) -> {next_state, S, D, context_idle_action([], Context)} end,
+		      fun(_R, S, D) -> {next_state, S, D, context_idle_action([], Context)} end,
+		      State, Data);
 
 handle_request(ReqKey, _Msg, _Resent, _State, _Data) ->
     gtp_context:request_finished(ReqKey),
@@ -630,8 +633,8 @@ handle_response({create_bearer, PgwFTEID},
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause},
 			    ?'Bearer Contexts to be created' :=
 				#v2_bearer_context{group = BearerCtxGroup}}},
-		_Request, #{session := connected} = _State,
-		#{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC,
+		_Request, #{session := connected} = State,
+		#{bearers := BearerMap0, pcc := PCC,
 		  pending_bearers := Pending0} = Data0)
   when ?CAUSE_OK(Cause) ->
     %% The message-level Cause may be request_accepted_partially, so the
@@ -648,25 +651,27 @@ handle_response({create_bearer, PgwFTEID},
 		    BearerMap = BearerMap0#{{'Access', EBI} => AccessBearer,
 					    {qci_arp, QCI, ARP} => EBI,
 					    {bearer_id, PgwBI} => EBI},
-		    PCtx = case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
-			       {ok, {PCtx1, _, _}} -> PCtx1;
-			       {error, _}         -> PCtx0
-			   end,
 		    Desc = smf_gsn_lib:normalize_bearer(EBI, QCI, ARP, PCC, ChId),
 		    Dedicated = maps:get(dedicated, Data0, #{}),
-		    Data1 = Data0#{bearers := BearerMap, pfcp := PCtx,
+		    Data1 = Data0#{bearers := BearerMap,
 				   pending_bearers := Pending,
 				   dedicated := Dedicated#{EBI => Desc},
 				   retry_bearers :=
 				       maps:remove(PgwFTEID,
 						   maps:get(retry_bearers, Data0, #{}))},
 		    Data = report_successful_resource_allocation(QCI, ARP, Data1),
-		    {keep_state, Data};
+		    %% Re-provision the UPF asynchronously (#65). The bearer is
+		    %% already committed above; a failed modification only costs
+		    %% the new PCtx, as it did when this call blocked.
+		    async_m:run_async(reprovision_proc(BearerMap),
+				      fun(_V, S, D) -> {next_state, S, D} end,
+				      fun(_R, S, D) -> {next_state, S, D} end,
+				      State, Data);
 		error ->
 		    keep_state_and_data
 	    end;
 	false ->
-	    handle_create_bearer_failure(PgwFTEID, Data0)
+	    handle_create_bearer_failure(PgwFTEID, State, Data0)
     end;
 
 handle_response({create_bearer, PgwFTEID},
@@ -683,9 +688,9 @@ handle_response({create_bearer, PgwFTEID},
 
 handle_response({create_bearer, PgwFTEID},
 		#gtp{type = create_bearer_response},
-		_Request, _State, Data0) ->
+		_Request, State, Data0) ->
     %% Dedicated bearer could not be activated (message-level Cause not OK).
-    handle_create_bearer_failure(PgwFTEID, Data0);
+    handle_create_bearer_failure(PgwFTEID, State, Data0);
 
 handle_response({create_bearer, _PgwFTEID}, timeout,
 		#gtp{type = create_bearer_request}, _State, _Data) ->
@@ -1880,8 +1885,8 @@ report_rules_inactive(RuleNames,
 %% per-bearer Cause. Per TS 29.212 4.5.6/4.5.12 the PCEF shall remove the
 %% affected PCC rule(s) and report them to the PCRF with PCC-Rule-Status
 %% INACTIVE and Rule-Failure-Code RESOURCE_ALLOCATION_FAILURE.
-handle_create_bearer_failure(PgwFTEID,
-			     #{bearers := BearerMap, pfcp := PCtx0, pcc := PCC,
+handle_create_bearer_failure(PgwFTEID, State,
+			     #{bearers := BearerMap, pcc := PCC,
 			       pending_bearers := Pending0} = Data00) ->
     %% Terminal failure: drop any retained retry params for this bearer.
     Data0 = Data00#{retry_bearers =>
@@ -1894,16 +1899,14 @@ handle_create_bearer_failure(PgwFTEID,
 		RuleNames ->
 		    PCC1 = PCC#pcc_ctx{
 			     rules = maps:without(RuleNames, PCC#pcc_ctx.rules)},
-		    Data1 =
-			case smf_pfcp_context:modify_session(PCC1, [], #{}, BearerMap, PCtx0) of
-			    {ok, {PCtx, _, _}} ->
-				Data0#{pcc := PCC1, pfcp := PCtx,
-				       pending_bearers := Pending};
-			    {error, _} ->
-				Data0#{pcc := PCC1, pending_bearers := Pending}
-			end,
+		    Data1 = Data0#{pcc := PCC1, pending_bearers := Pending},
 		    Data = report_bearer_failure(RuleNames, Data1),
-		    {keep_state, Data}
+		    %% Re-provision asynchronously (#65); the rule removal above
+		    %% stands whether or not the UPF accepts it.
+		    async_m:run_async(reprovision_proc(BearerMap),
+				      fun(_V, S, D) -> {next_state, S, D} end,
+				      fun(_R, S, D) -> {next_state, S, D} end,
+				      State, Data)
 	    end;
 	error ->
 	    {keep_state, Data0}
