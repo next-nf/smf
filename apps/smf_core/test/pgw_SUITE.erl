@@ -527,6 +527,23 @@
 					},
 				       #{'Charging-Rule-Name' => [<<"unknown-rule">>]}]
 				 }},
+		      %% An overriding PCC decision on the HSS-initiated Subscribed
+		      %% QoS Modification (TS 23.401 5.4.2.2 step 4): the PCRF
+		      %% reshapes the default bearer's QCI/ARP and the APN-AMBR.
+		      %% Both are command-level AVPs (TS 29.212 4.5.5), not rules.
+		      'Update-Gx-QoS-Override' =>
+			  #{avps =>
+				#{'Result-Code' => 2001,
+				  'Default-EPS-Bearer-QoS' =>
+				      [#{'QoS-Class-Identifier' => [6],
+					 'Allocation-Retention-Priority' =>
+					     [#{'Priority-Level' => 4,
+						'Pre-emption-Capability' => [0],
+						'Pre-emption-Vulnerability' => [1]}]}],
+				  'QoS-Information' =>
+				      [#{'APN-Aggregate-Max-Bitrate-UL' => [64000000],
+					 'APN-Aggregate-Max-Bitrate-DL' => [128000000]}]
+				 }},
 		      'Update-Gx-Replace-One' =>
 			  #{avps =>
 				#{'Result-Code' => 2001,
@@ -851,6 +868,7 @@ common() ->
      modify_bearer_request_rat_update,
      modify_bearer_request_tei_update,
      modify_bearer_command,
+     modify_bearer_command_pcrf_qos_override,
      modify_bearer_command_resend,
      modify_bearer_command_timeout,
      modify_bearer_command_congestion,
@@ -2594,9 +2612,12 @@ modify_bearer_command(Config) ->
     %% TS 23.401 5.4.2.2 step 4: the PGW must inform the PCRF of the updated
     %% default-bearer EPS Bearer QoS / APN-AMBR via a Gx CCR-Update carrying the
     %% updated 'QoS-Information' and a DEFAULT_EPS_BEARER_QOS_CHANGE event trigger.
+    %% Issued through invoke(pipeline_async) rather than ccr_update since #23 —
+    %% the PGW now awaits the CCA so it can enforce an overriding decision.
     QoSModCCRU =
 	lists:filter(
-	  fun({_, {smf_aaa_pcf, ccr_update, [_, _, SOpts, _]}, _}) ->
+	  fun({_, {smf_aaa_pcf, invoke,
+		   [_, _, SOpts, {gx, 'CCR-Update'}, #{pipeline_async := true}]}, _}) ->
 		  case SOpts of
 		      #{'QoS-Information' := QoS,
 			'Event-Trigger' :=
@@ -2610,6 +2631,51 @@ modify_bearer_command(Config) ->
 		  false
 	  end, meck:history(smf_aaa_pcf)),
     ?match([_], QoSModCCRU),
+
+    Response = make_response(Req1, simple, GtpC2),
+    send_pdu(GtpC2, Response),
+
+    ?equal({ok, timeout}, recv_pdu(GtpC2, Req1#gtp.seq_no, ?TIMEOUT, ok)),
+    ?equal([], outstanding_requests()),
+
+    delete_session(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+modify_bearer_command_pcrf_qos_override() ->
+    [{doc, "Check that when the PCRF answers the Modify Bearer Command's Gx "
+      "CCR-Update with an overriding decision -- a Default-EPS-Bearer-QoS "
+      "reshaping QCI/ARP plus an APN-AMBR -- the PGW enforces THOSE in the "
+      "Update Bearer Request instead of the values carried by the command "
+      "(TS 23.401 5.4.2.2 step 4)."}].
+modify_bearer_command_pcrf_qos_override(Config) ->
+    {GtpC1, _, _} = create_session(Config),
+
+    %% The command asks for QCI 8 / ARP {9,1,0} and APN-AMBR 48128/1704125 kbps.
+    smf_test_lib:load_aaa_answer_config(
+      [{{gx, 'CCR-Update'}, 'Update-Gx-QoS-Override'}]),
+    {GtpC2, Req0} = modify_bearer_command({arp_change, 9}, GtpC1),
+
+    %% The PGW parks on the CCR-U await; the mock answers with the override, so
+    %% the Update Bearer Request carries the PCRF's QCI 6 / ARP {4,0,1} and its
+    %% APN-AMBR (64000000/128000000 bps -> 64000/128000 kbps in the IE), NOT the
+    %% command's.
+    Req1 = recv_pdu(GtpC2, Req0#gtp.seq_no, ?TIMEOUT, ok),
+    ?match(#gtp{type = update_bearer_request,
+		ie = #{{v2_aggregate_maximum_bit_rate, 0} :=
+			   #v2_aggregate_maximum_bit_rate{uplink = 64000,
+							  downlink = 128000},
+		       {v2_bearer_context, 0} :=
+			   #v2_bearer_context{
+			      group = #{{v2_bearer_level_quality_of_service, 0} :=
+					    #v2_bearer_level_quality_of_service{
+					       label = 6, pl = 4,
+					       pci = 0, pvi = 1}}}}}, Req1),
 
     Response = make_response(Req1, simple, GtpC2),
     send_pdu(GtpC2, Response),

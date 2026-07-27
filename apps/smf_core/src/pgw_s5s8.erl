@@ -376,43 +376,25 @@ handle_request(#request{src = Src, ip = IP, port = Port} = ReqKey,
 			   ?'Bearer Contexts to be modified' :=
 			       #v2_bearer_context{
 				   group = #{?'EPS Bearer ID' := EBI} = Bearer}} = IEs},
-	       _Resent, #{session := connected},
+	       _Resent, #{session := connected} = State,
 	       #{context := Context, tunnels := #{'Access' := AccessTunnel},
 		 bearers := BearerMap, aaa_session := S0} = Data) ->
-    OldSOpts = S0,
     AccessBearer = smf_gsn_lib:get_access_default_bearer(BearerMap),
     {_URRActions, S1} = update_session_from_gtp_req(IEs, S0, AccessTunnel, AccessBearer),
 
     %% TS 23.401 5.4.2.2 steps 4-5: a Modify Bearer Command is an HSS-initiated
-    %% Subscribed QoS Modification for the default bearer. If PCC is deployed the
-    %% PGW must inform the PCRF of the updated EPS Bearer QoS / APN-AMBR (a
-    %% PCEF-initiated IP-CAN Session Modification, i.e. a Gx CCR-Update) before
-    %% sending the Update Bearer Request. update_session_from_gtp_req/4 has
-    %% already folded the command's APN-AMBR + Bearer Level QoS into the session's
-    %% 'QoS-Information'; report it to the PCRF here.
-    DataNew = report_default_bearer_qos_modification(Data#{aaa_session => S1}),
-
-    Type = update_bearer_request,
-    RequestIEs0 =
-	[AMBR,
-	 #v2_bearer_context{
-	    group = copy_ies_to_response(Bearer, [EBI], [?'Bearer Level QoS'])}],
-    RequestIEs = gtp_v2_c:build_recovery(Type, AccessTunnel, false, RequestIEs0),
-    Msg = msg(AccessTunnel, Type, RequestIEs),
-    send_request(
-      AccessTunnel, Src, IP, Port, ?T3, ?N3, Msg#gtp{seq_no = SeqNo}, {ReqKey, OldSOpts}),
-
-    %% TS 23.401 5.4.2.2 step 5: "If the subscribed ARP parameter has been
-    %% changed, the PDN GW shall also modify all dedicated EPS bearers having
-    %% the previously subscribed ARP value unless superseded by PCRF decision."
-    %% Fan the ARP change out to every dedicated bearer that still carries the
-    %% old subscribed ARP; each gets its own network-initiated Update Bearer
-    %% Request with QCI/GBR/MBR unchanged but the new ARP.
-    DataNew1 = fan_out_subscribed_arp_change(OldSOpts, Bearer, AMBR, Context,
-					     AccessTunnel, DataNew),
-
-    Actions = context_idle_action([], Context),
-    {keep_state, DataNew1, Actions};
+    %% Subscribed QoS Modification for the default bearer. The PGW reports the
+    %% updated EPS Bearer QoS / APN-AMBR to the PCRF (a PCEF-initiated IP-CAN
+    %% Session Modification, i.e. a Gx CCR-Update) and the PCRF MAY answer with an
+    %% overriding decision that the PGW enforces in the Update Bearer Request --
+    %% so this awaits the CCA instead of firing and forgetting (#23). Async, so
+    %% the context stays responsive while the PCRF thinks.
+    Cmd = #{req_key => ReqKey, seq_no => SeqNo, src => Src, ip => IP, port => Port,
+	    ambr => AMBR, bearer => Bearer, ebi => EBI, old_sopts => S0},
+    Proc = subscribed_qos_change_proc(Cmd, AccessTunnel, Context),
+    OkFun = fun(_V, S, D) -> mbc_done(S, D, Context) end,
+    ErrFun = fun(E, S, D) -> mbc_err(E, S, D, Cmd, AccessTunnel, Context) end,
+    async_m:run_async(Proc, OkFun, ErrFun, State, Data#{aaa_session => S1});
 
 handle_request(ReqKey,
 	       #gtp{type = change_notification_request, ie = IEs} = Request,
@@ -832,9 +814,10 @@ handle_response(_CommandReqKey, _Response, _Request, #{session := SState}, _Data
 %% before the command was folded in) with the new ARP from the command's Bearer
 %% Level QoS; if they differ, emit a network-initiated Update Bearer Request per
 %% affected dedicated bearer with QCI/GBR/MBR unchanged but the new ARP.
-fan_out_subscribed_arp_change(OldSOpts, CommandBearer, AMBR, Context, AccessTunnel,
+%% NewARP is the *effective* ARP -- the PCRF's authorized one when it provisioned
+%% a Default-EPS-Bearer-QoS, else the command's (see effective_arp/2).
+fan_out_subscribed_arp_change(OldSOpts, NewARP, AMBR, Context, AccessTunnel,
 			      #{dedicated := Dedicated} = Data) ->
-    NewARP = command_bearer_arp(CommandBearer),
     OldARP = session_default_arp(OldSOpts),
     DefaultEBI = Context#context.default_bearer_id,
     case NewARP =/= undefined andalso OldARP =/= undefined andalso NewARP =/= OldARP of
@@ -1678,22 +1661,128 @@ rule_wants_alloc_notification(Name, #pcc_ctx{rules = Rules}) ->
 %% (already folded into the session by update_session_from_gtp_req/4) with a
 %% DEFAULT_EPS_BEARER_QOS_CHANGE event trigger.
 %%
-%% TODO(#23): step 4 also allows the PCRF to return an *overriding* PCC decision
-%% (a Default-EPS-Bearer-QoS reshaping the APN-AMBR/QCI/ARP) that the PGW should
-%% enforce in the Update Bearer Request. Consuming that reply requires the async
-%% Gx-reply pipeline (replies arrive as events, not inline here), so for now we
-%% report the change and proceed with the QoS taken from the command itself.
-report_default_bearer_qos_modification(#{pcf := PCF0, aaa_session := S0} = Data) ->
-    SOpts0 = maps:with(['QoS-Information'], S0),
-    SOpts = SOpts0#{'Event-Trigger' =>
-			?'DIAMETER_GX_EVENT-TRIGGER_DEFAULT_EPS_BEARER_QOS_CHANGE'},
-    Now = erlang:monotonic_time(),
-    case smf_aaa_pcf:ccr_update(PCF0, S0, SOpts, #{now => Now, async => true}) of
-	{ok, PCF1, S1, _Events} ->
-	    Data#{pcf := PCF1, aaa_session := S1};
-	_ ->
-	    Data
-    end.
+%% Per step 4 the PCRF may answer with an *overriding* decision -- a
+%% Default-EPS-Bearer-QoS reshaping QCI/ARP and/or an APN-AMBR -- which the PGW
+%% enforces in the Update Bearer Request in place of the command's own values.
+%% smf_aaa_gx surfaces it as 'Authorized-QoS-Information' on the session.
+subscribed_qos_change_proc(Cmd, AccessTunnel, Context) ->
+    do([async_m ||
+	   #{pcf := PCF0, aaa_session := S1} <- async_m:get_data(),
+	   SOpts = (maps:with(['QoS-Information'], S1))
+	       #{'Event-Trigger' =>
+		     ?'DIAMETER_GX_EVENT-TRIGGER_DEFAULT_EPS_BEARER_QOS_CHANGE'},
+	   Now = erlang:monotonic_time(),
+	   {async, ReqId} =
+	       smf_aaa_pcf:invoke(PCF0, S1, SOpts, {gx, 'CCR-Update'},
+				  #{pipeline_async => true, now => Now}),
+	   Reply <- async_m:await(ReqId),
+	   {PCF1, S2} = qos_change_answer(Reply, PCF0, S1),
+	   async_m:modify_data(fun(D) -> D#{pcf := PCF1, aaa_session := S2} end),
+	   AuthQoS = maps:get('Authorized-QoS-Information', S2, #{}),
+	   async_m:modify_data(
+	     fun(D) -> emit_subscribed_qos_update(Cmd, AuthQoS, AccessTunnel, Context, D) end)
+       ]).
+
+%% The PCRF's answer only ever *refines* the Update Bearer Request. On any
+%% failure -- a rejecting Result-Code, a transport error, a dead worker -- we keep
+%% the command's own QoS and carry on, because a Modify Bearer Command has no
+%% error response (the Update Bearer Request IS the follow-on, TS 29.274 7.2.14):
+%% aborting would silently drop the HSS-initiated change rather than degrade to it.
+%%
+%% A rejecting CCA cannot smuggle an override in either -- TS 29.212 4.5.1 forbids
+%% combining a rejection result code with provisioning -- so the authorized key is
+%% simply absent and the fallback below applies.
+qos_change_answer({ok, PCF1, S1, _Events}, _PCF0, _S0) ->
+    {PCF1, S1};
+qos_change_answer({Result, PCF1, S1, _Events}, _PCF0, _S0) ->
+    ?LOG(warning, "Gx rejected the subscribed QoS modification (~p); "
+	 "proceeding with the QoS from the Modify Bearer Command", [Result]),
+    {PCF1, S1};
+qos_change_answer(Other, PCF0, S0) ->
+    ?LOG(warning, "Gx subscribed QoS modification failed (~p); "
+	 "proceeding with the QoS from the Modify Bearer Command", [Other]),
+    {PCF0, S0}.
+
+%% Emit the Update Bearer Request and fan the ARP change out, both using the
+%% authorized values where the PCRF supplied them and the command's otherwise.
+emit_subscribed_qos_update(#{req_key := ReqKey, seq_no := SeqNo, src := Src,
+			     ip := IP, port := Port, ambr := CmdAMBR,
+			     bearer := Bearer, ebi := EBI, old_sopts := OldSOpts},
+			   AuthQoS, AccessTunnel, Context, Data) ->
+    AMBR = effective_apn_ambr(AuthQoS, CmdAMBR),
+    Type = update_bearer_request,
+    RequestIEs0 =
+	[AMBR,
+	 #v2_bearer_context{group = effective_bearer_group(AuthQoS, Bearer, EBI)}],
+    RequestIEs = gtp_v2_c:build_recovery(Type, AccessTunnel, false, RequestIEs0),
+    Msg = msg(AccessTunnel, Type, RequestIEs),
+    send_request(
+      AccessTunnel, Src, IP, Port, ?T3, ?N3, Msg#gtp{seq_no = SeqNo}, {ReqKey, OldSOpts}),
+
+    %% TS 23.401 5.4.2.2 step 5: "If the subscribed ARP parameter has been
+    %% changed, the PDN GW shall also modify all dedicated EPS bearers having
+    %% the previously subscribed ARP value unless superseded by PCRF decision."
+    %% The "unless superseded" half is what effective_arp/2 implements: the ARP
+    %% fanned out is the authorized one when the PCRF provisioned it.
+    fan_out_subscribed_arp_change(OldSOpts, effective_arp(AuthQoS, Bearer), AMBR,
+				  Context, AccessTunnel, Data).
+
+%% Authorized APN-AMBR wins over the command's. Session values are bps, the IE
+%% is kbps (cf. copy_qos_to_session/2, which scales the other way).
+effective_apn_ambr(#{'APN-Aggregate-Max-Bitrate-UL' := UL,
+		     'APN-Aggregate-Max-Bitrate-DL' := DL}, _CmdAMBR) ->
+    #v2_aggregate_maximum_bit_rate{uplink = UL div 1000, downlink = DL div 1000};
+effective_apn_ambr(_AuthQoS, CmdAMBR) ->
+    CmdAMBR.
+
+%% Default-EPS-Bearer-QoS carries QCI and ARP only (the default bearer is non-GBR;
+%% its bitrates come from the APN-AMBR), so overlay just those onto the command's
+%% Bearer Level QoS, field by field, leaving anything the PCRF omitted alone.
+effective_bearer_group(AuthQoS,
+		       #{?'Bearer Level QoS' :=
+			     #v2_bearer_level_quality_of_service{} = BLQoS}, EBI)
+  when map_size(AuthQoS) =/= 0 ->
+    ARP = maps:get('Allocation-Retention-Priority', AuthQoS, #{}),
+    [EBI,
+     BLQoS#v2_bearer_level_quality_of_service{
+       label = maps:get('QoS-Class-Identifier', AuthQoS,
+			BLQoS#v2_bearer_level_quality_of_service.label),
+       pl  = maps:get('Priority-Level', ARP,
+		      BLQoS#v2_bearer_level_quality_of_service.pl),
+       pci = maps:get('Pre-emption-Capability', ARP,
+		      BLQoS#v2_bearer_level_quality_of_service.pci),
+       pvi = maps:get('Pre-emption-Vulnerability', ARP,
+		      BLQoS#v2_bearer_level_quality_of_service.pvi)}];
+effective_bearer_group(_AuthQoS, Bearer, EBI) ->
+    copy_ies_to_response(Bearer, [EBI], [?'Bearer Level QoS']).
+
+%% The ARP the fan-out compares against and installs: authorized if the PCRF
+%% provisioned one, else the command's.
+effective_arp(#{'Allocation-Retention-Priority' := #{'Priority-Level' := PL} = ARP},
+	      _CommandBearer) ->
+    {PL,
+     maps:get('Pre-emption-Capability', ARP, 1),
+     maps:get('Pre-emption-Vulnerability', ARP, 0)};
+effective_arp(_AuthQoS, CommandBearer) ->
+    command_bearer_arp(CommandBearer).
+
+%% No direct response to a Modify Bearer Command -- the Update Bearer Request is
+%% the follow-on. Thread the State back so the async_pending drain re-fires
+%% whatever the gate postponed while we waited on the PCRF.
+mbc_done(State, Data, Context) ->
+    {next_state, State, Data, context_idle_action([], Context)}.
+
+%% The Gx step cannot fail the procedure (qos_change_answer/3 absorbs every
+%% failure), so reaching here means a #ctx_err{} or a bug. Still emit the Update
+%% Bearer from the command's own QoS rather than dropping the HSS-initiated change.
+%% Re-throw so async_dispatch's #ctx_err catch runs handle_ctx_error, exactly as
+%% br_err/9 does on the UE bearer paths.
+mbc_err(#ctx_err{} = E, _State, _Data, _Cmd, _AccessTunnel, _Context) ->
+    throw(E);
+mbc_err(Reason, State, Data, Cmd, AccessTunnel, Context) ->
+    ?LOG(error, "subscribed QoS modification failed after the Gx step: ~p", [Reason]),
+    Data1 = emit_subscribed_qos_update(Cmd, #{}, AccessTunnel, Context, Data),
+    {next_state, State, Data1, context_idle_action([], Context)}.
 
 %% Report dedicated bearer activation failure to PCRF via Gx CCR-Update
 %% with a Charging-Rule-Report naming the affected PCC rule(s) as INACTIVE
