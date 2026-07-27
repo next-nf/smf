@@ -13,7 +13,7 @@
 -export([connect_upf_candidates/4, create_session/13]).
 -export([triggered_charging_event/4, usage_report/3, close_context/3, close_context/4]).
 -export([update_tunnel_endpoint/2,
-	 apply_bearer_change/5]).
+	 apply_bearer_change_proc/5, access_bearer_change_proc/6]).
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("gtplib/include/gtp_packet.hrl").
@@ -265,18 +265,44 @@ update_tunnel_endpoint(TunnelOld, Tunnel0) ->
 %% Bearer Support
 %%====================================================================
 
-apply_bearer_change(BearerMap, URRActions, SendEM, PCtx0, PCC) ->
-    ModifyOpts =
-	if SendEM -> #{send_end_marker => true};
-	   true   -> #{}
-	end,
-    case smf_pfcp_context:modify_session(PCC, URRActions, ModifyOpts, BearerMap, PCtx0) of
-	{ok, {PCtx, UsageReport, SessionInfo}} ->
-	    gtp_context:usage_report(self(), URRActions, UsageReport),
-	    {ok, {PCtx, SessionInfo}};
-	{error, _} = Error ->
-	    Error
-    end.
+%% Re-provision the UPF for an access bearer change: one PFCP Session
+%% Modification carrying the whole recomputed rule set, awaited without blocking
+%% the context. Yields {PCtx, SessionInfo} for the caller to commit.
+apply_bearer_change_proc(BearerMap, URRActions, SendEM, PCtx0, PCC) ->
+    do([async_m ||
+	   Issued <- async_m:lift(
+		       smf_pfcp_context:modify_session_async(
+			 PCC, URRActions, modify_opts(SendEM), BearerMap, PCtx0)),
+	   Result <- await_modify(Issued),
+	   async_m:return(apply_bearer_change_result(Result, URRActions))
+       ]).
+
+%% The conditional form the GTP request handlers share: re-provision the UPF only
+%% when the access bearer actually changed, otherwise just ask for the usage
+%% report. Both arms yield {PCtx, SessionInfo}; the unchanged arm never suspends,
+%% so those requests still answer within the handler call.
+access_bearer_change_proc(false, _BearerMap, URRActions, _SendEM, PCtx0, _PCC) ->
+    gtp_context:trigger_usage_report(self(), URRActions, PCtx0),
+    async_m:return({PCtx0, #{}});
+access_bearer_change_proc(true, BearerMap, URRActions, SendEM, PCtx0, PCC) ->
+    apply_bearer_change_proc(BearerMap, URRActions, SendEM, PCtx0, PCC).
+
+modify_opts(true)  -> #{send_end_marker => true};
+modify_opts(false) -> #{}.
+
+apply_bearer_change_result({PCtx, UsageReport, SessionInfo}, URRActions) ->
+    gtp_context:usage_report(self(), URRActions, UsageReport),
+    {PCtx, SessionInfo}.
+
+%% Local mirror of gtp_context:await_modify/1 — await the async PFCP modify reply,
+%% or short-circuit when the rule diff was empty and nothing went on the wire.
+%% A non-accepted reply makes modify_session_result return {error, #ctx_err{FATAL}},
+%% which travels the procedure's error channel to the caller's ErrFun.
+await_modify({request, ReqId, PCtx1}) ->
+    do([async_m || Reply <- async_m:await(ReqId),
+		   async_m:lift(smf_pfcp_context:modify_session_result(Reply, PCtx1))]);
+await_modify({no_request, PCtx1}) ->
+    async_m:return({PCtx1, undefined, #{}}).
 
 %%====================================================================
 %% Charging API
