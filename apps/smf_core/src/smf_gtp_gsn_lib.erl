@@ -13,7 +13,7 @@
 -export([connect_upf_candidates/4, create_session/13]).
 -export([triggered_charging_event/4, usage_report/3, close_context/3, close_context/4]).
 -export([update_tunnel_endpoint/2,
-	 apply_bearer_change/5]).
+	 apply_bearer_change/5, apply_bearer_change_proc/5]).
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("gtplib/include/gtp_packet.hrl").
@@ -266,17 +266,43 @@ update_tunnel_endpoint(TunnelOld, Tunnel0) ->
 %%====================================================================
 
 apply_bearer_change(BearerMap, URRActions, SendEM, PCtx0, PCC) ->
-    ModifyOpts =
-	if SendEM -> #{send_end_marker => true};
-	   true   -> #{}
-	end,
-    case smf_pfcp_context:modify_session(PCC, URRActions, ModifyOpts, BearerMap, PCtx0) of
-	{ok, {PCtx, UsageReport, SessionInfo}} ->
-	    gtp_context:usage_report(self(), URRActions, UsageReport),
-	    {ok, {PCtx, SessionInfo}};
+    case smf_pfcp_context:modify_session(
+	   PCC, URRActions, modify_opts(SendEM), BearerMap, PCtx0) of
+	{ok, Result} ->
+	    {ok, apply_bearer_change_result(Result, URRActions)};
 	{error, _} = Error ->
 	    Error
     end.
+
+%% Async twin of apply_bearer_change/5, for callers that run their request
+%% handler as an async_m procedure. Both share the rule build and the commit, so
+%% they cannot drift; callers migrate one at a time and the blocking version goes
+%% when the last one has.
+apply_bearer_change_proc(BearerMap, URRActions, SendEM, PCtx0, PCC) ->
+    do([async_m ||
+	   Issued <- async_m:lift(
+		       smf_pfcp_context:modify_session_async(
+			 PCC, URRActions, modify_opts(SendEM), BearerMap, PCtx0)),
+	   Result <- await_modify(Issued),
+	   async_m:return(apply_bearer_change_result(Result, URRActions))
+       ]).
+
+modify_opts(true)  -> #{send_end_marker => true};
+modify_opts(false) -> #{}.
+
+apply_bearer_change_result({PCtx, UsageReport, SessionInfo}, URRActions) ->
+    gtp_context:usage_report(self(), URRActions, UsageReport),
+    {PCtx, SessionInfo}.
+
+%% Local mirror of gtp_context:await_modify/1 — await the async PFCP modify reply,
+%% or short-circuit when the rule diff was empty and nothing went on the wire.
+%% A non-accepted reply makes modify_session_result return {error, #ctx_err{FATAL}},
+%% which travels the procedure's error channel to the caller's ErrFun.
+await_modify({request, ReqId, PCtx1}) ->
+    do([async_m || Reply <- async_m:await(ReqId),
+		   async_m:lift(smf_pfcp_context:modify_session_result(Reply, PCtx1))]);
+await_modify({no_request, PCtx1}) ->
+    async_m:return({PCtx1, undefined, #{}}).
 
 %%====================================================================
 %% Charging API
