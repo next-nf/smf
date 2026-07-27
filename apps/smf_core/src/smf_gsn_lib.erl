@@ -225,18 +225,23 @@ charging_event_to_gy(#{'Rating-Group' := ChargingKey,
 %% Gx Support - Charging-Rule-Report
 %% ===========================================================================
 
+%% A {not_found, _} means the PCRF named a predefined Charging-Rule-Base-Name /
+%% Charging-Rule-Name that is not configured here, which is what
+%% UNKNOWN_RULE_NAME (1) denotes in the TS 29.212 5.3.38 catalogue.
+%% RATING_GROUP_ERROR (2) is for a rule whose Rating-Group is erroneous -- a rule
+%% we DID find -- so it told the PCRF to go looking in the wrong place.
 pcc_events_to_charging_rule_report({not_found, {rulebase, Name}}, AVPs) ->
     Report =
 	#{'Charging-Rule-Base-Name' => [Name],
 	  'PCC-Rule-Status'    => [?'DIAMETER_GX_PCC-RULE-STATUS_INACTIVE'],
-	  'Rule-Failure-Code'  => [?'DIAMETER_GX_RULE-FAILURE-CODE_RATING_GROUP_ERROR']
+	  'Rule-Failure-Code'  => [?'DIAMETER_GX_RULE-FAILURE-CODE_UNKNOWN_RULE_NAME']
 	 },
     repeated('Charging-Rule-Report', Report, AVPs);
 pcc_events_to_charging_rule_report({not_found, {rule, Name}}, AVPs) ->
     Report =
 	#{'Charging-Rule-Name' => [Name],
 	  'PCC-Rule-Status'    => [?'DIAMETER_GX_PCC-RULE-STATUS_INACTIVE'],
-	  'Rule-Failure-Code'  => [?'DIAMETER_GX_RULE-FAILURE-CODE_RATING_GROUP_ERROR']
+	  'Rule-Failure-Code'  => [?'DIAMETER_GX_RULE-FAILURE-CODE_UNKNOWN_RULE_NAME']
 	 },
     repeated('Charging-Rule-Report', Report, AVPs);
 pcc_events_to_charging_rule_report(_Ev, AVPs) ->
