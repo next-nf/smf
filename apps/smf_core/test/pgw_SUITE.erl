@@ -376,6 +376,21 @@
 				  'Charging-Rule-Install' =>
 				      [#{'Charging-Rule-Base-Name' => [<<"m2m0001">>]}]
 				 }},
+		      %% The PCRF authorizes a default-bearer QoS different from the
+		      %% subscribed one (TS 29.212 4.5.5): QCI 7, ARP {2,0,1}. Rules
+		      %% still installed, else establishment fails for lack of them.
+		      'Initial-Gx-QoS-Auth' =>
+			  #{avps =>
+				#{'Result-Code' => 2001,
+				  'Charging-Rule-Install' =>
+				      [#{'Charging-Rule-Base-Name' => [<<"m2m0001">>]}],
+				  'Default-EPS-Bearer-QoS' =>
+				      [#{'QoS-Class-Identifier' => [7],
+					 'Allocation-Retention-Priority' =>
+					     [#{'Priority-Level' => 2,
+						'Pre-emption-Capability' => [0],
+						'Pre-emption-Vulnerability' => [1]}]}]
+				 }},
 		      'Initial-Gx-BCM-UE-NW' =>
 			  #{avps =>
 				#{'Result-Code' => 2001,
@@ -962,6 +977,7 @@ common() ->
      gy_async_stop,
      gx_invalid_charging_rulebase,
      gx_invalid_charging_rule,
+     gx_authorized_default_qos_enforced,
      gx_rar_gy_interaction,
      tdf_app_id,
      gtp_idle_timeout_pfcp_session_loss,
@@ -1212,6 +1228,10 @@ init_per_testcase(redirect_info, Config) ->
 %%     smf_test_lib:load_aaa_answer_config([{{gy, 'CCR-Initial'}, 'Initial-OCS'},
 %%			    {{gy, 'CCR-Update'},  'Update-OCS'}]),
 %%     Config;
+init_per_testcase(gx_authorized_default_qos_enforced, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-QoS-Auth'}]),
+    Config;
 init_per_testcase(gx_invalid_charging_rulebase, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-Fail-1'}]),
@@ -5815,6 +5835,42 @@ apn_lookup(_Config) ->
     %% ?match({ok, <<8, "wildcard">>}, smf_gsn_lib:select_vrf(NodeCaps, [<<"APN3">>], [])),
     %% ?match({ok, <<8, "wildcard">>}, smf_gsn_lib:select_vrf(NodeCaps, [<<"APN3">>, <<"mnc001">>, <<"mcc001">>, <<"gprs">>], [])),
     %% ?match({ok, <<8, "wildcard">>}, smf_gsn_lib:select_vrf(NodeCaps, [<<"APN4">>, <<"mnc001">>, <<"mcc901">>, <<"gprs">>], [])),
+    ok.
+
+%%--------------------------------------------------------------------
+gx_authorized_default_qos_enforced() ->
+    [{doc, "Check that a Default-EPS-Bearer-QoS authorized in the CCA-I "
+      "overrides the subscribed default-bearer QoS: the Create Session "
+      "Response reflects the PCRF's QCI/ARP (TS 29.274 7.2.2), and the "
+      "bearer map is re-keyed onto the authorized {QCI, ARP} so a later PCC "
+      "rule at that QoS binds to the default bearer (TS 29.212 4.5.5)."}].
+gx_authorized_default_qos_enforced(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, Response} = create_session(Config),
+
+    %% The response carries the PCRF's QCI 7 / ARP {2,0,1}, not the subscribed
+    %% values the Create Session Request asked for.
+    ?match(#gtp{ie = #{{v2_bearer_context, 0} :=
+			   #v2_bearer_context{
+			      group = #{{v2_bearer_level_quality_of_service, 0} :=
+					    #v2_bearer_level_quality_of_service{
+					       label = 7, pl = 2,
+					       pci = 0, pvi = 1}}}}}, Response),
+
+    %% ...and the bearer map is keyed on the authorized {QCI, ARP}, which is what
+    %% detect_new_bearers consults to bind a rule to the DEFAULT bearer.
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    DefaultEBI = maps:get({'Access', default_ebi}, BearerMap),
+    ?equal(DefaultEBI, maps:get({qci_arp, 7, {2, 0, 1}}, BearerMap, undefined)),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
     ok.
 
 %%--------------------------------------------------------------------
