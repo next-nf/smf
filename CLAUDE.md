@@ -3,7 +3,7 @@
 Target version is OTP 28.3. Before running any Erlang/OTP or rebar3 commands, find and activate it:
 
 ```sh
-. $(kerl list installations | awk '/^otp-28\.3 /{print $2}')/activate
+. $(kerl list installations | awk '/^28\.3 /{print $2}')/activate
 ```
 
 # Git workflow
