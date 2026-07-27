@@ -9543,6 +9543,10 @@ mme_delete_bearer_command_multi(Config) ->
     %% Session Modification Request. modify_session/5 rebuilds the whole rule set
     %% and sends only the diff, so per-bearer calls would be N requests walking
     %% the UPF through intermediate states (#79).
+    %%
+    %% Bounded wait, not a bare read: the re-provision is async since #65, so it
+    %% lands after the Delete Bearer Request rather than before it.
+    ok = wait_until(fun() -> SMRCount() - SMRBefore >= 1 end, 50, 100),
     ?equal(1, SMRCount() - SMRBefore),
 
     %% Answer the batched Delete Bearer Request; both bearers must be released.
