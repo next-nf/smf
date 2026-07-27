@@ -937,6 +937,7 @@ common() ->
      gtp_idle_timeout_pfcp_session_loss,
      up_inactivity_timer,
      pfcp_async_update_credits,
+     async_error_drains_gate,
      pfcp_gate_serializes,
      pfcp_reentrant_during_await].
 
@@ -1305,7 +1306,8 @@ init_per_testcase(gtp_idle_timeout_pfcp_session_loss, Config) ->
 init_per_testcase(TestCase, Config)
   when TestCase == pfcp_async_update_credits;
        TestCase == pfcp_gate_serializes;
-       TestCase == pfcp_reentrant_during_await ->
+       TestCase == pfcp_reentrant_during_await;
+       TestCase == async_error_drains_gate ->
     setup_per_testcase(Config),
     smf_test_lib:set_online_charging(true),
     smf_test_lib:load_aaa_answer_config([{{gy, 'CCR-Initial'}, 'Initial-OCS'},
@@ -1440,13 +1442,16 @@ end_per_testcase(aa_pool_select_fail, Config) ->
     end_per_testcase(Config);
 end_per_testcase(TestCase, Config)
   when TestCase == pfcp_gate_serializes;
-       TestCase == pfcp_reentrant_during_await ->
-    %% failure-safe teardown: re-enable the UPF and restore sx retransmit even if
-    %% the case body failed before reaching its inline cleanup (else a held UPF /
-    %% leaked meck expectation poisons later cases). catch: harmless on the
-    %% success path where the body already cleaned up.
+       TestCase == pfcp_reentrant_during_await;
+       TestCase == async_error_drains_gate ->
+    %% failure-safe teardown: re-enable the UPF, restore sx retransmit and drop
+    %% the injected modify_session_result expectation even if the case body
+    %% failed before reaching its inline cleanup (else a held UPF / leaked meck
+    %% expectation poisons later cases). catch: harmless on the success path
+    %% where the body already cleaned up.
     catch smf_test_sx_up:enable('pgw-u01'),
     catch restore_sx_retransmit(),
+    catch meck:delete(smf_pfcp_context, modify_session_result, 2),
     end_per_testcase(Config);
 end_per_testcase(_, Config) ->
     end_per_testcase(Config).
@@ -9528,6 +9533,58 @@ pfcp_async_update_credits(Config) ->
     wait4contexts(?TIMEOUT),
 
     meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+async_error_drains_gate() ->
+    [{doc, "A recoverable (WARNING) ctx_err raised after a procedure has gone "
+      "async must still drain async_pending, so the coarse procedure gate "
+      "reopens instead of wedging the session for good (GH #51)"}].
+async_error_drains_gate(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    {ok, PCtx} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
+
+    %% Make the resumed step of update_credits_proc fail recoverably:
+    %% await_modify/1 lifts modify_session_result/2 into async_m's error
+    %% channel, so a WARNING ctx_err lands in update_credits_err/3 ->
+    %% handle_ctx_error/4. No production procedure produces a non-FATAL
+    %% post-await error today -- which is exactly why #51 is a landmine
+    %% rather than a live bug, and why this has to be injected.
+    ok = meck:expect(smf_pfcp_context, modify_session_result,
+                     fun(_Reply, _PCtx) ->
+                             {error, ?CTX_ERR(?WARNING, system_failure)}
+                     end),
+
+    %% Hold the UPF so the park is observable rather than a race.
+    ok = slow_down_sx_retransmit(),
+    smf_test_sx_up:disable('pgw-u01'),
+
+    trigger_gy_credit_update(PCtx, #{'VOLTH' => []}),
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 1 end, 50, 100),
+
+    smf_test_sx_up:enable('pgw-u01'),
+
+    %% The discriminating assertion. Before the fix, handle_ctx_error/4
+    %% returned {keep_state, Data} and gen_statem kept the pre-drain state
+    %% term, so this stayed at 1 forever.
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 0 end, 100, 100),
+
+    ok = meck:delete(smf_pfcp_context, modify_session_result, 2),
+
+    %% ...and the gate really did reopen: a Delete Session Request is a gated
+    %% procedure-initiating event, so this completes only if the drain
+    %% re-delivered postponed events.
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok = restore_sx_retransmit(),
     ok.
 
 %%--------------------------------------------------------------------

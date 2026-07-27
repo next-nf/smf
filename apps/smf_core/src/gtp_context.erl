@@ -640,6 +640,16 @@ handle_event(info, {'$async_reply', ReqId, Result},
 	     #{async_pending := P} = State, Data) when is_map_key(ReqId, P) ->
     async_dispatch(ReqId, Result, State, Data);
 
+%% A reply naming a ReqId that is not pending -- a late duplicate, or one whose
+%% entry some other path already consumed. Ignore it in the driver rather than
+%% letting it fall through to Interface:handle_event/4. Mirrors the untagged
+%% {'$async_down', _} clause below. Every interface happens to have an
+%% `handle_event(info, _Info, ...)` catch-all today, so this is not a behaviour
+%% change -- it makes the ignore a property of the driver instead of an accident
+%% of each interface.
+handle_event(info, {'$async_reply', _ReqId, _Result}, _State, _Data) ->
+    keep_state_and_data;
+
 handle_event(info, {{'$async_down', ReqId}, _MRef, process, _Pid, Reason},
 	     #{async_pending := P} = State, Data) when is_map_key(ReqId, P) ->
     async_dispatch(ReqId, {error, {worker_down, Reason}}, State, Data);
@@ -738,7 +748,16 @@ log_ctx_error(#ctx_err{level = Level, where = {File, Line}, reply = Reply}, St) 
     ?LOG(debug, #{type => ctx_err, level => Level, file => File,
 		  line => Line, reply => Reply, stack => St}).
 
-handle_ctx_error(#ctx_err{level = Level, context = Context} = CtxErr, St, _State, Data) ->
+%% The State argument is load-bearing on the async path. An error callback reached
+%% after a procedure went async is handed the State whose async_pending the driver
+%% already drained, and returning THAT state is what makes the drain a state-term
+%% change -- which is what re-delivers the events the coarse gate postponed.
+%% Returning {keep_state, ...} would keep the pre-drain term and wedge the gate for
+%% the life of the session (GH #51). Synchronous callers pass the current State, and
+%% for them {next_state, State, Data} is exactly equivalent to the old
+%% {keep_state, Data}: gen_statem retries postponed events only on a real state
+%% change. FATAL is unchanged -- the process stops and takes its mailbox with it.
+handle_ctx_error(#ctx_err{level = Level, context = Context} = CtxErr, St, State, Data) ->
     log_ctx_error(CtxErr, St),
     case Level of
 	?FATAL when is_record(Context, context) ->
@@ -746,9 +765,9 @@ handle_ctx_error(#ctx_err{level = Level, context = Context} = CtxErr, St, _State
 	?FATAL ->
 	    {stop, normal, Data};
 	_ when is_record(Context, context) ->
-	    {keep_state, Data#{context => Context}};
+	    {next_state, State, Data#{context => Context}};
 	_ ->
-	    {keep_state, Data}
+	    {next_state, State, Data}
     end.
 
 handle_ctx_error(#ctx_err{reply = Reply, tunnel = Tunnel} = CtxErr, St, Handler,
@@ -831,7 +850,16 @@ generic_error(#request{socket = Socket} = Request,
 %%% Async reply dispatch
 %%%===================================================================
 
-async_dispatch(ReqId, Result, State, Data) ->
+%% Drain the entry here as well as inside async_m:handle_reply/4. handle_reply takes
+%% the entry and threads the drained state into the resumed computation -- but if a
+%% resumed step throws, that state dies with the throw and the catch clause below
+%% would run on the pre-drain State, holding a ReqId whose reply has already been
+%% consumed and can never arrive again (GH #51). pgw_s5s8:br_err/9's re-throw of a
+%% #ctx_err{} lands exactly here. A procedure that re-parks instead returns from
+%% async_m:dispatch/3 and never reaches the catch, so no ReqId registered during this
+%% invocation can be lost this way.
+async_dispatch(ReqId, Result, #{async_pending := P} = State, Data) ->
+    Drained = State#{async_pending := maps:remove(ReqId, P)},
     try async_m:handle_reply(ReqId, Result, State, Data) of
 	no_entry ->
 	    %% race: entry already consumed; nothing to do
@@ -840,7 +868,7 @@ async_dispatch(ReqId, Result, State, Data) ->
 	    FsmResult
     catch
 	throw:#ctx_err{} = CtxErr:St ->
-	    handle_ctx_error(CtxErr, St, State, Data)
+	    handle_ctx_error(CtxErr, St, Drained, Data)
     end.
 
 %%%===================================================================
