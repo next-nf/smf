@@ -614,6 +614,17 @@ handle_event(info, #aaa_request{procedure = {_, 'RAR'}} = Request, _State,
     smf_aaa_session:aaa_reply(Request, {error, unknown_session}, #{}, Session),
     keep_state_and_data;
 
+%% Serialize the fire-and-forget Gx reply path behind an in-flight async_m
+%% procedure. A {'$reply'} only ever answers a fire-and-forget CCR-Update
+%% (report_* with async => true) — a parked procedure awaits a {'$async_reply'}
+%% ReqId, not a {'$reply'} Promise. It shares the pcf/aaa_session the procedure
+%% captured before its await; handling it now would mutate pcf/aaa_session
+%% directly, and the procedure's terminal write-back (from its pre-await
+%% snapshot) would silently revert it. Postpone until async_pending drains.
+handle_event(info, {'$reply', _Promise, _Handler, _Msg, _Opts}, #{async_pending := P}, _Data)
+  when map_size(P) =/= 0 ->
+    {keep_state_and_data, [postpone]};
+
 handle_event(info, {'$reply', Promise, Handler, Msg, _Opts}, _State, Data) ->
     {Data1, Events} = handle_aaa_reply(Handler, Promise, Msg, Data),
     case Events of
