@@ -7,8 +7,6 @@
 
 -module(pgw_s5s8).
 
--feature(maybe_expr, enable).
-
 -behaviour(gtp_api).
 
 -compile([{parse_transform, do},
