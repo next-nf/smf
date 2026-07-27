@@ -937,6 +937,7 @@ common() ->
      gtp_idle_timeout_pfcp_session_loss,
      up_inactivity_timer,
      pfcp_async_update_credits,
+     gx_rar_apply_is_async,
      gx_rar_answers_raa_while_parked,
      teardown_queues_behind_procedure,
      async_error_drains_gate,
@@ -1448,6 +1449,7 @@ end_per_testcase(TestCase, Config)
   when TestCase == pfcp_gate_serializes;
        TestCase == pfcp_reentrant_during_await;
        TestCase == teardown_queues_behind_procedure;
+       TestCase == gx_rar_apply_is_async;
        TestCase == gx_rar_answers_raa_while_parked;
        TestCase == async_error_drains_gate ->
     %% failure-safe teardown: re-enable the UPF, restore sx retransmit and drop
@@ -5288,8 +5290,14 @@ gx_rar_gy_interaction(Config) ->
     {ok, PCR1} = smf_context:test_cmd(gtp, CtxKey, pcc_rules),
     ?match(#{<<"r-0001">> := #{}, <<"r-0002">> := #{}}, PCR1),
 
-    {ok, #pfcp_ctx{timers = T2}} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
-    ?equal(2, maps:size(T2)),
+    %% The RAA acknowledges validation, not resource allocation (TS 29.212
+    %% 4.5.12), and the allocation half is now an async procedure -- so the
+    %% PFCP-side state lands shortly after the RAA rather than before it.
+    ok = wait_until(fun() ->
+			    {ok, #pfcp_ctx{timers = T2}} =
+				smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
+			    maps:size(T2) =:= 2
+		    end, 50, 100),
 
     {ok, SOpts1} = smf_context:test_cmd(gtp, CtxKey, session),
     RemoveCR =
@@ -5302,8 +5310,13 @@ gx_rar_gy_interaction(Config) ->
     ?match(#{<<"r-0001">> := #{}}, PCR2),
     ?equal(false, maps:is_key(<<"r-0002">>, PCR2)),
 
+    %% Same as above: the remove's allocation half lands after its RAA.
+    ok = wait_until(fun() ->
+			    {ok, #pfcp_ctx{timers = T}} =
+				smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
+			    maps:size(T) =:= 1
+		    end, 50, 100),
     {ok, #pfcp_ctx{timers = T3}} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
-    ?equal(1, maps:size(T3)),
     ?equal(maps:keys(T1), maps:keys(T3)),
 
     delete_session(GtpC),
@@ -9542,6 +9555,60 @@ pfcp_async_update_credits(Config) ->
     ok.
 
 %%--------------------------------------------------------------------
+gx_rar_apply_is_async() ->
+    [{doc, "The resource-allocation half of a Gx RAR must park on its PFCP "
+      "await instead of blocking the FSM inside the callback -- the RAA is "
+      "already out, so the apply is an ordinary async procedure"}].
+gx_rar_apply_is_async(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    %% Hold the UPF so the apply's own PFCP modify cannot complete. Nothing
+    %% else is parked here -- the RAR's apply must be what parks.
+    ok = slow_down_sx_retransmit(),
+    smf_test_sx_up:disable('pgw-u01'),
+
+    Self = self(),
+    ResponseFun =
+        fun(Request, Result, Avps, SOpts) ->
+                Self ! {'$response', Request, Result, Avps, SOpts} end,
+    %% Install a rule so the apply has real PFCP work: an RAR that changes no
+    %% rules yields no Sx rules at all, so modify_session_async/5 returns
+    %% {no_request, _} and the procedure would never park.
+    InstCR = [{pcc, install, [#{'Charging-Rule-Name' => [<<"r-0002">>]}]}],
+    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+                          session = SessionOpts, events = InstCR},
+
+    receive
+        {'$response', _, RAAResult, _, _} ->
+            ?equal(ok, RAAResult)
+    after 2000 ->
+            ct:fail(raa_not_answered)
+    end,
+
+    %% The discriminating assertion: the apply registered an await. Before the
+    %% conversion it blocked inside smf_sx_node:call/2 and the registry stayed
+    %% empty for the whole PFCP retransmit window.
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 1 end, 50, 100),
+
+    smf_test_sx_up:enable('pgw-u01'),
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 0 end, 100, 100),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok = restore_sx_retransmit(),
+    ok.
+
+%%--------------------------------------------------------------------
 gx_rar_answers_raa_while_parked() ->
     [{doc, "A Gx RAR arriving while a procedure is parked must be acknowledged "
       "at once -- only the bearer work it implies queues (architecture section "
@@ -9808,18 +9875,3 @@ slow_down_sx_retransmit() ->
 restore_sx_retransmit() ->
     meck:delete(smf_sx_socket, call, 5).
 
-%% wait_until/3 -- poll Fun() up to Retries times, sleeping SleepMs between
-%% attempts, until it returns true.
-wait_until(Fun, Retries, SleepMs) when Retries > 0 ->
-    case Fun() of
-        true ->
-            ok;
-        _ ->
-            timer:sleep(SleepMs),
-            wait_until(Fun, Retries - 1, SleepMs)
-    end;
-wait_until(Fun, 0, _SleepMs) ->
-    case Fun() of
-        true -> ok;
-        _ -> {error, timeout}
-    end.

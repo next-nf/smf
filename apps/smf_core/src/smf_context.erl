@@ -41,8 +41,11 @@
 %%% -----------------------------------------------------------------
 
 %% init_state/0
+%% rar_apply_pending: a Gx RAR's resource-allocation half has been emitted but has
+%% not finished. It lives in the STATE, like async_pending, so clearing it is a
+%% state-term change and re-delivers the RARs the gate postponed behind it.
 init_state() ->
-    #{session => init, async_pending => #{}}.
+    #{session => init, async_pending => #{}, rar_apply_pending => false}.
 
 sx_report(#pfcp{type = session_report_request, seid = SEID} = Report) ->
     apply2context(#seid_key{seid = SEID}, sx_report, [Report]).
