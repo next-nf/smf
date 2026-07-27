@@ -472,6 +472,7 @@ handle_request(ReqKey,
 		 aaa_session := Session} = Data) ->
     FlowInfo = smf_tft:tft_to_flow_info(TADBin),
     {TADOp, TADContents} = smf_tft:decode_tad(TADBin),
+    ReqQoS = extract_flow_qos(IEs),
     EBI = case IEs of
 	      #{{v2_eps_bearer_id, 1} := #v2_eps_bearer_id{eps_bearer_id = E}} -> E;
 	      _ -> 0
@@ -479,7 +480,7 @@ handle_request(ReqKey,
     BCM = maps:get('Bearer-Control-Mode', Session,
 		   ?'DIAMETER_GX_BEARER-CONTROL-MODE_UE_ONLY'),
     if EBI =:= 0, BCM =:= ?'DIAMETER_GX_BEARER-CONTROL-MODE_UE_NW' ->
-	    QoS = extract_flow_qos(IEs),
+	    QoS = ReqQoS,
 	    QCI = maps:get('QoS-Class-Identifier', QoS, 9),
 	    ARP0 = maps:get('Allocation-Retention-Priority', QoS, #{}),
 	    PL = maps:get('Priority-Level', ARP0, 1),
@@ -550,6 +551,22 @@ handle_request(ReqKey,
 					    AccessTunnel, LinkedEBI, PTI, Context)
 			     end,
 		    async_m:run_async(Proc, OkFun, ErrFun, State, Data);
+       EBI =/= 0, BCM =:= ?'DIAMETER_GX_BEARER-CONTROL-MODE_UE_NW',
+       TADOp =:= no_tft_operation,
+       is_map_key(EBI, Dedicated),
+       map_size(ReqQoS) =/= 0 ->
+	    %% TS 23.401 5.4.5: the UE requests a QoS/GBR change on a dedicated
+	    %% bearer with no TFT change (no_tft_operation). Report the requested
+	    %% QoS to the PCRF (Gx CCR-U with QoS-Information); the authorized rule
+	    %% QoS re-signals the bearer -> Update Bearer echoing the PTI
+	    %% (#22 Increment 6). Async.
+	    Proc = ue_qos_change_proc(EBI, ReqQoS, PTI, AccessTunnel),
+	    OkFun = fun(V, S, D) -> br_ok(V, S, D, ReqKey, Context) end,
+	    ErrFun = fun(E, S, D) ->
+			     br_err(E, S, D, ReqKey, Request,
+				    AccessTunnel, LinkedEBI, PTI, Context)
+		     end,
+	    async_m:run_async(Proc, OkFun, ErrFun, State, Data);
        true ->
 	    %% Unhandled TAD op, or the target EBI is not a known dedicated bearer.
 	    %% create / delete_existing_tft / delete / add / replace_packet_filters
@@ -1201,6 +1218,35 @@ ue_add_filters_proc(EBI, FlowInfos, PTI, AccessTunnel) ->
 	   ok <- async_m:lift(ccr_result(Result)),
 	   RuleBase = smf_charging:rulebase(),
 	   %% An add only installs (nothing to remove).
+	   {PCC1, PCCErrors} =
+	       smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC0),
+	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),
+	   async_m:modify_data(
+	     fun(D) -> D#{pcf := PCF2, aaa_session := Session2, pcc := PCC1} end),
+	   ue_update_outcome(EBI, PTI, AccessTunnel, PCC1, BearerMap, PCtx0, Dedicated)
+       ]).
+
+%% ue_qos_change_proc/4 — async_m procedure for a UE-requested QoS/GBR change
+%% (Bearer Resource Command no_tft_operation, TS 23.401 §5.4.5, #22 Inc6).
+%% Reports the requested QoS to the PCRF (Gx CCR-U with QoS-Information, no
+%% packet-filter change), awaits the authorized rule (re)install, applies the
+%% PCC delta, and emits a PTI-echoing Update Bearer carrying the new Bearer QoS.
+%% A QoS change re-installs the affected rule -> install-only fold -> always the
+%% Update outcome (never empties a bearer).
+ue_qos_change_proc(EBI, ReqQoS, PTI, AccessTunnel) ->
+    do([async_m ||
+	   #{pcf := PCF0, aaa_session := Session0, pcc := PCC0,
+	     bearers := BearerMap, dedicated := Dedicated, pfcp := PCtx0} <- async_m:get_data(),
+	   SOpts = #{'Event-Trigger' =>
+			 ?'DIAMETER_GX_EVENT-TRIGGER_RESOURCE_MODIFICATION_REQUEST',
+		     'QoS-Information' => ReqQoS},
+	   Now = erlang:monotonic_time(),
+	   {async, ReqId} =
+	       smf_aaa_pcf:invoke(PCF0, Session0, SOpts, {gx, 'CCR-Update'},
+				  #{pipeline_async => true, now => Now}),
+	   {Result, PCF1, Session1, Events} <- await_pipeline(ReqId),
+	   ok <- async_m:lift(ccr_result(Result)),
+	   RuleBase = smf_charging:rulebase(),
 	   {PCC1, PCCErrors} =
 	       smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC0),
 	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),

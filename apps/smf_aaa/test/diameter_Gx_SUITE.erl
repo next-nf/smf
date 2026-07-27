@@ -97,7 +97,8 @@ all() ->
      terminate,
      packet_filter_delete_encoding,
      packet_filter_add_wire_roundtrip,
-     packet_filter_modify_wire_roundtrip
+     packet_filter_modify_wire_roundtrip,
+     qos_change_wire_roundtrip
     ].
 
 init_per_suite(Config0) ->
@@ -591,6 +592,53 @@ packet_filter_modify_wire_roundtrip(_Config) ->
       'Packet-Filter-Content' := [<<"permit out ip from any to assigned">>],
       'Precedence' := [100],
       'Flow-Direction' := [2]} = DecGroup,
+    ok.
+
+qos_change_wire_roundtrip() ->
+    [{doc, "qos_from_session/1's output (as put on the wire by a "
+	   "UE-requested QoS change CCR-U) survives a REAL diameter "
+	   "encode/decode through the Gx dictionary"}].
+qos_change_wire_roundtrip(_Config) ->
+    Mod = diameter_3gpp_ts29_212,
+    Session =
+	#{'Event-Trigger' =>
+	      ?'DIAMETER_GX_EVENT-TRIGGER_RESOURCE_MODIFICATION_REQUEST',
+	  'QoS-Information' =>
+	      #{'QoS-Class-Identifier' => 1,
+		'Guaranteed-Bitrate-UL' => 2000000,
+		'Guaranteed-Bitrate-DL' => 2000000}},
+    SessionAvps = smf_aaa_gx:from_session(Session, #{}),
+
+    Avps = maps:merge(
+	     #{'Session-Id' => <<"test;1;2">>,
+	       'Origin-Host' => <<"host.example.com">>,
+	       'Origin-Realm' => <<"example.com">>,
+	       'Destination-Realm' => <<"dest.example.com">>,
+	       'Auth-Application-Id' => Mod:id(),
+	       'CC-Request-Type' => 1,
+	       'CC-Request-Number' => 0},
+	     SessionAvps),
+
+    %% encode() and decode() go all the way through the generated diameter
+    %% dictionary's codec — an actual binary wire encoding, not the mock
+    %% path (from_session/2 alone, as packet_filter_delete_encoding tests).
+    Pkt = diameter_codec:encode(Mod, ['CCR' | Avps]),
+    true = is_binary(Pkt#diameter_packet.bin),
+
+    DecPkt = diameter_codec:decode(Mod, #{decode_format => map,
+					  string_decode => false},
+				   Pkt#diameter_packet.bin),
+    ?equal([], DecPkt#diameter_packet.errors),
+
+    ['CCR' | DecAvps] = DecPkt#diameter_packet.msg,
+    #{'Event-Trigger' :=
+	  [?'DIAMETER_GX_EVENT-TRIGGER_RESOURCE_MODIFICATION_REQUEST'],
+      'QoS-Information' := [DecQoS]} = DecAvps,
+
+    %% GBR and QCI survive the wire, list-wrapped per the map decode format.
+    #{'Guaranteed-Bitrate-UL' := [2000000],
+      'Guaranteed-Bitrate-DL' := [2000000],
+      'QoS-Class-Identifier' := [1]} = DecQoS,
     ok.
 
 %%%===================================================================
