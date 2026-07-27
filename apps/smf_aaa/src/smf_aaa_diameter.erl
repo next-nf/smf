@@ -13,7 +13,7 @@
 -export([validate_function/1,
 	 initialize_function/2]).
 -ignore_xref([validate_function/1, initialize_function/2]).
--export(['3gpp_from_session'/2, qos_from_session/1]).
+-export(['3gpp_from_session'/2, qos_from_session/1, qos_to_session/1]).
 -export([encode_ipv6prefix/1, decode_ipv6prefix/1]).
 -export([validate_termination_cause_mapping/1]).
 
@@ -383,6 +383,56 @@ qos_from_session(_K, _V, Info) ->
 
 qos_from_session(Info) ->
     maps:fold(fun qos_from_session/3, #{}, Info).
+
+%% qos_to_session/1 — inverse of qos_from_session/1: a decoded QoS-Information /
+%% Default-EPS-Bearer-QoS grouped AVP -> the session's bare-scalar QoS map shape.
+%% Needed for the PCRF's *authorized* QoS, which arrives command-level in a CCA
+%% (TS 29.212 §4.5.5) rather than inside a Charging-Rule-Install.
+%%
+%% The Extended-* companions are honoured on the way in: per §4.4.10 a bitrate
+%% above 2^32-1 is sent as the saturated base AVP plus the real value in kbps in
+%% the Extended AVP, so taking the base alone would silently clamp e.g. an
+%% authorized APN-AMBR above 4.29 Gbps.
+qos_to_session(Info) when is_map(Info) ->
+    maps:fold(fun qos_to_session/3, #{}, Info).
+
+qos_to_session('Allocation-Retention-Priority', [ARP], Info) when is_map(ARP) ->
+    Info#{'Allocation-Retention-Priority' => maps:fold(fun arp_to_session/3, #{}, ARP)};
+qos_to_session(Key, Value, Info)
+  when Key == 'QoS-Class-Identifier';
+       Key == 'Max-Requested-Bandwidth-UL';
+       Key == 'Max-Requested-Bandwidth-DL';
+       Key == 'Guaranteed-Bitrate-UL';
+       Key == 'Guaranteed-Bitrate-DL';
+       Key == 'APN-Aggregate-Max-Bitrate-UL';
+       Key == 'APN-Aggregate-Max-Bitrate-DL' ->
+    maps:put(Key, unwrap(Value), Info);
+%% An Extended-* value is in kbps and supersedes the saturated base AVP.
+qos_to_session(Key, Value, Info) ->
+    case extended_base_key(Key) of
+	undefined -> Info;
+	BaseKey   -> maps:put(BaseKey, unwrap(Value) * 1000, Info)
+    end.
+
+extended_base_key('Extended-Max-Requested-BW-UL') -> 'Max-Requested-Bandwidth-UL';
+extended_base_key('Extended-Max-Requested-BW-DL') -> 'Max-Requested-Bandwidth-DL';
+extended_base_key('Extended-GBR-UL')              -> 'Guaranteed-Bitrate-UL';
+extended_base_key('Extended-GBR-DL')              -> 'Guaranteed-Bitrate-DL';
+extended_base_key('Extended-APN-AMBR-UL')         -> 'APN-Aggregate-Max-Bitrate-UL';
+extended_base_key('Extended-APN-AMBR-DL')         -> 'APN-Aggregate-Max-Bitrate-DL';
+extended_base_key(_)                              -> undefined.
+
+arp_to_session(Key, Value, ARP)
+  when Key == 'Priority-Level';
+       Key == 'Pre-emption-Capability';
+       Key == 'Pre-emption-Vulnerability' ->
+    maps:put(Key, unwrap(Value), ARP);
+arp_to_session(_K, _V, ARP) ->
+    ARP.
+
+%% Grouped-AVP members arrive list-wrapped; Priority-Level is encoded bare.
+unwrap([V | _]) -> V;
+unwrap(V)       -> V.
 
 encode_ipv6prefix({{A,B,C,D,E,F,G,H}, PLen}) ->
     L = (PLen + 7) div 8,

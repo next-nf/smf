@@ -98,7 +98,8 @@ all() ->
      packet_filter_delete_encoding,
      packet_filter_add_wire_roundtrip,
      packet_filter_modify_wire_roundtrip,
-     qos_change_wire_roundtrip
+     qos_change_wire_roundtrip,
+     authorized_qos_wire_roundtrip
     ].
 
 init_per_suite(Config0) ->
@@ -639,6 +640,68 @@ qos_change_wire_roundtrip(_Config) ->
     #{'Guaranteed-Bitrate-UL' := [2000000],
       'Guaranteed-Bitrate-DL' := [2000000],
       'QoS-Class-Identifier' := [1]} = DecQoS,
+    ok.
+
+%%--------------------------------------------------------------------
+authorized_qos_wire_roundtrip() ->
+    [{doc, "A CCA carrying the PCRF's authorized Default-EPS-Bearer-QoS and "
+	   "APN-AMBR survives a REAL diameter encode/decode through the Gx "
+	   "dictionary and is folded into the session by to_session/3 as "
+	   "'Authorized-QoS-Information' (TS 29.212 4.5.5 — command level, "
+	   "outside Charging-Rule-Install)"}].
+authorized_qos_wire_roundtrip(_Config) ->
+    Mod = diameter_3gpp_ts29_212,
+
+    %% Built with qos_from_session/1 so the group shape is exactly what the
+    %% encoder produces for the outbound direction.
+    DefQoS = smf_aaa_diameter:qos_from_session(
+	       #{'QoS-Class-Identifier' => 5,
+		 'Allocation-Retention-Priority' =>
+		     #{'Priority-Level' => 3,
+		       'Pre-emption-Capability' => 1,
+		       'Pre-emption-Vulnerability' => 0}}),
+    ApnAmbr = smf_aaa_diameter:qos_from_session(
+		#{'APN-Aggregate-Max-Bitrate-UL' => 8000000,
+		  'APN-Aggregate-Max-Bitrate-DL' => 16000000}),
+
+    Avps = #{'Session-Id' => <<"test;1;2">>,
+	     'Result-Code' => 2001,
+	     'Origin-Host' => <<"host.example.com">>,
+	     'Origin-Realm' => <<"example.com">>,
+	     'Auth-Application-Id' => Mod:id(),
+	     'CC-Request-Type' => 2,
+	     'CC-Request-Number' => 1,
+	     'Default-EPS-Bearer-QoS' => [DefQoS],
+	     'QoS-Information' => [ApnAmbr]},
+
+    Pkt = diameter_codec:encode(Mod, ['CCA' | Avps]),
+    true = is_binary(Pkt#diameter_packet.bin),
+
+    DecPkt = diameter_codec:decode(Mod, #{decode_format => map,
+					  string_decode => false},
+				   Pkt#diameter_packet.bin),
+    ?equal([], DecPkt#diameter_packet.errors),
+    ['CCA' | DecAvps] = DecPkt#diameter_packet.msg,
+
+    %% Both AVPs merge into one authorized map, and nothing is emitted as a
+    %% {pcc, _, _} event — this is session-level policy, not a rule change.
+    {Session, Events} =
+	smf_aaa_gx:to_session({gx, 'CCR-Update'}, {#{}, []}, DecAvps),
+    ?equal([], Events),
+    #{'Authorized-QoS-Information' :=
+	  #{'QoS-Class-Identifier' := 5,
+	    'Allocation-Retention-Priority' :=
+		#{'Priority-Level' := 3,
+		  'Pre-emption-Capability' := 1,
+		  'Pre-emption-Vulnerability' := 0},
+	    'APN-Aggregate-Max-Bitrate-UL' := 8000000,
+	    'APN-Aggregate-Max-Bitrate-DL' := 16000000}} = Session,
+
+    %% It must NOT come back out on the next CCR: 'QoS-Information' is what we
+    %% told the PCRF, and re-encoding its own decision as subscribed data would
+    %% be wrong. from_session/2 has no clause for the authorized key.
+    ?equal(#{}, smf_aaa_gx:from_session(
+		  maps:with(['Authorized-QoS-Information'], Session), #{})),
     ok.
 
 %%%===================================================================
