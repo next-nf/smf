@@ -7,6 +7,8 @@
 
 -module(pgw_s5s8).
 
+-feature(maybe_expr, enable).
+
 -behaviour(gtp_api).
 
 -compile([{parse_transform, do},
@@ -1314,16 +1316,17 @@ ccr_result(Other) -> {error, {pcrf_rejected, Other}}.
 %% Install pass only. 4.5.12 states removal never fails: a {not_found, {rule, _}}
 %% from the remove pass means the requested end state (rule absent) already holds,
 %% so there is nothing to report.
+%% Nothing to report and a CCR that did not go through both leave the Gx context
+%% untouched, so both land in the same else clause.
 report_pcc_failures(PCCErrors, PCF0, Session0, ReqOpts) ->
-    GxReport = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors),
-    if map_size(GxReport) /= 0 ->
-	    case smf_aaa_pcf:ccr_update(PCF0, Session0, GxReport,
-					ReqOpts#{async => true}) of
-		{ok, PCF, Session, _} -> {PCF, Session};
-		_                     -> {PCF0, Session0}
-	    end;
-       true ->
-	    {PCF0, Session0}
+    maybe
+	GxReport = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors),
+	true ?= map_size(GxReport) /= 0,
+	{ok, PCF, Session, _} ?=
+	    smf_aaa_pcf:ccr_update(PCF0, Session0, GxReport, ReqOpts#{async => true}),
+	{PCF, Session}
+    else
+	_ -> {PCF0, Session0}
     end.
 
 %% await a whole-pipeline worker (invoke(pipeline_async)). On success the worker
