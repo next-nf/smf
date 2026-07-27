@@ -651,12 +651,33 @@ to_session(_, 'Bearer-Control-Mode', [BCM], {Session, Events}) ->
     {Session#{'Bearer-Control-Mode' => BCM}, Events};
 to_session(_, 'Usage-Monitoring-Information', Value, SessEv) ->
     lists:foldl(fun umi_to_session/2, SessEv, Value);
+%% The PCRF's *authorized* default-bearer QoS and APN-AMBR. Unlike PCC rules these
+%% are session-level and provisioned at command level, outside Charging-Rule-Install
+%% (TS 29.212 §4.5.5), so they arrive here rather than as a {pcc, _, _} event. They
+%% may override what the PCEF reported — e.g. the subscribed QoS carried by a Modify
+%% Bearer Command (TS 23.401 §5.4.2.2 step 4).
+%%
+%% Both land under 'Authorized-QoS-Information' rather than overwriting the session's
+%% 'QoS-Information': that key holds what we last *told* the PCRF, and from_session/3
+%% re-encodes it onto the next CCR. Merging the authorization into it would make the
+%% next CCR report the PCRF's own decision back as if it were subscribed data.
+to_session(_, 'Default-EPS-Bearer-QoS', [QoS], {Session, Events}) when is_map(QoS) ->
+    {authorized_qos(QoS, Session), Events};
+to_session(_, 'QoS-Information', [QoS], {Session, Events}) when is_map(QoS) ->
+    {authorized_qos(QoS, Session), Events};
 to_session(_, 'Charging-Rule-Install', V, {Session, Events}) ->
     {Session, [{pcc, install, V} | Events]};
 to_session(_, 'Charging-Rule-Remove', V, {Session, Events}) ->
     {Session, [{pcc, remove, V} | Events]};
 to_session(_, _, _, SessEv) ->
     SessEv.
+
+%% Default-EPS-Bearer-QoS (QCI/ARP) and QoS-Information (APN-AMBR) are separate
+%% AVPs that may both appear in one CCA, so merge rather than replace.
+authorized_qos(QoS, Session) ->
+    Auth = maps:get('Authorized-QoS-Information', Session, #{}),
+    Session#{'Authorized-QoS-Information' =>
+		 maps:merge(Auth, smf_aaa_diameter:qos_to_session(QoS))}.
 
 termination_cause(Session, Avps) ->
     Cause = maps:get('Termination-Cause', Session, ?'DIAMETER_BASE_TERMINATION-CAUSE_LOGOUT'),
