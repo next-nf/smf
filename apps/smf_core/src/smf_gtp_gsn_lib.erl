@@ -13,7 +13,8 @@
 -export([connect_upf_candidates/4, create_session/13]).
 -export([triggered_charging_event/4, usage_report/3, close_context/3, close_context/4]).
 -export([update_tunnel_endpoint/2,
-	 apply_bearer_change/5, apply_bearer_change_proc/5]).
+	 apply_bearer_change/5, apply_bearer_change_proc/5,
+	 access_bearer_change_proc/6]).
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("gtplib/include/gtp_packet.hrl").
@@ -286,6 +287,16 @@ apply_bearer_change_proc(BearerMap, URRActions, SendEM, PCtx0, PCC) ->
 	   Result <- await_modify(Issued),
 	   async_m:return(apply_bearer_change_result(Result, URRActions))
        ]).
+
+%% The conditional form the GTP request handlers share: re-provision the UPF only
+%% when the access bearer actually changed, otherwise just ask for the usage
+%% report. Both arms yield {PCtx, SessionInfo}; the unchanged arm never suspends,
+%% so those requests still answer within the handler call.
+access_bearer_change_proc(false, _BearerMap, URRActions, _SendEM, PCtx0, _PCC) ->
+    gtp_context:trigger_usage_report(self(), URRActions, PCtx0),
+    async_m:return({PCtx0, #{}});
+access_bearer_change_proc(true, BearerMap, URRActions, SendEM, PCtx0, PCC) ->
+    apply_bearer_change_proc(BearerMap, URRActions, SendEM, PCtx0, PCC).
 
 modify_opts(true)  -> #{send_end_marker => true};
 modify_opts(false) -> #{}.
