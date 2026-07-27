@@ -118,6 +118,14 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
 	    {error, Err8} -> throw(Err8#ctx_err{context = Context, tunnel = AccessTunnel})
 	end,
 
+    %% TS 29.212 4.5.5 / B.3.3.1: the CCA-I may carry an authorized
+    %% Default-EPS-Bearer-QoS (QCI + ARP) and — for EPS, unconditionally — an
+    %% authorized APN-AMBR, either of which may override the subscribed values.
+    %% Enforce them from here on, before the bearer map is handed to PFCP and
+    %% before the Create Session Response is built (#73).
+    {SessionOpts4, BearerMap} =
+	apply_authorized_qos(GxSession, SessionOpts3, EBI, BearerMap1),
+
     RuleBase = smf_charging:rulebase(),
     {PCC1, PCCErrors1} = smf_pcc_context:gx_events_to_pcc_ctx(GxEvents, '_', RuleBase, PCC0),
     case smf_pcc_context:pcc_ctx_has_rules(PCC1) of
@@ -147,13 +155,13 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
     PCC3 = smf_pcc_context:session_events_to_pcc_ctx(AuthSEvs, PCC2),
     PCC4 = smf_pcc_context:session_events_to_pcc_ctx(RfSEvs, PCC3),
 
-    {PCtx, BearerMap, SessionInfo} =
-	case smf_pfcp_context:create_session(gtp_context, PCC4, PCtx0, BearerMap1, Context) of
+    {PCtx, BearerMap2, SessionInfo} =
+	case smf_pfcp_context:create_session(gtp_context, PCC4, PCtx0, BearerMap, Context) of
 	       {ok, Result10} -> Result10;
 	       {error, Err10} -> throw(Err10#ctx_err{context = Context, tunnel = AccessTunnel})
 	   end,
 
-    SessionOpts = maps:merge(SessionOpts3, SessionInfo),
+    SessionOpts = maps:merge(SessionOpts4, SessionInfo),
     Session4 = maps:merge(Session3, SessionOpts),
     {_, Auth2, Session5, _} = smf_aaa_auth:start(Auth1, Session4, SessionOpts, SOpts#{async => true}),
 
@@ -167,15 +175,58 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
 	       {PCF1, Session5}
 	end,
 
-    case gtp_context:remote_context_register_new(AccessTunnel, BearerMap, Context) of
+    case gtp_context:remote_context_register_new(AccessTunnel, BearerMap2, Context) of
 	ok ->
-	    {ok, Cause, SessionOpts, Context, BearerMap, PCC4, PCtx,
+	    {ok, Cause, SessionOpts, Context, BearerMap2, PCC4, PCtx,
 	     Session6, PCF2, Charging2, Auth2};
 	{error, #ctx_err{level = Level, where = {File, Line}}} ->
 	    ?LOG(debug, #{type => ctx_err, level => Level, file => File,
 			  line => Line, reply => system_failure}),
-	    {error, system_failure, SessionOpts, Context, BearerMap, PCC4, PCtx,
+	    {error, system_failure, SessionOpts, Context, BearerMap2, PCC4, PCtx,
 	     Session6, PCF2, Charging2, Auth2}
+    end.
+
+%% apply_authorized_qos/4 — enforce the CCA-I's authorized default-bearer QoS.
+%%
+%% smf_aaa_gx surfaces the CCA's command-level Default-EPS-Bearer-QoS and
+%% APN-AMBR as 'Authorized-QoS-Information' (they are session-level policy, not
+%% PCC rules — TS 29.212 4.5.5). Overlaying them field by field onto the
+%% subscribed 'QoS-Information' leaves anything the PCRF did not authorize alone.
+%%
+%% The overlay has to land here rather than at the bearer map's construction:
+%% that runs before the CCR-I is even issued, so the subscribed QoS is all it
+%% could have seen. Re-keying matters because {qci_arp, QCI, ARP} is how
+%% detect_new_bearers decides a later PCC rule binds to the DEFAULT bearer —
+%% left on the subscribed values, a rule at the authorized QoS would miss it and
+%% wrongly spawn a dedicated bearer.
+apply_authorized_qos(GxSession, SessionOpts, EBI, BearerMap) ->
+    case maps:get('Authorized-QoS-Information', GxSession, #{}) of
+	Auth when map_size(Auth) =:= 0 ->
+	    {SessionOpts, BearerMap};
+	Auth ->
+	    QoS0 = maps:get('QoS-Information', SessionOpts, #{}),
+	    QoS = maps:merge(QoS0, Auth),
+	    ?LOG(debug, "PCRF authorized default-bearer QoS: ~p -> ~p", [QoS0, QoS]),
+	    {SessionOpts#{'QoS-Information' => QoS},
+	     rekey_default_qci_arp(EBI, QoS0, QoS, BearerMap)}
+    end.
+
+rekey_default_qci_arp(EBI, QoS0, QoS, BearerMap) ->
+    Old = smf_gsn_lib:get_qci_arp(QoS0),
+    New = smf_gsn_lib:get_qci_arp(QoS),
+    case New =:= Old of
+	true ->
+	    BearerMap;
+	false ->
+	    Dropped =
+		case Old of
+		    {QCI0, ARP0} -> maps:remove({qci_arp, QCI0, ARP0}, BearerMap);
+		    undefined    -> BearerMap
+		end,
+	    case New of
+		{QCI, ARP} -> Dropped#{{qci_arp, QCI, ARP} => EBI};
+		undefined  -> Dropped
+	    end
     end.
 
 
