@@ -8,6 +8,7 @@
 -module(smf_aaa_session).
 
 -compile({parse_transform, cut}).
+-compile({no_auto_import, [spawn_request/1]}).
 
 %% Functional API (operates on #aaa_state{})
 -export([new/1,
@@ -29,6 +30,9 @@
 %% Shared helpers for per-protocol modules
 -export([new_session/1,
 	 invoke_handler/6,
+	 run_pipeline/6,
+	 run_pipeline_async/7,
+	 spawn_request/1,
 	 handle_handler_reply/5,
 	 session_merge/2,
 	 update_accounting_state/3,
@@ -214,6 +218,63 @@ handle_handler_reply(Promise, Handler, Msg, Session, HandlerState) ->
 	Handler:handle_response(Promise, Msg, Session, [], Opts, HandlerState),
     aaa_state_stats(Handler, HandlerState, StateOut),
     {SessOut, EvsOut, StateOut}.
+
+%% Run a service pipeline against a session, invoking each handler in turn.
+%% Used by per-protocol modules' invoke/5. Returns
+%% {Result, Session1, Events1, Handlers1}.
+run_pipeline(_Procedure, [], Session, Events, _Opts, Handlers) ->
+    {ok, Session, Events, Handlers};
+run_pipeline(Procedure, [#{service := Service} = SvcOpts | Tail], Session0, Events0, Opts, Handlers0) ->
+    Svc = smf_aaa:get_service(Service),
+    StepOpts = maps:merge(Opts, maps:merge(Svc, SvcOpts)),
+    Handler = maps:get(handler, Svc),
+    HState0 = maps:get(Handler, Handlers0, undefined),
+    {Result, Session1, Events1, HState1} =
+	smf_aaa_session:invoke_handler(Handler, Service, Procedure, Session0, Events0,
+				       StepOpts#{handler_state => HState0}),
+    Handlers1 = maps:put(Handler, HState1, Handlers0),
+    case Result of
+	ok -> run_pipeline(Procedure, Tail, Session1, Events1, Opts, Handlers1);
+	_ -> {Result, Session1, Events1, Handlers1}
+    end.
+
+%% spawn_request/1 — monitored-worker spawn primitive for the whole-pipeline
+%% async path. Lives here (smf_aaa) because smf_core depends on smf_aaa, not the
+%% reverse, so async_m:async_apply/1 can't be reused. Mirrors async_apply/1's
+%% message contract so gtp_context's {'$async_reply', ReqId, Result} info clause
+%% (gtp_context.erl:648) and the tagged {{'$async_down', ReqId}, MRef, process,
+%% Pid, Reason} DOWN (:652) route the reply — BUT posts the BARE Result, no
+%% {ok, _} wrap, so the awaiting procedure's `await` value is the pipeline result
+%% verbatim.
+-spec spawn_request(fun(() -> term())) -> reference().
+spawn_request(Fun) ->
+    ReqId = make_ref(),
+    Owner = self(),
+    _ = spawn_opt(
+	  fun() -> Owner ! {'$async_reply', ReqId, Fun()} end,
+	  [{monitor, [{tag, {'$async_down', ReqId}}]}]),
+    ReqId.
+
+%% run_pipeline_async/7 — async-aware entry over run_pipeline/6. WrapCtx is a
+%% 1-arg fun the ctx driver supplies to wrap the {Result, Session1, Events1,
+%% Handlers1} pipeline output into its ctx-shaped result. On #{pipeline_async :=
+%% true} the WHOLE pipeline runs inside a monitored worker (multi-step-safe, the
+%% handlers stay ordinary synchronous code); returns {async, ReqId}. Otherwise
+%% runs the pipeline synchronously and returns {sync, WrapCtx(...)}.
+%%
+%% NB: the trigger is `pipeline_async`, deliberately distinct from `async`. These
+%% are two separate async modes that coexist by design: `pipeline_async => true`
+%% runs the whole pipeline in a worker and returns a ReqId to await (procedures);
+%% `async => true` is the fire-and-forget signal for the report_*/charging callers
+%% (returns the sync 4-tuple immediately, CCA reconciled later). Do not conflate.
+run_pipeline_async(WrapCtx, Procedure, Pipeline, Session, Events, #{pipeline_async := true} = Opts, Handlers) ->
+    ReqId = spawn_request(
+	      fun() ->
+		      WrapCtx(run_pipeline(Procedure, Pipeline, Session, Events, Opts, Handlers))
+	      end),
+    {async, ReqId};
+run_pipeline_async(WrapCtx, Procedure, Pipeline, Session, Events, Opts, Handlers) ->
+    {sync, WrapCtx(run_pipeline(Procedure, Pipeline, Session, Events, Opts, Handlers))}.
 
 %%===================================================================
 %% Session Object API

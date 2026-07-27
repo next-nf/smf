@@ -11,6 +11,8 @@
 -compile({parse_transform, cut}).
 
 -export([create_session/5,
+	 create_session_async/5,
+	 create_session_result/4,
 	 modify_session/5,
 	 modify_session_async/5,
 	 modify_session_result/2,
@@ -169,8 +171,10 @@ session_info(_, _, Info) ->
 session_info(RespIEs) ->
     maps:fold(fun session_info/3, #{}, RespIEs).
 
-%% session_establishment_request/5
-session_establishment_request(Handler, PCC, PCtx0, BearerMap0, Ctx) ->
+%% establishment_request_ies/5 — build the session establishment request IEs (rules,
+%% F-SEID, user id). Shared by the blocking session_establishment_request/5 and the
+%% async create_session_async/5; returns the updated PCtx and the IEs to send.
+establishment_request_ies(Handler, PCC, PCtx0, BearerMap0, Ctx) ->
     register_ctx_ids(Handler, BearerMap0, PCtx0),
     {ok, CntlNode, _, _} = smf_sx_socket:id(),
 
@@ -184,19 +188,39 @@ session_establishment_request(Handler, PCC, PCtx0, BearerMap0, Ctx) ->
     IEs1 = update_m_rec(smf_pfcp:f_seid(PCtx2, CntlNode), IEs0),
     IEs = pfcp_user_id(Ctx, IEs1),
     ?LOG(debug, "IEs: ~p~n", [IEs]),
+    {PCtx2, IEs}.
 
+%% session_establishment_request/5
+session_establishment_request(Handler, PCC, PCtx0, BearerMap0, Ctx) ->
+    {PCtx2, IEs} = establishment_request_ies(Handler, PCC, PCtx0, BearerMap0, Ctx),
     Req = #pfcp{version = v1, type = session_establishment_request, seq_no = 0, ie = IEs},
-    case smf_sx_node:call(PCtx2, Req) of
-	#pfcp{version = v1, type = session_establishment_response,
-	      ie = #{pfcp_cause := 'Request accepted',
-		     f_seid := #f_seid{}} = RespIEs} ->
-	    SessionInfo = session_info(RespIEs),
-	    {BearerMap, PCtx} = update_bearer(RespIEs, BearerMap0, PCtx2),
-	    register_ctx_ids(Handler, BearerMap, PCtx),
-	    {ok, {update_dp_seid(RespIEs, PCtx), BearerMap, SessionInfo}};
-	_ ->
-	    {error, ?CTX_ERR(?FATAL, system_failure)}
-    end.
+    create_session_result(smf_sx_node:call(PCtx2, Req), Handler, BearerMap0, PCtx2).
+
+%% create_session_async/5 — same rule build as create_session/5, but issues the request
+%% asynchronously and returns a request id instead of blocking.
+create_session_async(Handler, PCC, PCtx0, BearerMap0, Ctx)
+  when is_record(PCC, pcc_ctx) ->
+    {PCtx2, IEs} = establishment_request_ies(Handler, PCC, PCtx0, BearerMap0, Ctx),
+    session_establishment_request_async(PCtx2, IEs).
+
+session_establishment_request_async(PCtx, IEs) ->
+    Req = #pfcp{version = v1, type = session_establishment_request, seq_no = 0, ie = IEs},
+    ReqId = smf_sx_node:send_request(PCtx, Req),
+    {ok, {request, ReqId, PCtx}}.
+
+%% create_session_result/4 — decode a session establishment response (the blocking call's
+%% or the async reply's) into the same shape create_session/5 returns. Unlike modify, accept
+%% must thread BearerMap and re-register ctx ids using the response's F-TEIDs.
+create_session_result(#pfcp{version = v1, type = session_establishment_response,
+			     ie = #{pfcp_cause := 'Request accepted',
+				    f_seid := #f_seid{}} = RespIEs},
+		       Handler, BearerMap0, PCtx0) ->
+    SessionInfo = session_info(RespIEs),
+    {BearerMap, PCtx} = update_bearer(RespIEs, BearerMap0, PCtx0),
+    register_ctx_ids(Handler, BearerMap, PCtx),
+    {ok, {update_dp_seid(RespIEs, PCtx), BearerMap, SessionInfo}};
+create_session_result(_Other, _Handler, _BearerMap0, _PCtx0) ->
+    {error, ?CTX_ERR(?FATAL, system_failure)}.
 
 %% modification_request_ies/5 — build the session modification rules, including the
 %% offline query URR asked for by URRActions. Shared by the blocking modify_session/5

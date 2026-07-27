@@ -23,6 +23,7 @@
 -export([validate_handler/1, validate_service/3, validate_procedure/5,
 	 initialize_handler/1, initialize_service/2, invoke/6, handle_response/6]).
 -export([to_session/3, from_session/2]).
+
 -export([get_state_atom/1]).
 -ignore_xref([from_session/2, get_state_atom/1]).
 
@@ -110,11 +111,7 @@ invoke(_Service, init, Session, Events, _Opts, _State) ->
 
 invoke(_Service, {_, 'CCR-Initial'}, Session0, Events, Opts,
        #state{state = stopped} = State0) ->
-    State = inc_request_number(State0#state{state = started}),
-    Keys = ['InPackets', 'OutPackets', 'InOctets', 'OutOctets', 'Acct-Session-Time'],
-    Session = maps:without(Keys, Session0),
-    RecType = ?'DIAMETER_RO_CC-REQUEST-TYPE_INITIAL_REQUEST',
-    Request = make_CCR(RecType, Session, Opts, State),
+    {Request, Session, State} = ccr_initial_pre_send(Session0, Opts, State0),
     await_response(send_request(Request, Opts), Session, Events, State, Opts);
 
 invoke(_Service, {_, 'CCR-Update'}, Session, Events, Opts,
@@ -190,6 +187,21 @@ handle_response(Promise, Msg, Session, Events, Opts, #state{pending = Promise} =
     handle_cca(Msg, Session, Events, Opts, State#state{pending = undefined});
 handle_response(_Promise, _Msg, Session, Events, _Opts, State) ->
     {ok, Session, Events, State}.
+
+%%%===================================================================
+%%% CCR pre-send helpers
+%%%===================================================================
+
+%% pre-send half of CCR-Initial: #state{} transition + volume-key strip +
+%% make_CCR (which itself builds the initial credit request). Used by
+%% invoke/6.
+ccr_initial_pre_send(Session0, Opts, State0) ->
+    State = inc_request_number(State0#state{state = started}),
+    Keys = ['InPackets', 'OutPackets', 'InOctets', 'OutOctets', 'Acct-Session-Time'],
+    Session = maps:without(Keys, Session0),
+    RecType = ?'DIAMETER_RO_CC-REQUEST-TYPE_INITIAL_REQUEST',
+    Request = make_CCR(RecType, Session, Opts, State),
+    {Request, Session, State}.
 
 %%===================================================================
 %% DIAMETER handler callbacks
