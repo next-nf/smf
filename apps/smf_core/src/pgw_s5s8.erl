@@ -727,17 +727,26 @@ handle_response({delete_dedicated_bearers, _EBIs}, timeout,
 handle_response({update_dedicated_bearers, Kind, Staged},
 		#gtp{type = update_bearer_response,
 		     ie = #{?'Bearer Contexts to be modified' := BearerCtxs}},
-		_Request, #{session := connected}, Data) ->
+		_Request, #{session := connected} = State,
+		#{tunnels := #{'Access' := AccessTunnel}} = Data) ->
     %% Network-initiated batched Update Bearer Request (M3 rule change / M5
     %% subscribed-QoS fan-out). Per-bearer Cause governs (TS 29.274 §7.2.15).
-    Data1 = ie_foldl(fun(BC, D) -> apply_bearer_update_result(Kind, BC, Staged, D) end,
-		     Data, BearerCtxs),
-    {keep_state, Data1};
+    %%
+    %% The fold is pure; the UPF re-provision and the Gx report happen ONCE for
+    %% the whole batch. modify_session/5 reconciles the final PCC context against
+    %% the stored rule set and sends only the diff, and report_bearer_failure/2
+    %% carries a list of rule names in one Charging-Rule-Report -- so per-bearer
+    %% calls meant N PFCP requests and N CCR-Updates for one response (#81).
+    {Data1, RuleNames, DelEBIs} =
+	ie_foldl(fun(BC, Acc) -> apply_bearer_update_result(Kind, BC, Staged, Acc) end,
+		 {Data, [], []}, BearerCtxs),
+    finish_update_bearer_failures({Data1, RuleNames, DelEBIs}, AccessTunnel, State);
 
 handle_response({update_dedicated_bearers, Kind, Staged},
 		#gtp{type = update_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause}}},
-		_Request, #{session := connected}, Data) ->
+		_Request, #{session := connected} = State,
+		#{tunnels := #{'Access' := AccessTunnel}} = Data) ->
     %% Legitimate message-level rejection with NO per-bearer Bearer Contexts
     %% (e.g. context_not_found, TS 29.274 §7.2.16) -- there is nothing to fold
     %% per-bearer, so apply the message-level Cause class to every EBI staged
@@ -745,28 +754,33 @@ handle_response({update_dedicated_bearers, Kind, Staged},
     ?LOG(warning, "batched Update Bearer Response carried no Bearer Contexts; "
 	 "applying message-level Cause ~p to ~p staged bearer(s)",
 	 [Cause, map_size(Staged)]),
-    Data1a = case smf_gsn_lib:bearer_update_cause_class(Cause) of
-		 accepted ->
-		     maps:fold(fun(EBI, _Desc, D) -> commit_staged_descriptor(EBI, Staged, D) end,
-			      Data, Staged);
-		 temporary ->
-		     ?LOG(warning, "batched Update Bearer Request temporarily rejected (~p); "
-			  "change not applied this round", [Cause]),
-		     Data;
-		 terminal ->
-		     maps:fold(fun(EBI, _Desc, D) -> handle_update_bearer_failure(Kind, EBI, Cause, D) end,
-			      Data, Staged)
-	     end,
-    {keep_state, Data1a};
+    case smf_gsn_lib:bearer_update_cause_class(Cause) of
+	accepted ->
+	    {keep_state,
+	     maps:fold(fun(EBI, _Desc, D) -> commit_staged_descriptor(EBI, Staged, D) end,
+		       Data, Staged)};
+	temporary ->
+	    ?LOG(warning, "batched Update Bearer Request temporarily rejected (~p); "
+		 "change not applied this round", [Cause]),
+	    {keep_state, Data};
+	terminal ->
+	    finish_update_bearer_failures(
+	      maps:fold(fun(EBI, _Desc, Acc) ->
+				stage_update_bearer_failure(Kind, EBI, Cause, Acc)
+			end, {Data, [], []}, Staged),
+	      AccessTunnel, State)
+    end;
 
 handle_response({update_dedicated_bearers, Kind, Staged}, timeout,
-		#gtp{type = update_bearer_request}, #{session := connected}, Data) ->
+		#gtp{type = update_bearer_request}, #{session := connected} = State,
+		#{tunnels := #{'Access' := AccessTunnel}} = Data) ->
     ?LOG(error, "batched Update Bearer Request timed out; ~p bearer(s) affected",
 	 [map_size(Staged)]),
-    Data1 = maps:fold(fun(EBI, _Desc, D) ->
-			      handle_update_bearer_failure(Kind, EBI, request_rejected, D)
-		      end, Data, Staged),
-    {keep_state, Data1};
+    finish_update_bearer_failures(
+      maps:fold(fun(EBI, _Desc, Acc) ->
+			stage_update_bearer_failure(Kind, EBI, request_rejected, Acc)
+		end, {Data, [], []}, Staged),
+      AccessTunnel, State);
 
 handle_response({CommandReqKey, OldSOpts},
 		#gtp{type = update_bearer_response,
@@ -1503,17 +1517,20 @@ ie_foldl(Fun, Acc, IE) ->
 %% per the §8 failure matrix: request_accepted commits the staged descriptor;
 %% a temporary cause holds the change; a terminal cause runs the failure
 %% policy for the procedure Kind (handle_update_bearer_failure/4).
+%% Accumulator is {Data, RuleNames, DeleteEBIs}: every clause is pure, so the
+%% caller can re-provision the UPF once and report to the PCRF once for the whole
+%% batch instead of per failed bearer (#81).
 apply_bearer_update_result(_Kind,
 			   #v2_bearer_context{group = #{
 			       ?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI},
 			       ?'Cause' := #v2_cause{v2_cause = request_accepted}}},
-			   Staged, Data) ->
-    commit_staged_descriptor(EBI, Staged, Data);
+			   Staged, {Data, Rules, DelEBIs}) ->
+    {commit_staged_descriptor(EBI, Staged, Data), Rules, DelEBIs};
 apply_bearer_update_result(Kind,
 			   #v2_bearer_context{group = #{
 			       ?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI},
 			       ?'Cause' := #v2_cause{v2_cause = Cause}}},
-			   Staged, Data) ->
+			   Staged, Acc) ->
     case smf_gsn_lib:bearer_update_cause_class(Cause) of
 	temporary ->
 	    %% TODO(#34): re-attempt the Update when the UE is next reachable
@@ -1521,9 +1538,9 @@ apply_bearer_update_result(Kind,
 	    %% change without removing the rule or deleting the bearer (dossier §8).
 	    ?LOG(warning, "Update Bearer Request for dedicated bearer ~p temporarily "
 		 "rejected (~p); change not applied this round", [EBI, Cause]),
-	    Data;
+	    Acc;
 	terminal when is_map_key(EBI, Staged) ->
-	    handle_update_bearer_failure(Kind, EBI, Cause, Data);
+	    stage_update_bearer_failure(Kind, EBI, Cause, Acc);
 	terminal ->
 	    %% This EBI was never staged for the current batch -- a response
 	    %% echoing an EBI we didn't ask to modify. Log and skip rather than
@@ -1531,14 +1548,14 @@ apply_bearer_update_result(Kind,
 	    ?LOG(warning, "Update Bearer Response named EBI ~p with terminal cause "
 		 "~p, but it was not staged for this procedure; skipping",
 		 [EBI, Cause]),
-	    Data
+	    Acc
     end;
-apply_bearer_update_result(_Kind, BearerContext, _Staged, Data) ->
+apply_bearer_update_result(_Kind, BearerContext, _Staged, Acc) ->
     %% A Bearer Context missing an EPS Bearer ID or Cause is malformed; skip it
     %% without aborting processing of the batch's remaining contexts.
     ?LOG(warning, "malformed Bearer Context in Update Bearer Response, skipping: ~p",
 	 [BearerContext]),
-    Data.
+    Acc.
 
 commit_staged_descriptor(EBI, Staged, #{dedicated := Ded} = Data) ->
     case maps:find(EBI, Staged) of
@@ -1553,45 +1570,47 @@ commit_staged_descriptor(EBI, Staged, #{dedicated := Ded} = Data) ->
 %% re-provisioned against an orphaned rule on the next unrelated change. A failed
 %% rule-change Modify (M3) removes the offending rule(s), re-provisions PFCP, and
 %% keeps the bearer on its previously confirmed descriptor.
-handle_update_bearer_failure(subscribed_qos, EBI, Cause,
-			     #{tunnels := #{'Access' := AccessTunnel}} = Data) ->
+%% Finish a batched Update Bearer failure round: ONE Gx Charging-Rule-Report for
+%% every affected rule, the subscribed-QoS bearer deletions, and ONE async UPF
+%% re-provision for the whole batch. All three response clauses (per-bearer
+%% Causes, message-level Cause, timeout) funnel through here so none of them can
+%% drift back to per-bearer PFCP/Gx round trips (#81).
+finish_update_bearer_failures({Data0, RuleNames, DelEBIs}, AccessTunnel, State) ->
+    Data1 = case RuleNames of
+		[] -> Data0;
+		_  -> report_bearer_failure(RuleNames, Data0)
+	    end,
+    %% A subscribed-QoS terminal failure also deletes the bearer (5.4.2.2 step 7).
+    Data = lists:foldl(
+	     fun(EBI, D) -> initiate_delete_dedicated_bearer(EBI, AccessTunnel, D) end,
+	     Data1, DelEBIs),
+    async_m:run_async(reprovision_proc(maps:get(bearers, Data)),
+		      fun(_V, S, D) -> {next_state, S, D} end,
+		      fun(_R, S, D) -> {next_state, S, D} end,
+		      State, Data).
+
+stage_update_bearer_failure(subscribed_qos, EBI, Cause, {Data, Rules, DelEBIs}) ->
     ?LOG(warning, "subscribed-QoS Update for bearer ~p failed with ~p; deleting bearer "
 	 "(TS 23.401 5.4.2.2 step 7)", [EBI, Cause]),
-    Data1 = case ebi_rule_names(EBI, Data) of
-		[]        -> Data;
-		RuleNames ->
-		    Data0 = remove_dedicated_bearer_rules(RuleNames, Data),
-		    report_bearer_failure(RuleNames, Data0)
-	    end,
-    initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data1);
-handle_update_bearer_failure(rule_change, EBI, Cause, Data) ->
+    RuleNames = ebi_rule_names(EBI, Data),
+    {strip_pcc_rules(RuleNames, Data), RuleNames ++ Rules, [EBI | DelEBIs]};
+stage_update_bearer_failure(rule_change, EBI, Cause, {Data, Rules, DelEBIs}) ->
     ?LOG(warning, "rule-change Update for bearer ~p failed with ~p; removing rule(s) "
 	 "and reporting to PCRF", [EBI, Cause]),
-    case ebi_rule_names(EBI, Data) of
-	[] ->
-	    Data;
-	RuleNames ->
-	    Data1 = remove_dedicated_bearer_rules(RuleNames, Data),
-	    report_bearer_failure(RuleNames, Data1)
-    end.
+    RuleNames = ebi_rule_names(EBI, Data),
+    {strip_pcc_rules(RuleNames, Data), RuleNames ++ Rules, DelEBIs}.
+
+%% Drop RuleNames from the PCC context. Pure: the UPF is re-provisioned once for
+%% the accumulated change, not per rule set (#79/#81).
+strip_pcc_rules([], Data) ->
+    Data;
+strip_pcc_rules(RuleNames, #{pcc := PCC} = Data) ->
+    Data#{pcc := PCC#pcc_ctx{rules = maps:without(RuleNames, PCC#pcc_ctx.rules)}}.
 
 ebi_rule_names(EBI, #{bearers := BearerMap, pcc := PCC}) ->
     case ebi_qci_arp(EBI, BearerMap) of
 	{QCI, ARP} -> affected_pcc_rules(QCI, ARP, PCC);
 	undefined  -> []
-    end.
-
-%% Remove RuleNames from the PCC context and re-provision PFCP accordingly.
-%% Shared by the rule_change and subscribed_qos terminal Update failure
-%% branches (both strip the bearer's rule(s) from pcc.rules the same way as
-%% every other removal path: the Delete Bearer Command prep, the Create Bearer
-%% failure handler).
-remove_dedicated_bearer_rules(RuleNames,
-			      #{bearers := BearerMap, pfcp := PCtx0, pcc := PCC} = Data) ->
-    PCC1 = PCC#pcc_ctx{rules = maps:without(RuleNames, PCC#pcc_ctx.rules)},
-    case smf_pfcp_context:modify_session(PCC1, [], #{}, BearerMap, PCtx0) of
-	{ok, {PCtx, _, _}} -> Data#{pcc := PCC1, pfcp := PCtx};
-	{error, _}         -> Data#{pcc := PCC1}
     end.
 
 %% Prep one dedicated bearer named in a Delete Bearer Command for deactivation:
