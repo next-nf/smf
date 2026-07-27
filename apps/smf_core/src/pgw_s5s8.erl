@@ -1180,7 +1180,7 @@ ue_delete_filters_proc(EBI, PfIds, PTI, AccessTunnel) ->
 	   ok <- async_m:lift(ccr_result(Result)),
 	   RuleBase = smf_charging:rulebase(),
 	   %% Fold BOTH passes: a delete may also carry a PCRF-proposed replacement
-	   %% rule in the same CCA (closes the Inc2 remove-only TODO(#22)).
+	   %% rule in the same CCA -- this closed the Inc2 remove-only deferral (#22).
 	   %% Remove-pass errors are dropped on purpose -- see report_pcc_failures/4.
 	   {PCC1, _} = smf_pcc_context:gx_events_to_pcc_ctx(Events, remove, RuleBase, PCC0),
 	   {PCC2, PCCErrors} =
