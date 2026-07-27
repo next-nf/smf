@@ -488,6 +488,36 @@
 						'Offline' => [0]}]
 					}]
 				 }},
+		      %% As 'Update-Gx-Add-One', but the CCA additionally installs a
+		      %% predefined rule this PGW has no configuration for.
+		      %% gx_events_to_pcc_ctx/4 collects the resulting
+		      %% {not_found, {rule, _}}; the dynamic ded-rule-2 still installs,
+		      %% so the bearer update proceeds AND the failure is reported
+		      %% (TS 29.212 4.5.12 PULL -> new CCR).
+		      'Update-Gx-Add-One-Unknown' =>
+			  #{avps =>
+				#{'Result-Code' => 2001,
+				  'Charging-Rule-Install' =>
+				      [#{'Charging-Rule-Definition' =>
+					     [#{'Charging-Rule-Name' => <<"ded-rule-2">>,
+						'Flow-Information' =>
+						    [#{'Flow-Description' =>
+							   [<<"permit out tcp from any to assigned 5060">>],
+						       'Flow-Direction' => [1],
+						       'Packet-Filter-Identifier' => [<<"pf-2">>]}],
+						'QoS-Information' =>
+						    [#{'QoS-Class-Identifier' => 1,
+						       'Allocation-Retention-Priority' =>
+							   #{'Priority-Level' => 2,
+							     'Pre-emption-Capability' => 1,
+							     'Pre-emption-Vulnerability' => 0}}],
+						'Metering-Method' => [1],
+						'Precedence' => [110],
+						'Online' => [0],
+						'Offline' => [0]}]
+					},
+				       #{'Charging-Rule-Name' => [<<"unknown-rule">>]}]
+				 }},
 		      'Update-Gx-Replace-One' =>
 			  #{avps =>
 				#{'Result-Code' => 2001,
@@ -837,6 +867,7 @@ common() ->
      ue_delete_packet_filters_updates_bearer,
      ue_delete_packet_filters_reject,
      ue_add_packet_filters_updates_bearer,
+     ue_add_packet_filters_reports_unknown_rule,
      ue_replace_packet_filters_updates_bearer,
      mme_delete_bearer_command,
      mme_delete_bearer_command_multi,
@@ -1162,6 +1193,7 @@ init_per_testcase(TestCase, Config)
        TestCase == ue_delete_packet_filters_updates_bearer;
        TestCase == ue_delete_packet_filters_reject;
        TestCase == ue_add_packet_filters_updates_bearer;
+       TestCase == ue_add_packet_filters_reports_unknown_rule;
        TestCase == ue_replace_packet_filters_updates_bearer ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
@@ -8763,6 +8795,68 @@ ue_add_packet_filters_updates_bearer(Config) ->
 
     %% ...and NO Create Bearer Request was sent.
     ?equal(timeout, recv_pdu(Cntl, undefined, 100, fun(Why) -> Why end)),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+ue_add_packet_filters_reports_unknown_rule() ->
+    [{doc, "Check that a rule the PGW cannot install -- the CCA names a "
+      "predefined Charging-Rule this PGW has no configuration for -- is "
+      "reported back to the PCRF in a new Gx CCR-Update carrying a "
+      "Charging-Rule-Report, while the rest of the decision still applies "
+      "(TS 29.212 4.5.12: PULL-provisioned failures go in a new CCR, since "
+      "the CCA that carried them is already spent)."}].
+ue_add_packet_filters_reports_unknown_rule(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+
+    {GtpCDed, DedEBI, _PfIds} = establish_ded_bearer_with_pf(GtpC, Cntl, CtxKey),
+
+    %% From here the CCR-Update answer installs ded-rule-2 (dynamic, applies)
+    %% AND an unknown predefined rule (fails).
+    smf_test_lib:load_aaa_answer_config(
+      [{{gx, 'CCR-Update'}, 'Update-Gx-Add-One-Unknown'}]),
+
+    PTI = 11,
+    FlowSpec = #{id => 1, direction => downlink, precedence => 90,
+                 components => [{protocol, 6}, {remote_port, 5060}]},
+    {_GtpC2, _BRCReq} =
+        bearer_resource_command({add_pf, DedEBI, FlowSpec, PTI}, GtpC),
+
+    %% The installable half of the decision is unaffected: the bearer still
+    %% grows a second TFT entry and the Update Bearer Request still goes out.
+    UBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = update_bearer_request,
+                ie = #{{v2_procedure_transaction_id, 0} :=
+                           #v2_procedure_transaction_id{pti = PTI}}}, UBReq),
+    send_pdu(Cntl, GtpCDed, make_response(UBReq, simple, GtpCDed)),
+
+    ct:sleep(200),
+
+    %% ...and the rule that could not be installed was reported: exactly one
+    %% Charging-Rule-Report carrying a Rule-Failure-Code, naming it INACTIVE.
+    %% Selecting on Rule-Failure-Code keeps the bearer establishment's
+    %% SUCCESSFUL_RESOURCE_ALLOCATION report (status ACTIVE, no failure code)
+    %% out of the match. The report is issued before the PFCP/Update Bearer
+    %% half, so receiving the Update Bearer Request above already orders it.
+    Failures =
+        [Rep || {_, {smf_aaa_pcf, ccr_update, [_, _, R, _]}, _}
+                    <- meck:history(smf_aaa_pcf),
+                Rep <- maps:get('Charging-Rule-Report', R, []),
+                is_map_key('Rule-Failure-Code', Rep)],
+    ?match([#{'Charging-Rule-Name' := [<<"unknown-rule">>],
+              'PCC-Rule-Status' := [?'DIAMETER_GX_PCC-RULE-STATUS_INACTIVE'],
+              'Rule-Failure-Code' := [_]}], Failures),
 
     delete_session(GtpC),
 

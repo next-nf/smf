@@ -1164,11 +1164,14 @@ ue_delete_filters_proc(EBI, PfIds, PTI, AccessTunnel) ->
 	   RuleBase = smf_charging:rulebase(),
 	   %% Fold BOTH passes: a delete may also carry a PCRF-proposed replacement
 	   %% rule in the same CCA (closes the Inc2 remove-only TODO(#22)).
+	   %% Remove-pass errors are dropped on purpose -- see report_pcc_failures/4.
 	   {PCC1, _} = smf_pcc_context:gx_events_to_pcc_ctx(Events, remove, RuleBase, PCC0),
-	   {PCC2, _} = smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC1),
+	   {PCC2, PCCErrors} =
+	       smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC1),
+	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),
 	   %% Commit the Gx/PCC results (shared by both outcomes).
 	   async_m:modify_data(
-	     fun(D) -> D#{pcf := PCF1, aaa_session := Session1, pcc := PCC2} end),
+	     fun(D) -> D#{pcf := PCF2, aaa_session := Session2, pcc := PCC2} end),
 	   %% One PTI-correlated single-bearer outcome.
 	   ue_delete_outcome(
 	     lists:member(EBI, smf_gsn_lib:detect_removed_bearers(PCC0, PCC2, BearerMap)),
@@ -1198,9 +1201,11 @@ ue_add_filters_proc(EBI, FlowInfos, PTI, AccessTunnel) ->
 	   ok <- async_m:lift(ccr_result(Result)),
 	   RuleBase = smf_charging:rulebase(),
 	   %% An add only installs (nothing to remove).
-	   {PCC1, _} = smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC0),
+	   {PCC1, PCCErrors} =
+	       smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC0),
+	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),
 	   async_m:modify_data(
-	     fun(D) -> D#{pcf := PCF1, aaa_session := Session1, pcc := PCC1} end),
+	     fun(D) -> D#{pcf := PCF2, aaa_session := Session2, pcc := PCC1} end),
 	   ue_update_outcome(EBI, PTI, AccessTunnel, PCC1, BearerMap, PCtx0, Dedicated)
        ]).
 
@@ -1232,10 +1237,13 @@ ue_replace_filters_proc(EBI, FlowInfos, PTI, AccessTunnel) ->
 	   ok <- async_m:lift(ccr_result(Result)),
 	   RuleBase = smf_charging:rulebase(),
 	   %% A replace can drop the old rule and install the new -> apply both.
+	   %% Remove-pass errors are dropped on purpose -- see report_pcc_failures/4.
 	   {PCC1, _} = smf_pcc_context:gx_events_to_pcc_ctx(Events, remove, RuleBase, PCC0),
-	   {PCC2, _} = smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC1),
+	   {PCC2, PCCErrors} =
+	       smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC1),
+	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),
 	   async_m:modify_data(
-	     fun(D) -> D#{pcf := PCF1, aaa_session := Session1, pcc := PCC2} end),
+	     fun(D) -> D#{pcf := PCF2, aaa_session := Session2, pcc := PCC2} end),
 	   ue_delete_outcome(
 	     lists:member(EBI, smf_gsn_lib:detect_removed_bearers(PCC0, PCC2, BearerMap)),
 	     EBI, PTI, AccessTunnel, PCC2, BearerMap, PCtx0, Dedicated)
@@ -1294,6 +1302,29 @@ emit_ue_update_bearer(EBI, PTI, AccessTunnel, PCC2, Dedicated, PCtx1, D) ->
 %% failure yields {error, _}. Anything but `ok` is a rejection -> Failure Indication.
 ccr_result(ok)    -> ok;
 ccr_result(Other) -> {error, {pcrf_rejected, Other}}.
+
+%% Report the rule failures gx_events_to_pcc_ctx/4 collected while applying the
+%% CCA: the PCRF named a predefined Charging-Rule / -Base this PGW has no local
+%% configuration for, so the rule the PCRF believes is active was never installed.
+%% TS 29.212 4.5.12 puts PULL-provisioned failures -- rules arriving in a CCA, as
+%% they do here -- in a NEW CCR with PCC-Rule-Status INACTIVE; the answer that
+%% could have carried them is the CCA we just processed. Fire-and-forget, exactly
+%% like the establishment path in smf_gtp_gsn_lib:create_session_fun/13.
+%%
+%% Install pass only. 4.5.12 states removal never fails: a {not_found, {rule, _}}
+%% from the remove pass means the requested end state (rule absent) already holds,
+%% so there is nothing to report.
+report_pcc_failures(PCCErrors, PCF0, Session0, ReqOpts) ->
+    GxReport = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors),
+    if map_size(GxReport) /= 0 ->
+	    case smf_aaa_pcf:ccr_update(PCF0, Session0, GxReport,
+					ReqOpts#{async => true}) of
+		{ok, PCF, Session, _} -> {PCF, Session};
+		_                     -> {PCF0, Session0}
+	    end;
+       true ->
+	    {PCF0, Session0}
+    end.
 
 %% await a whole-pipeline worker (invoke(pipeline_async)). On success the worker
 %% posts the folded {Result, Ctx1, Session1, Events}; on an unexpected crash
