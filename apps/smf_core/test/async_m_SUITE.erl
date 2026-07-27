@@ -8,7 +8,8 @@ all() ->
      accessors_read_write, await_captures_rest, lift_injects,
      run_async_complete, run_async_error, run_async_parks, resume_completes,
      resume_multiple_suspends, resume_nested_ordering,
-     async_apply_roundtrip, async_apply_worker_crash, resume_await_tail].
+     async_apply_roundtrip, async_apply_worker_crash, resume_await_tail,
+     foldl_pure, foldl_empty, foldl_suspends_per_element, foldl_short_circuits].
 
 %% run a do-block against a trivial (State, Data) = (st, dt)
 return_wraps(_Config) ->
@@ -106,6 +107,49 @@ resume_multiple_suspends(_Config) ->
     {next_state, State2, dt} = async_m:handle_reply(reqA, 1, State1, dt),
     true = is_map_key(reqB, maps:get(async_pending, State2)),
     {done, 3, _} = async_m:handle_reply(reqB, 2, State2, dt),
+    ok.
+
+foldl_empty(_Config) ->
+    M = async_m:foldl(fun(_E, _Acc) -> async_m:return(never) end, seed, []),
+    {{ok, seed}, st, dt} = async_m:run(M, st, dt),
+    ok.
+
+foldl_pure(_Config) ->
+    %% left fold: elements consumed in order, accumulator threaded
+    M = async_m:foldl(fun(E, Acc) -> async_m:return([E | Acc]) end, [], [1, 2, 3]),
+    {{ok, [3, 2, 1]}, st, dt} = async_m:run(M, st, dt),
+    ok.
+
+foldl_suspends_per_element(_Config) ->
+    %% The reason foldl/3 exists: a step that awaits must not lose the rest of
+    %% the list. Each element parks, and the fold resumes on its reply — so the
+    %% same fold suspends three times and still sums every element.
+    M = async_m:foldl(
+	  fun(E, Acc) ->
+		  do([async_m || V <- async_m:await({req, E}),
+				 async_m:return(Acc + V)])
+	  end, 0, [a, b, c]),
+    Ok = fun(V, _S, D) -> {done, V, D} end,
+    Err = fun(R, _S, _D) -> {err, R} end,
+
+    {next_state, S1, dt} = async_m:run_async(M, Ok, Err, #{async_pending => #{}}, dt),
+    true = is_map_key({req, a}, maps:get(async_pending, S1)),
+    {next_state, S2, dt} = async_m:handle_reply({req, a}, 10, S1, dt),
+    %% element a is drained and b is now the parked one — the fold advanced
+    false = is_map_key({req, a}, maps:get(async_pending, S2)),
+    true  = is_map_key({req, b}, maps:get(async_pending, S2)),
+    {next_state, S3, dt} = async_m:handle_reply({req, b}, 20, S2, dt),
+    true  = is_map_key({req, c}, maps:get(async_pending, S3)),
+    {done, 60, _} = async_m:handle_reply({req, c}, 30, S3, dt),
+    ok.
+
+foldl_short_circuits(_Config) ->
+    %% an error in any step abandons the remaining elements
+    M = async_m:foldl(
+	  fun(2, _Acc) -> async_m:fail(boom);
+	     (E, Acc)  -> async_m:return([E | Acc])
+	  end, [], [1, 2, 3]),
+    {{error, boom}, st, dt} = async_m:run(M, st, dt),
     ok.
 
 resume_nested_ordering(_Config) ->

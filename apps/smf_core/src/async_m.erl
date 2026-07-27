@@ -10,6 +10,7 @@
 -export([get_state/0, put_state/1, modify_state/1,
          get_data/0, put_data/1, modify_data/1,
          await/1, lift/1]).
+-export([foldl/3]).
 -export([run_async/5, handle_reply/4, resume/2, async_apply/1]).
 
 -export_type([async_m/0, result/0]).
@@ -70,6 +71,24 @@ lift(ok)          -> return(ok);
 lift({ok, V})     -> return(V);
 lift({error, E})  -> fail(E);
 lift(V)           -> return(V).
+
+%% foldl/3 — sequence a monadic step over a list, threading an accumulator.
+%%
+%% The point is that a step may `await`: a procedure that has to issue one
+%% request per element (e.g. a PFCP re-provision per bearer context named in a
+%% Delete Bearer Command) cannot use lists:foldl/3, because suspending mid-fold
+%% would lose the remaining elements. Binding recursively works because '>>='/2
+%% already handles `await` by capturing the not-yet-run continuation — here that
+%% continuation is "fold over the rest of the list", so the remaining elements
+%% ride along in Conts and the fold resumes exactly where it suspended.
+%%
+%% Fun is (Elem, Acc) -> async_m() yielding the next accumulator. An {error, _}
+%% from any step short-circuits the whole fold, as everywhere else.
+-spec foldl(fun((term(), term()) -> async_m()), term(), [term()]) -> async_m().
+foldl(_Fun, Acc, []) ->
+    return(Acc);
+foldl(Fun, Acc, [Elem | Rest]) ->
+    '>>='(Fun(Elem, Acc), fun(Acc1) -> foldl(Fun, Acc1, Rest) end).
 
 -spec run_async(async_m(),
                 fun((term(), term(), term()) -> term()),
