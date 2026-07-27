@@ -596,11 +596,21 @@ handle_request(ReqKey,
     %% issues a network-initiated Delete Bearer Request. Default bearers are
     %% never deleted this way.
     DefaultEBI = Context#context.default_bearer_id,
-    {Data, EBIs} = ie_foldl(
-		     fun(BearerContext, Acc) ->
-			     prep_commanded_deactivation(BearerContext, DefaultEBI,
-							  AccessTunnel, Acc)
-		     end, {Data0, []}, BearerContexts),
+    %% Strip every commanded bearer's rules from the PCC context first, then do
+    %% ONE PFCP re-provision and ONE Gx report for the whole batch: modify_session/5
+    %% diffs the final rule set against the stored one, and report_rules_inactive/2
+    %% already carries a list of rule names in a single Charging-Rule-Report (#79).
+    {Data1, EBIs, RuleNames} =
+	ie_foldl(
+	  fun(BearerContext, Acc) ->
+		  prep_commanded_deactivation(BearerContext, DefaultEBI,
+					      AccessTunnel, Acc)
+	  end, {Data0, [], []}, BearerContexts),
+    Data2 = reprovision_bearers(Data1),
+    Data = case RuleNames of
+	       [] -> Data2;
+	       _  -> report_rules_inactive(RuleNames, Data2)
+	   end,
     send_dedicated_bearers_delete(EBIs, AccessTunnel),
     %% Like modify_bearer_command, no direct response is sent; the follow-on
     %% Delete Bearer Request carries the procedure forward.
@@ -982,17 +992,37 @@ process_additional_bearer_contexts(IEs, AccessTunnel,
                      #{?'Bearer Contexts to be created' := S} -> [S];
                      _ -> []
                  end,
-    lists:foldl(
-      fun(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
+    %% Stage every additional bearer first, then re-provision the UPF ONCE.
+    %% modify_session/5 rebuilds the complete PFCP rule set from the final PCC
+    %% context and bearer map and puts only the diff on the wire, so a single
+    %% call after the fold carries every bearer. Calling it per bearer would
+    %% send N Session Modification Requests and walk the UPF through
+    %% intermediate rule sets (#79).
+    Staged =
+	lists:foldl(
+	  fun(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
                                            #v2_eps_bearer_id{eps_bearer_id = EBI}} = Group}, D)
-            when EBI /= DefaultEBI ->
-              install_additional_bearer(Group, AccessTunnel, D);
-         (_, D) ->
-              D
-      end, Data, BearerCtxs).
+		when EBI /= DefaultEBI ->
+		  stage_additional_bearer(Group, AccessTunnel, D);
+	     (_, D) ->
+		  D
+	  end, Data, BearerCtxs),
+    reprovision_bearers(Staged).
 
-install_additional_bearer(BearerGroup, _AccessTunnel,
-                          #{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC} = Data) ->
+%% Re-provision the UPF for an accumulated bearer-map / PCC change. A failed
+%% modification is non-fatal here as on every other bearer path: the
+%% control-plane change stands and only the new PCtx is dropped.
+reprovision_bearers(#{bearers := BearerMap, pfcp := PCtx0, pcc := PCC} = Data) ->
+    case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
+	{ok, {PCtx, _, _}} -> Data#{pfcp := PCtx};
+	{error, _}         -> Data
+    end.
+
+%% Stage one additional bearer into the bearer map and descriptor table. Pure
+%% apart from the TEI allocation — no PFCP round trip; the caller re-provisions
+%% once for the whole batch.
+stage_additional_bearer(BearerGroup, _AccessTunnel,
+			#{bearers := BearerMap0, pfcp := PCtx0} = Data) ->
     case BearerGroup of
         #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} ->
             DefaultBearer = smf_gsn_lib:get_access_default_bearer(BearerMap0),
@@ -1014,13 +1044,7 @@ install_additional_bearer(BearerGroup, _AccessTunnel,
                         _ ->
                             {BearerMap1, Ded0}
                     end,
-                    case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
-                        {ok, {PCtx, _, _}} ->
-                            Data#{bearers := BearerMap, pfcp := PCtx,
-                                  dedicated := Dedicated};
-                        {error, _} ->
-                            Data#{bearers := BearerMap, dedicated := Dedicated}
-                    end;
+                    Data#{bearers := BearerMap, dedicated := Dedicated};
                 _ ->
                     Data
             end;
@@ -1566,25 +1590,25 @@ remove_dedicated_bearer_rules(RuleNames,
     end.
 
 %% Prep one dedicated bearer named in a Delete Bearer Command for deactivation:
-%% report the affected PCC rule(s) to the PCRF as INACTIVE, remove them from the
-%% PCC context and re-provision PFCP, then accumulate the EBI. The caller emits
-%% ONE network-initiated Delete Bearer Request for the whole accumulated batch
-%% after the fold. The default bearer and unknown bearers are left untouched
-%% and not accumulated.
+%% remove its bound PCC rule(s) from the PCC context and accumulate both the EBI
+%% and the rule names. Pure — no PFCP and no Gx here; the caller re-provisions
+%% the UPF once, reports the whole rule set to the PCRF once, and emits ONE
+%% network-initiated Delete Bearer Request for the accumulated batch. The default
+%% bearer and unknown bearers are left untouched and not accumulated.
 prep_commanded_deactivation(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
 				    #v2_eps_bearer_id{eps_bearer_id = EBI}}},
-			     DefaultEBI, _AccessTunnel, {Data, Acc})
+			     DefaultEBI, _AccessTunnel, {Data, EBIs, Rules})
   when EBI =:= DefaultEBI ->
     ?LOG(warning, "Delete Bearer Command targeted the default bearer ~p; ignored", [EBI]),
-    {Data, Acc};
+    {Data, EBIs, Rules};
 prep_commanded_deactivation(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
 				    #v2_eps_bearer_id{eps_bearer_id = EBI}}},
 			     _DefaultEBI, _AccessTunnel,
-			     {#{bearers := BearerMap, pfcp := PCtx0, pcc := PCC} = Data0, Acc}) ->
+			     {#{bearers := BearerMap, pcc := PCC} = Data0, EBIs, Rules}) ->
     case maps:is_key({'Access', EBI}, BearerMap) of
 	false ->
 	    ?LOG(warning, "Delete Bearer Command for unknown bearer ~p; ignored", [EBI]),
-	    {Data0, Acc};
+	    {Data0, EBIs, Rules};
 	true ->
 	    RuleNames =
 		case ebi_qci_arp(EBI, BearerMap) of
@@ -1592,16 +1616,7 @@ prep_commanded_deactivation(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
 		    undefined  -> []
 		end,
 	    PCC1 = PCC#pcc_ctx{rules = maps:without(RuleNames, PCC#pcc_ctx.rules)},
-	    Data1 =
-		case smf_pfcp_context:modify_session(PCC1, [], #{}, BearerMap, PCtx0) of
-		    {ok, {PCtx, _, _}} -> Data0#{pcc := PCC1, pfcp := PCtx};
-		    {error, _}         -> Data0#{pcc := PCC1}
-		end,
-	    Data = case RuleNames of
-		       [] -> Data1;
-		       _  -> report_rules_inactive(RuleNames, Data1)
-		   end,
-	    {Data, [EBI | Acc]}
+	    {Data0#{pcc := PCC1}, [EBI | EBIs], RuleNames ++ Rules}
     end;
 prep_commanded_deactivation(_BearerContext, _DefaultEBI, _AccessTunnel, DataAcc) ->
     %% A Bearer Context without an EPS Bearer ID: nothing to deactivate.
