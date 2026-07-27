@@ -330,7 +330,8 @@ flow_info_list_to_filters([FlowInfo | Rest], Used, Precedence, Sdf0) ->
     Id = lowest_free_id(Used),
     Filter = flow_info_to_filter(FlowInfo, Id, Precedence),
     %% TODO(#32): a duplicate Gx Packet-Filter-Identifier silently overwrites the
-    %% earlier sdf_to_pf entry; document/assert uniqueness when #22 consumes it.
+    %% earlier sdf_to_pf entry. The UE bearer procedures (#22) now invert this map
+    %% via pf_ids_to_sdf/2, so the uniqueness assumption is load-bearing.
     Sdf = case sdf_filter_id(FlowInfo) of
               undefined -> Sdf0;
               SdfId     -> Sdf0#{SdfId => Id}
