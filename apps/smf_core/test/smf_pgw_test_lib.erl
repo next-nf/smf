@@ -55,6 +55,10 @@ create_deterministic_session(Base, N, #gtpc{} = GtpC0) ->
     Response = send_recv_pdu(GtpC, Msg, 20000),
     {validate_response(create_session_request, simple, Response, GtpC), Msg, Response}.
 
+%% Fresh TEIDs so every named bearer's remote F-TEID actually changes.
+modify_bearer({multi_bearer, _} = SubType, GtpC0) ->
+    GtpC = gtp_context_new_teids(GtpC0),
+    execute_request(modify_bearer_request, SubType, GtpC);
 modify_bearer(SubType, GtpC0)
   when SubType == tei_update ->
     GtpC = gtp_context_new_teids(GtpC0),
@@ -509,6 +513,24 @@ make_request(modify_bearer_request, SubType,
 	   fq_teid(0, ?'S5/S8-C SGW', LocalCntlTEI, LocalIP)
 	  ],
 
+    #gtp{version = v2, type = modify_bearer_request, tei = RemoteCntlTEI,
+	 seq_no = SeqNo, ie = IEs};
+
+%% Modify Bearer Request naming SEVERAL bearers -- TS 29.274 7.2.7 allows a list
+%% of "Bearer Contexts to be modified". Each gets its own S5/S8-U SGW F-TEID.
+make_request(modify_bearer_request, {multi_bearer, EBIs},
+	     #gtpc{restart_counter = RCnt, seq_no = SeqNo,
+		   local_ip = LocalIP,
+		   local_control_tei = LocalCntlTEI,
+		   local_data_tei = LocalDataTEI,
+		   remote_control_tei = RemoteCntlTEI}) ->
+    BearerCtxs =
+	[#v2_bearer_context{
+	    group = [#v2_eps_bearer_id{eps_bearer_id = EBI},
+		     fq_teid(1, ?'S5/S8-U SGW', LocalDataTEI + N, LocalIP)]}
+	 || {N, EBI} <- lists:zip(lists:seq(0, length(EBIs) - 1), EBIs)],
+    IEs = [#v2_recovery{restart_counter = RCnt},
+	   fq_teid(0, ?'S5/S8-C SGW', LocalCntlTEI, LocalIP) | BearerCtxs],
     #gtp{version = v2, type = modify_bearer_request, tei = RemoteCntlTEI,
 	 seq_no = SeqNo, ie = IEs};
 
@@ -1194,6 +1216,22 @@ validate_response(create_session_request, static_host_ipv6, Response, GtpC0) ->
 		  type = ipv6, address = <<PrefixLen:8, IPv6/binary>>}}} = Response,
     ?equal(128, PrefixLen),
     ?equal(?IPv6StaticHostIP, smf_inet:bin2ip(IPv6)),
+    GtpC;
+
+validate_response(modify_bearer_request, {multi_bearer, EBIs}, Response, GtpC) ->
+    validate_seq_no(Response, GtpC),
+    validate_teid(Response, GtpC),
+    %% One "Bearer Contexts modified" IE per requested bearer, each accepted.
+    #gtp{type = modify_bearer_response,
+	 ie = #{{v2_cause, 0} := #v2_cause{v2_cause = request_accepted},
+		{v2_bearer_context, 0} := Ctxs}} = Response,
+    Got = lists:sort(
+	    [{E, C} || #v2_bearer_context{
+			  group = #{{v2_eps_bearer_id, 0} :=
+					#v2_eps_bearer_id{eps_bearer_id = E},
+				    {v2_cause, 0} := #v2_cause{v2_cause = C}}}
+			   <- lists:flatten([Ctxs])]),
+    ?equal(lists:sort([{E, request_accepted} || E <- EBIs]), Got),
     GtpC;
 
 validate_response(create_session_request, multi_bearer, Response,

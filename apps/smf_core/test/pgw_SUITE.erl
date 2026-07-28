@@ -859,6 +859,7 @@ common() ->
      invalid_gtp_version,
      apn_lookup,
      create_session_multi_bearer,
+     modify_bearer_multi_bearer,
      create_session_request_missing_sender_teid,
      create_session_request_missing_ie,
      create_session_request_aaa_reject,
@@ -1246,6 +1247,11 @@ init_per_testcase(tdf_app_id, Config) ->
     Config;
 init_per_testcase(create_session_multi_bearer, Config) ->
     setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(modify_bearer_multi_bearer, Config) ->
+    setup_per_testcase(Config),
+    %% BCM UE_NW so a pushed PCC rule spawns a dedicated bearer to modify.
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(gx_rar_dedicated_bearer_create, Config) ->
@@ -2106,6 +2112,77 @@ simple_session_request(Config) ->
 	  %%     #reporting_triggers{periodic_reporting=1}
 	 }
        ], URR),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+modify_bearer_multi_bearer() ->
+    [{doc, "TS 29.274 7.2.7: a Modify Bearer Request may carry a LIST of "
+	   "Bearer Contexts to be modified; the response carries one modified "
+	   "Bearer Context per requested bearer, each with its own Cause"}].
+modify_bearer_multi_bearer(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+    Self = self(),
+    ResponseFun = fun(Request, Result, Avps, SOpts) ->
+			  Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SessionOpts, events = []},
+
+    %% Spawn a dedicated bearer so the request has two bearers to name.
+    DedRule = #{'Charging-Rule-Definition' =>
+		    [#{'Charging-Rule-Name' => [<<"ded-mb-rule">>],
+		       'Flow-Information' =>
+			   [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+			      'Flow-Direction' => [2]}],
+		       'QoS-Information' =>
+			   [#{'QoS-Class-Identifier' => 1,
+			      'Max-Requested-Bandwidth-UL' => 6000,
+			      'Max-Requested-Bandwidth-DL' => 8000,
+			      'Guaranteed-Bitrate-UL' => 6000,
+			      'Guaranteed-Bitrate-DL' => 8000,
+			      'Allocation-Retention-Priority' =>
+				  #{'Priority-Level' => 2,
+				    'Pre-emption-Capability' => 1,
+				    'Pre-emption-Vulnerability' => 0}}],
+		       'Metering-Method' => [1],
+		       'Precedence' => [100],
+		       'Online' => [0],
+		       'Offline' => [0]}]},
+    Server ! AAAReq#aaa_request{events = [{pcc, install, [DedRule]}]},
+    receive {'$response', _, _, _, _} -> ok
+    after 5000 -> ct:fail(rar_timeout)
+    end,
+
+    DedEBI = 6,
+    _GtpCDed = complete_create_bearer(Cntl, GtpC, DedEBI),
+
+    #{bearers := BearerMap0} = smf_context:test_cmd(gtp, CtxKey, info),
+    #{{'Access', 5} := #bearer{remote = Remote5Before},
+      {'Access', DedEBI} := #bearer{remote = Remote6Before}} = BearerMap0,
+
+    %% Modify BOTH bearers in one request. validate_response asserts the response
+    %% carries a modified Bearer Context per bearer, all accepted.
+    {GtpC2, _, _} = modify_bearer({multi_bearer, [5, DedEBI]}, GtpC),
+
+    %% Both bearers' remote F-TEIDs must have been taken from the request.
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    #{{'Access', 5} := #bearer{remote = Remote5After},
+      {'Access', DedEBI} := #bearer{remote = Remote6After}} = BearerMap,
+    ?assertNotEqual(Remote5Before, Remote5After),
+    ?assertNotEqual(Remote6Before, Remote6After),
+
+    delete_session(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
 
     meck_validate(Config),
     ok.

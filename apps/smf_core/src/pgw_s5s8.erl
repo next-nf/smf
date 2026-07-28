@@ -272,15 +272,15 @@ handle_request(ReqKey,
 	    {next_state, State#{session := shutdown}, FinalData1}
     end;
 
-%% TODO(#24):
-%%  Only single or no bearer modification is supported by this and the next function.
-%%  Both function are largy identical, only the bearer modification itself is the key
-%%  difference. It should be possible to unify that into one handler
+%% One handler for every Modify Bearer Request shape. TS 29.274 7.2.7 makes
+%% "Bearer Contexts to be modified" Conditional and repeatable -- "Several IEs
+%% with the same type and instance value may be included as necessary to
+%% represent a list of Bearers to be modified" -- so the request may carry none,
+%% one, or many. The previous split into a one-bearer clause and a no-bearer
+%% clause meant a multi-bearer request matched neither and fell through to the
+%% catch-all, which answers nothing at all.
 handle_request(ReqKey,
-	       #gtp{type = modify_bearer_request,
-		    ie = #{?'Bearer Contexts to be modified' :=
-			       #v2_bearer_context{group = #{?'EPS Bearer ID' := EBI}}
-			  } = IEs} = Request,
+	       #gtp{type = modify_bearer_request, ie = IEs} = Request,
 	       _Resent, #{session := connected} = State,
 	       #{context := Context, pfcp := PCtx0,
 		 tunnels := #{'Access' := AccessTunnelOld} = Tunnels,
@@ -289,55 +289,31 @@ handle_request(ReqKey,
     process_secondary_rat_usage_data_reports(IEs, Context, Data),
     AccessBearerOld = smf_gsn_lib:get_access_default_bearer(BearerMap0),
 
-    {AccessTunnel0, AccessBearer} =
+    %% Control-plane endpoint from the message-level IEs. The bearer this also
+    %% returns is ignored: the per-bearer pass below covers every named bearer,
+    %% including the default, and it is the only one that copes with a list.
+    {AccessTunnel0, _} =
 	case update_tunnel_from_gtp_req(
 	       Request, AccessTunnelOld#tunnel{version = v2}, AccessBearerOld) of
 	    {ok, Result1} -> Result1;
 	    {error, Err1} -> throw(Err1#ctx_err{context = Context, tunnel = AccessTunnelOld})
 	end,
-    BearerMap = smf_gsn_lib:put_access_default_bearer(AccessBearer, BearerMap0),
-
     AccessTunnel = smf_gtp_gsn_lib:update_tunnel_endpoint(AccessTunnelOld, AccessTunnel0),
+
+    {BearerMap, Modified} =
+	update_bearers_from_req(IEs, AccessTunnel, BearerMap0, Context),
+
+    AccessBearer = smf_gsn_lib:get_access_default_bearer(BearerMap),
     {URRActions, S1} = update_session_from_gtp_req(IEs, S0, AccessTunnel, AccessBearer),
     SendEM = AccessTunnelOld#tunnel.version == AccessTunnel#tunnel.version,
     Proc = smf_gtp_gsn_lib:access_bearer_change_proc(
-	     AccessBearer /= AccessBearerOld, BearerMap, URRActions, SendEM, PCtx0, PCC),
-    Req = #{req_key => ReqKey, request => Request, ies => IEs, ebi => EBI,
+	     BearerMap /= BearerMap0, BearerMap, URRActions, SendEM, PCtx0, PCC),
+    Req = #{req_key => ReqKey, request => Request, ies => IEs, modified => Modified,
 	    context => Context, tunnels => Tunnels, access_tunnel => AccessTunnel,
 	    bearers => BearerMap, aaa_session => S1},
     OkFun = fun(V, S, D) -> modify_bearer_ok(V, S, D, Req) end,
     ErrFun = fun(E, S, D) -> modify_bearer_err(E, S, D, Req) end,
     async_m:run_async(Proc, OkFun, ErrFun, State, Data);
-
-handle_request(ReqKey,
-	       #gtp{type = modify_bearer_request, ie = IEs} = Request,
-	       _Resent, #{session := connected} = _State,
-	       #{context := Context, pfcp := PCtx,
-		 tunnels := #{'Access' := AccessTunnelOld} = Tunnels, bearers := BearerMap0,
-		 aaa_session := S0} = Data)
-  when not is_map_key(?'Bearer Contexts to be modified', IEs) ->
-    process_secondary_rat_usage_data_reports(IEs, Context, Data),
-    AccessBearerOld = smf_gsn_lib:get_access_default_bearer(BearerMap0),
-
-    {AccessTunnel0, AccessBearer} =
-	case update_tunnel_from_gtp_req(
-	       Request, AccessTunnelOld#tunnel{version = v2}, AccessBearerOld) of
-	    {ok, Result1} -> Result1;
-	    {error, Err1} -> throw(Err1#ctx_err{context = Context, tunnel = AccessTunnelOld})
-	end,
-
-    AccessTunnel = smf_gtp_gsn_lib:update_tunnel_endpoint(AccessTunnelOld, AccessTunnel0),
-    {URRActions, S1} = update_session_from_gtp_req(IEs, S0, AccessTunnel, AccessBearer),
-    gtp_context:trigger_usage_report(self(), URRActions, PCtx),
-
-    ResponseIEs = [#v2_cause{v2_cause = request_accepted}],
-    Response = response(modify_bearer_response, AccessTunnel, ResponseIEs, Request),
-    gtp_context:send_response(ReqKey, Request, Response),
-
-    DataNew0 = Data#{pfcp => PCtx, tunnels => Tunnels#{'Access' => AccessTunnel}, aaa_session => S1},
-    DataNew = retry_pending_bearers(AccessTunnel, DataNew0),
-    Actions = context_idle_action([], Context),
-    {keep_state, DataNew, Actions};
 
 handle_request(#request{src = Src, ip = IP, port = Port} = ReqKey,
 	       #gtp{type = modify_bearer_command,
@@ -607,11 +583,52 @@ teardown_err(Reason, State, Data) ->
     ?LOG(error, "teardown procedure failed with ~p", [Reason]),
     {next_state, State#{session := shutdown}, Data}.
 
+%% Apply every "Bearer Contexts to be modified" IE the request carried, in order.
+%% Returns the updated bearer map and, for the response, one {EBI, Cause} per
+%% requested bearer -- TS 29.274 Table 7.2.8-2 makes the per-bearer Cause
+%% mandatory in "Bearer Contexts modified". A bearer the request names but this
+%% context does not hold is rejected individually rather than failing the whole
+%% request. Purely accumulative: the UPF is re-provisioned once, afterwards.
+update_bearers_from_req(IEs, AccessTunnel, BearerMap0, Context) ->
+    case maps:get(?'Bearer Contexts to be modified', IEs, undefined) of
+	undefined ->
+	    {BearerMap0, []};
+	BearerCtxs ->
+	    ie_foldl(update_bearer_from_req(AccessTunnel, Context, _, _),
+		     {BearerMap0, []}, BearerCtxs)
+    end.
+
+update_bearer_from_req(AccessTunnel, _Context,
+		       #v2_bearer_context{group = #{?'EPS Bearer ID' :=
+							#v2_eps_bearer_id{eps_bearer_id = EBI}
+						   } = Group},
+		       {BearerMap, Modified}) ->
+    Key = {'Access', EBI},
+    case BearerMap of
+	#{Key := Bearer0} ->
+	    case get_tunnel_from_bearer(maps:next(maps:iterator(Group)),
+					AccessTunnel, Bearer0) of
+		{ok, Bearer} ->
+		    {BearerMap#{Key := Bearer}, [{EBI, request_accepted} | Modified]};
+		{error, _} ->
+		    ?LOG(warning, "Modify Bearer Request carried an unusable F-TEID "
+			 "for bearer ~p; rejecting that bearer", [EBI]),
+		    {BearerMap, [{EBI, request_rejected} | Modified]}
+	    end;
+	#{} ->
+	    ?LOG(warning, "Modify Bearer Request named unknown bearer ~p", [EBI]),
+	    {BearerMap, [{EBI, context_not_found} | Modified]}
+    end;
+update_bearer_from_req(_AccessTunnel, _Context, BearerContext, Acc) ->
+    ?LOG(warning, "malformed Bearer Context in Modify Bearer Request, skipping: ~p",
+	 [BearerContext]),
+    Acc.
+
 %% The Modify Bearer Response is built from the PFCP result, so it goes out from
 %% here rather than from the handler. {next_state, ...} (not keep_state) because
 %% the drained async_pending re-delivers what the coarse gate postponed.
 modify_bearer_ok({PCtx, SessionInfo}, State, Data,
-		 #{req_key := ReqKey, request := Request, ies := IEs, ebi := EBI,
+		 #{req_key := ReqKey, request := Request, ies := IEs, modified := Modified,
 		   context := Context, tunnels := Tunnels, access_tunnel := AccessTunnel,
 		   bearers := BearerMap, aaa_session := S1}) ->
     ResponseIEs0 =
@@ -623,7 +640,8 @@ modify_bearer_ok({PCtx, SessionInfo}, State, Data,
 		%% consider the content as well, but in practice that is not stable enough
 		%% in the presense of middle boxes between the SGW and the PGW
 		%%
-		[EBI,				%% Linked EPS Bearer ID
+		[#v2_eps_bearer_id{eps_bearer_id =
+				       Context#context.default_bearer_id},  %% Linked EPS Bearer ID
 		 #v2_apn_restriction{restriction_type_value = 0},
 		 context_charging_id(Context) |
 		 [#v2_msisdn{msisdn = Context#context.msisdn} || Context#context.msisdn /= undefined]];
@@ -631,12 +649,18 @@ modify_bearer_ok({PCtx, SessionInfo}, State, Data,
 		[]
 	end,
 
-    ResponseIEs = [#v2_cause{v2_cause = request_accepted},
-		   #v2_bearer_context{
-		      group=[#v2_cause{v2_cause = request_accepted},
-			     context_charging_id(Context),
-			     EBI]} |
-		   ResponseIEs0],
+    %% One "Bearer Contexts modified" IE per bearer the request named, each with
+    %% its own Cause (TS 29.274 7.2.8, Table 7.2.8-2). A request that named none
+    %% gets a bare Cause, as before.
+    BearerCtxIEs =
+	[#v2_bearer_context{
+	    group = [#v2_cause{v2_cause = BCause},
+		     context_charging_id(Context),
+		     #v2_eps_bearer_id{eps_bearer_id = BEBI}]}
+	 || {BEBI, BCause} <- lists:reverse(Modified)],
+
+    ResponseIEs = [#v2_cause{v2_cause = modify_bearer_cause(Modified)}
+		   | BearerCtxIEs ++ ResponseIEs0],
     Response = response(modify_bearer_response, AccessTunnel, ResponseIEs, Request),
     gtp_context:send_response(ReqKey, Request, Response),
 
@@ -645,6 +669,16 @@ modify_bearer_ok({PCtx, SessionInfo}, State, Data,
     DataNew = retry_pending_bearers(AccessTunnel, DataNew0),
     Actions = context_idle_action([], Context),
     {next_state, State, DataNew, Actions}.
+
+%% Message-level Cause: "Request accepted partially" when some but not all of the
+%% named bearers were modified (TS 29.274 7.2.8 lists it among the message-specific
+%% causes); a plain accept when all of them were, or when none were named.
+modify_bearer_cause(Modified) ->
+    case lists:partition(fun({_, C}) -> C =:= request_accepted end, Modified) of
+	{_, []}      -> request_accepted;
+	{[], [_|_]}  -> request_rejected;
+	{_,  [_|_]}  -> request_accepted_partially
+    end.
 
 %% The only failure the procedure can produce is the FATAL #ctx_err from
 %% modify_session_result/2. Decorate and re-throw so async_dispatch's #ctx_err
