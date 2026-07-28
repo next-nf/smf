@@ -860,6 +860,7 @@ common() ->
      apn_lookup,
      create_session_multi_bearer,
      modify_bearer_multi_bearer,
+     modify_bearer_command_arp_fanout_ruleless_bearer,
      create_session_request_missing_sender_teid,
      create_session_request_missing_ie,
      create_session_request_aaa_reject,
@@ -1246,6 +1247,10 @@ init_per_testcase(tdf_app_id, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-TDF-App'}]),
     Config;
 init_per_testcase(create_session_multi_bearer, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(modify_bearer_command_arp_fanout_ruleless_bearer, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -2112,6 +2117,101 @@ simple_session_request(Config) ->
 	  %%     #reporting_triggers{periodic_reporting=1}
 	 }
        ], URR),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+modify_bearer_command_arp_fanout_ruleless_bearer() ->
+    [{doc, "#31: a dedicated bearer whose spawning PCC rule was removed between "
+	   "its Create Bearer Request and Response has no aggregate QoS; the "
+	   "subscribed-ARP fan-out must skip it rather than signal a QCI-only "
+	   "Bearer Level QoS, which would carry GBR=0/MBR=0 to the UE"}].
+modify_bearer_command_arp_fanout_ruleless_bearer(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun = fun(Rq, Rs, Avps, SOpts) -> Self ! {'$response', Rq, Rs, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SessionOpts, events = []},
+
+    %% A GBR rule at the DEFAULT bearer's ARP, so the bearer it spawns is one the
+    %% subscribed-ARP fan-out would otherwise target.
+    RuleName = <<"ded-ruleless">>,
+    DedRule = #{'Charging-Rule-Definition' =>
+		    [#{'Charging-Rule-Name' => RuleName,
+		       'Flow-Information' =>
+			   [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+			      'Flow-Direction' => [2]}],
+		       'QoS-Information' =>
+			   [#{'QoS-Class-Identifier' => 1,
+			      'Max-Requested-Bandwidth-UL' => 6000,
+			      'Max-Requested-Bandwidth-DL' => 8000,
+			      'Guaranteed-Bitrate-UL' => 6000,
+			      'Guaranteed-Bitrate-DL' => 8000,
+			      'Allocation-Retention-Priority' =>
+				  #{'Priority-Level' => 10,
+				    'Pre-emption-Capability' => 1,
+				    'Pre-emption-Vulnerability' => 0}}],
+		       'Metering-Method' => [1],
+		       'Precedence' => [100],
+		       'Online' => [0],
+		       'Offline' => [0]}]},
+    Server ! AAAReq#aaa_request{events = [{pcc, install, [DedRule]}]},
+    receive {'$response', _, _, _, _} -> ok after 5000 -> ct:fail(rar_timeout) end,
+
+    %% The Create Bearer Request is now outstanding and the bearer is still only
+    %% pending -- it has no {qci_arp, _, _} entry yet.
+    CBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = create_bearer_request}, CBReq),
+
+    Server ! AAAReq#aaa_request{events = [{pcc, remove,
+					   [#{'Charging-Rule-Name' => [RuleName]}]}]},
+    receive {'$response', _, _, _, _} -> ok after 5000 -> ct:fail(rar_timeout) end,
+    %% The RAA answers from validation; the apply lands afterwards.
+    ok = wait_until(fun() ->
+			    #{pcc := #pcc_ctx{rules = R}} =
+				smf_context:test_cmd(gtp, CtxKey, info),
+			    not maps:is_key(RuleName, R)
+		    end, 50, 100),
+    %% Removing a rule whose bearer is still only pending yields no Delete Bearer
+    %% Request -- there is no {qci_arp, _, _} entry for detect_removed_bearers/3
+    %% to resolve, which is precisely how the bearer survives rule-less.
+    ?equal(timeout, recv_pdu(Cntl, undefined, 500, fun(Why) -> Why end)),
+
+    %% Answering now installs a bearer with no bound rule, so normalize_bearer/5
+    %% stores qos = undefined.
+    DedEBI = 6,
+    _GtpCDed = complete_create_bearer(Cntl, GtpC, DedEBI, CBReq),
+    #{dedicated := Ded0} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{DedEBI := #ded_bearer{qos = undefined, arp = {10, 1, 0}}}, Ded0),
+
+    %% Now change the subscribed ARP. The fan-out must leave that bearer alone:
+    %% the request carries the default bearer's context and nothing else.
+    {GtpC2, Cmd} = modify_bearer_command({arp_change, 5}, GtpC),
+    UBR = recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok),
+    #gtp{type = update_bearer_request,
+	 ie = #{{v2_bearer_context, 0} := UBRCtxs}} = UBR,
+    ?equal([], bearer_ctxs_for(DedEBI, UBRCtxs)),
+    ?match([_], bearer_ctxs_for(5, UBRCtxs)),
+
+    send_pdu(GtpC2, make_response(UBR, simple, GtpC2)),
+    ?equal({ok, timeout}, recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok)),
+
+    %% ...and its stored ARP is left at the old value, not silently rewritten.
+    #{dedicated := Ded} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{DedEBI := #ded_bearer{qos = undefined, arp = {10, 1, 0}}}, Ded),
+
+    delete_session(GtpC2),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
 
     meck_validate(Config),
     ok.
@@ -7278,6 +7378,11 @@ gx_rar_dedicated_bearer_modify(Config) ->
 complete_create_bearer(Cntl, GtpC, DedEBI) ->
     CBReq = recv_pdu(Cntl, 5000),
     ?match(#gtp{type = create_bearer_request}, CBReq),
+    complete_create_bearer(Cntl, GtpC, DedEBI, CBReq).
+
+%% Same, for a caller that already received the Create Bearer Request because it
+%% needs to do something between issuing it and answering it.
+complete_create_bearer(Cntl, GtpC, DedEBI, CBReq) ->
     #gtp{seq_no = CBSeqNo,
 	 ie = #{{v2_bearer_context, 0} :=
 		    #v2_bearer_context{
