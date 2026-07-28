@@ -189,7 +189,7 @@ handle_request(ReqKey,
     SessionOpts1 = pgw_s5s8:init_session_from_gtp_req(IEs, AAAopts, AccessTunnel, AccessBearer1, SessionOpts0),
     %% SessionOpts = init_session_qos(ReqQoSProfile, SessionOpts1),
 
-    {Verdict, Cause, SessionOpts, Context, BearerMap, PCC4, PCtx,
+    {Verdict, Cause, SessionOpts, Context, BearerMap, _Dedicated, PCC4, PCtx,
      S1, PCF1, C1, A1} =
        case smf_gtp_gsn_lib:create_session(APN, pdn_alloc(PAA), DAF, UpSelInfo,
 					    S0, PCF0, C0, A0,

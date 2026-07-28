@@ -324,6 +324,8 @@ map_reply_ies(IE) ->
 
 map_reply_ie(request_accepted) ->
     #v2_cause{v2_cause = request_accepted};
+map_reply_ie(request_accepted_partially) ->
+    #v2_cause{v2_cause = request_accepted_partially};
 map_reply_ie(not_found) ->
     #v2_cause{v2_cause = context_not_found};
 map_reply_ie({mandatory_ie_missing, {_IE, _Instance}}) ->

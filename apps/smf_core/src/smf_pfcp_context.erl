@@ -13,7 +13,6 @@
 -export([create_session/5,
 	 create_session_async/5,
 	 create_session_result/4,
-	 modify_session/5,
 	 modify_session_async/5,
 	 modify_session_result/2,
 	 delete_session/2,
@@ -54,12 +53,6 @@
 create_session(Handler, PCC, PCtx, Bearer, Ctx)
   when is_record(PCC, pcc_ctx) ->
     session_establishment_request(Handler, PCC, PCtx, Bearer, Ctx).
-
-%% modify_session/5
-modify_session(PCC, URRActions, Opts, BearerMap, PCtx0)
-  when is_record(PCC, pcc_ctx), is_record(PCtx0, pfcp_ctx) ->
-    {PCtx, SxRules} = modification_request_ies(PCC, URRActions, Opts, BearerMap, PCtx0),
-    session_modification_request(PCtx, SxRules).
 
 %% delete_session/2
 delete_session(Reason, PCtx)
@@ -238,8 +231,8 @@ create_session_result(_Other, _Handler, _BearerMap0, _PCtx0) ->
     {error, ?CTX_ERR(?FATAL, system_failure)}.
 
 %% modification_request_ies/5 — build the session modification rules, including the
-%% offline query URR asked for by URRActions. Shared by the blocking modify_session/5
-%% and the async modify_session_async/5; returns the updated PCtx and the rules to send.
+%% offline query URR asked for by URRActions; returns the updated PCtx and the
+%% rules to send.
 modification_request_ies(PCC, URRActions, Opts, BearerMap, PCtx0) ->
     {SxRules0, SxErrors, PCtx} = build_sx_rules(PCC, Opts, PCtx0, BearerMap),
     SxRules =
@@ -264,8 +257,8 @@ session_modification_request(PCtx, _ReqIEs) ->
     %% nothing to do
     {ok, {PCtx, undefined, #{}}}.
 
-%% modify_session_async/5 — same rule build as modify_session/5, but issues the request
-%% asynchronously and returns a request id instead of blocking.
+%% modify_session_async/5 — build the session modification rules and issue the
+%% request asynchronously, returning a request id.
 modify_session_async(PCC, URRActions, Opts, BearerMap, PCtx0)
   when is_record(PCC, pcc_ctx), is_record(PCtx0, pfcp_ctx) ->
     {PCtx, SxRules} = modification_request_ies(PCC, URRActions, Opts, BearerMap, PCtx0),
@@ -278,8 +271,8 @@ session_modification_request_async(PCtx, ReqIEs) when ?is_non_empty_opts(ReqIEs)
 session_modification_request_async(PCtx, _ReqIEs) ->
     {ok, {no_request, PCtx}}.
 
-%% modify_session_result/2 — decode a session modification response (the blocking call's
-%% or the async reply's) into the same shape modify_session/5 returns.
+%% modify_session_result/2 — decode a session modification response into
+%% {PCtx, UsageReport, SessionInfo}.
 modify_session_result(#pfcp{type = session_modification_response,
 			     ie = #{pfcp_cause := 'Request accepted'} = RespIEs}, PCtx) ->
     SessionInfo = session_info(RespIEs),
