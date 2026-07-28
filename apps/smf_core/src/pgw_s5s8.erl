@@ -810,31 +810,42 @@ handle_response({update_dedicated_bearers, Kind, Staged}, timeout,
 		end, {Data, [], []}, Staged),
       AccessTunnel, State);
 
-handle_response({CommandReqKey, OldSOpts},
+%% The single Update Bearer Request a Modify Bearer Command produces: its Bearer
+%% Contexts are the default bearer's plus every dedicated bearer the subscribed-ARP
+%% change fanned out to. One response, so both jobs happen here -- answer the
+%% command from the DEFAULT bearer's per-bearer Cause, then apply the per-bearer
+%% results of the fan-out. Feeding the default's own context through the same fold
+%% is harmless: it is not in Staged, and both commit_staged_descriptor/3 and
+%% apply_bearer_update_result/4 skip an unstaged EBI.
+handle_response({subscribed_qos_update, CommandReqKey, OldSOpts, Staged},
 		#gtp{type = update_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause},
-			    ?'Bearer Contexts to be modified' :=
-				#v2_bearer_context{
-				   group = #{?'Cause' := #v2_cause{v2_cause = BearerCause}}
-				  }} = IEs},
+			    ?'Bearer Contexts to be modified' := BearerCtxs} = IEs},
 		_Request, #{session := connected} = State,
 		#{pfcp := PCtx, tunnels := #{'Access' := AccessTunnel}, bearers := BearerMap,
+		  context := #context{default_bearer_id = DefaultEBI},
 		  aaa_session := S0} = Data) ->
     gtp_context:request_finished(CommandReqKey),
+    DefaultCause = bearer_ctx_cause(DefaultEBI, BearerCtxs),
     AccessBearer = smf_gsn_lib:get_access_default_bearer(BearerMap),
 
-    if Cause =:= request_accepted andalso BearerCause =:= request_accepted ->
+    if Cause =:= request_accepted andalso DefaultCause =:= request_accepted ->
 	    {_URRActions, S1} = update_session_from_gtp_req(IEs, S0, AccessTunnel, AccessBearer),
 	    URRActions = gtp_context:collect_charging_events(OldSOpts, S1),
 	    gtp_context:trigger_usage_report(self(), URRActions, PCtx),
-	    {keep_state, Data#{aaa_session => S1}};
+	    {Data1, RuleNames, DelEBIs} =
+		ie_foldl(fun(BC, Acc) ->
+				 apply_bearer_update_result(subscribed_qos, BC, Staged, Acc)
+			 end, {Data#{aaa_session => S1}, [], []}, BearerCtxs),
+	    finish_update_bearer_failures({Data1, RuleNames, DelEBIs}, AccessTunnel, State);
        true ->
 	    ?LOG(error, "Update Bearer Request failed with ~p/~p",
-			[Cause, BearerCause]),
+			[Cause, DefaultCause]),
 	    delete_context(undefined, link_broken, State, Data)
     end;
 
-handle_response({CommandReqKey, _}, timeout, #gtp{type = update_bearer_request},
+handle_response({subscribed_qos_update, CommandReqKey, _, _}, timeout,
+		#gtp{type = update_bearer_request},
 		#{session := connected} = State, Data) ->
     ?LOG(error, "Update Bearer Request failed with timeout"),
     gtp_context:request_finished(CommandReqKey),
@@ -882,8 +893,10 @@ delete_bearer_done(Data, State, From, Reply) ->
 %% affected dedicated bearer with QCI/GBR/MBR unchanged but the new ARP.
 %% NewARP is the *effective* ARP -- the PCRF's authorized one when it provisioned
 %% a Default-EPS-Bearer-QoS, else the command's (see effective_arp/2).
-fan_out_subscribed_arp_change(OldSOpts, NewARP, AMBR, Context, AccessTunnel,
-			      #{dedicated := Dedicated} = Data) ->
+%% Returns {BearerContextIEs, Staged, Data} for the caller to fold into the one
+%% Update Bearer Request it is already sending. Purely accumulative apart from
+%% the default bearer's {qci_arp} rekey.
+subscribed_arp_fan_out(OldSOpts, NewARP, Context, #{dedicated := Dedicated} = Data) ->
     OldARP = session_default_arp(OldSOpts),
     DefaultEBI = Context#context.default_bearer_id,
     case NewARP =/= undefined andalso OldARP =/= undefined andalso NewARP =/= OldARP of
@@ -896,15 +909,14 @@ fan_out_subscribed_arp_change(OldSOpts, NewARP, AMBR, Context, AccessTunnel,
 			when ARP =:= OldARP, EBI =/= DefaultEBI, is_map(QoS) ->
 			  NewQoS = set_qos_arp(QoS, NewARP),
 			  NewDesc = Desc#ded_bearer{arp = NewARP, qos = NewQoS},
-			  {[{EBI, NewQoS, undefined} | Cs], St#{EBI => NewDesc}};
+			  {[update_bearer_context(EBI, NewQoS, undefined) | Cs],
+			   St#{EBI => NewDesc}};
 		     (_, _, Acc) ->
 			  Acc
 		  end, {[], #{}}, Dedicated),
-	    send_dedicated_bearers_update(subscribed_qos, Contexts, [AMBR],
-					  Staged, AccessTunnel),
-	    rekey_default_qci_arp(DefaultEBI, NewARP, Data);
+	    {Contexts, Staged, rekey_default_qci_arp(DefaultEBI, NewARP, Data)};
 	false ->
-	    Data
+	    {[], #{}, Data}
     end.
 
 %% New ARP carried in the command's Bearer Level QoS, as a {PL, PCI, PVI} tuple.
@@ -1172,11 +1184,6 @@ initiate_create_dedicated_bearer(PTI, QCI, ARP, QoS, FlowInfo, DefaultEBI, Acces
 	    Data
     end.
 
-
-%% Network-initiated single-bearer deactivation: a batch of one, no PTI.
-initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data) ->
-    send_dedicated_bearers_delete([EBI], AccessTunnel),
-    Data.
 
 %% UE-requested single-bearer deactivation (bearer_resource_command
 %% delete_existing_tft, TS 29.274 7.2.9.2): echoes the PTI and sends exactly one
@@ -1562,6 +1569,19 @@ apply_bearer_update_result(_Kind, BearerContext, _Staged, Acc) ->
 	 [BearerContext]),
     Acc.
 
+%% Per-bearer Cause for one EBI within the response's Bearer Contexts, which may
+%% be a single IE or a list. `undefined` when the peer omitted that bearer.
+bearer_ctx_cause(EBI, BearerCtxs) ->
+    ie_foldl(
+      fun(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
+					   #v2_eps_bearer_id{eps_bearer_id = E},
+				       ?'Cause' := #v2_cause{v2_cause = C}}}, _Acc)
+	    when E =:= EBI ->
+	      C;
+	 (_, Acc) ->
+	      Acc
+      end, undefined, BearerCtxs).
+
 commit_staged_descriptor(EBI, Staged, #{dedicated := Ded} = Data) ->
     case maps:find(EBI, Staged) of
 	{ok, Desc} -> Data#{dedicated := Ded#{EBI => Desc}};
@@ -1586,9 +1606,10 @@ finish_update_bearer_failures({Data0, RuleNames, DelEBIs}, AccessTunnel, State) 
 		_  -> report_bearer_failure(RuleNames, Data0)
 	    end,
     %% A subscribed-QoS terminal failure also deletes the bearer (5.4.2.2 step 7).
-    Data = lists:foldl(
-	     fun(EBI, D) -> initiate_delete_dedicated_bearer(EBI, AccessTunnel, D) end,
-	     Data1, DelEBIs),
+    %% One Delete Bearer Request for the whole batch: TS 29.274 7.2.9.2 carries a
+    %% list of EPS Bearer IDs, and handle_response/5 already takes the list back.
+    send_dedicated_bearers_delete(DelEBIs, AccessTunnel),
+    Data = Data1,
     async_m:run_async(reprovision_proc(maps:get(bearers, Data)),
 		      fun(_V, S, D) -> {next_state, S, D} end,
 		      fun(_R, S, D) -> {next_state, S, D} end,
@@ -1789,22 +1810,31 @@ emit_subscribed_qos_update(#{req_key := ReqKey, seq_no := SeqNo, src := Src,
 			     bearer := Bearer, ebi := EBI, old_sopts := OldSOpts},
 			   AuthQoS, AccessTunnel, Context, Data) ->
     AMBR = effective_apn_ambr(AuthQoS, CmdAMBR),
-    Type = update_bearer_request,
-    RequestIEs0 =
-	[AMBR,
-	 #v2_bearer_context{group = effective_bearer_group(AuthQoS, Bearer, EBI)}],
-    RequestIEs = gtp_v2_c:build_recovery(Type, AccessTunnel, false, RequestIEs0),
-    Msg = msg(AccessTunnel, Type, RequestIEs),
-    send_request(
-      AccessTunnel, Src, IP, Port, ?T3, ?N3, Msg#gtp{seq_no = SeqNo}, {ReqKey, OldSOpts}),
 
     %% TS 23.401 5.4.2.2 step 5: "If the subscribed ARP parameter has been
     %% changed, the PDN GW shall also modify all dedicated EPS bearers having
     %% the previously subscribed ARP value unless superseded by PCRF decision."
     %% The "unless superseded" half is what effective_arp/2 implements: the ARP
     %% fanned out is the authorized one when the PCRF provisioned it.
-    fan_out_subscribed_arp_change(OldSOpts, effective_arp(AuthQoS, Bearer), AMBR,
-				  Context, AccessTunnel, Data).
+    %%
+    %% Step 5 is one modification of the PDN connection, and TS 29.274 7.2.15
+    %% carries "Several IEs with this type ... to represent a list of Bearers",
+    %% so the default bearer and every fanned-out dedicated bearer ride in ONE
+    %% Update Bearer Request -- not one for the default and a second for the rest.
+    {DedCtxs, Staged, Data1} =
+	subscribed_arp_fan_out(OldSOpts, effective_arp(AuthQoS, Bearer), Context, Data),
+
+    Type = update_bearer_request,
+    RequestIEs0 =
+	[AMBR,
+	 #v2_bearer_context{group = effective_bearer_group(AuthQoS, Bearer, EBI)}
+	 | DedCtxs],
+    RequestIEs = gtp_v2_c:build_recovery(Type, AccessTunnel, false, RequestIEs0),
+    Msg = msg(AccessTunnel, Type, RequestIEs),
+    send_request(
+      AccessTunnel, Src, IP, Port, ?T3, ?N3, Msg#gtp{seq_no = SeqNo},
+      {subscribed_qos_update, ReqKey, OldSOpts, Staged}),
+    Data1.
 
 %% Authorized APN-AMBR wins over the command's. Session values are bps, the IE
 %% is kbps (cf. copy_qos_to_session/2, which scales the other way).
