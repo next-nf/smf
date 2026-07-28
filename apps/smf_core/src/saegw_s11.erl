@@ -17,7 +17,7 @@
 	 handle_request/5, handle_response/5,
 	 handle_event/4, terminate/3]).
 
--export([delete_context/4, close_context/5]).
+-export([delete_context/4, close_context_proc/5]).
 -export([handle_dedicated_bearer_changes/3]).
 -ignore_xref([handle_dedicated_bearer_changes/3]).
 
@@ -508,8 +508,8 @@ encode_paa(IPv4, IPv6) when IPv4 /= undefined, IPv6 /= undefined ->
 encode_paa(Type, IPv4, IPv6) ->
     #v2_pdn_address_allocation{type = Type, address = <<IPv6/binary, IPv4/binary>>}.
 
-close_context(_Side, Reason, _Notify, _State, Data) ->
-    smf_gtp_gsn_lib:close_context(?API, Reason, Data).
+close_context_proc(_Side, Reason, _Notify, _State, Data) ->
+    smf_gtp_gsn_lib:close_context_proc(?API, Reason, Data).
 
 handle_dedicated_bearer_changes(_OldPCC, _NewPCC, Data) ->
     Data.

@@ -17,7 +17,7 @@
 	 handle_request/5, handle_response/5,
 	 handle_event/4, terminate/3]).
 
--export([delete_context/4, close_context/5]).
+-export([delete_context/4, close_context_proc/5]).
 -export([init_session/4, init_session_from_gtp_req/5, update_session_from_gtp_req/4]).
 -export([handle_dedicated_bearer_changes/3]).
 -ignore_xref([handle_dedicated_bearer_changes/3]).	% called via Interface variable
@@ -2077,8 +2077,8 @@ encode_paa(IPv4, IPv6) when IPv4 /= undefined, IPv6 /= undefined ->
 encode_paa(Type, IPv4, IPv6) ->
     #v2_pdn_address_allocation{type = Type, address = <<IPv6/binary, IPv4/binary>>}.
 
-close_context(_Side, Reason, _Notify, _State, Data) ->
-    smf_gtp_gsn_lib:close_context(?API, Reason, Data).
+close_context_proc(_Side, Reason, _Notify, _State, Data) ->
+    smf_gtp_gsn_lib:close_context_proc(?API, Reason, Data).
 
 map_attr('APN', #{?'Access Point Name' := #v2_access_point_name{apn = APN}}) ->
     iolist_to_binary(lists:join($., APN));
