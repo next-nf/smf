@@ -80,7 +80,8 @@
 	  qos		:: map() | undefined,	%% canonical aggregate QoS-Information (Σ GBR/MBR)
 	  rules = []	:: [binary()],		%% bound Charging-Rule-Names, sorted
 	  tft = []	:: [map()],		%% smf_tft filter maps with assigned TFT ids
-	  sdf_to_pf = #{} :: #{binary() => 0..15},%% Gx SDF filter-id -> TFT packet-filter-id
+	  sdf_to_pf = #{} :: #{binary() => 0..15 | ambiguous},%% Gx SDF filter-id -> TFT packet-filter-id
+					%% (`ambiguous`: PCRF reused the id, see smf_tft)
 	  charging_id	:: non_neg_integer() | undefined
 	 }).
 
