@@ -137,7 +137,7 @@ init(_Opts, Data0) ->
     PCC = #pcc_ctx{offline_charging_profile = OCPcfg},
     Data = Data0#{'Version' => v2, aaa_session => AAASession, pcf => PCF,
 		  charging => Charging, aaa_auth => AAAAuth, pcc => PCC,
-		  pending_bearers => #{}, retry_bearers => #{},
+		  pending_bearers => #{}, retry_bearers => #{}, retry_updates => #{},
 		  dedicated => #{}},
     {ok, smf_context:init_state(), Data}.
 
@@ -678,7 +678,8 @@ modify_bearer_ok({PCtx, SessionInfo}, State, Data,
 
     DataNew0 = Data#{pfcp => PCtx, tunnels => Tunnels#{'Access' => AccessTunnel},
 		     bearers => BearerMap, aaa_session => maps:merge(S1, SessionInfo)},
-    DataNew = retry_pending_bearers(AccessTunnel, DataNew0),
+    DataNew = retry_pending_updates(
+		AccessTunnel, retry_pending_bearers(AccessTunnel, DataNew0)),
     Actions = context_idle_action([], Context),
     {next_state, State, DataNew, Actions}.
 
@@ -798,7 +799,7 @@ handle_response({delete_dedicated_bearers, _EBIs}, timeout,
     ?LOG(error, "batched Delete Dedicated Bearer Request timed out"),
     keep_state_and_data;
 
-handle_response({update_dedicated_bearers, Kind, Staged},
+handle_response({update_dedicated_bearers, Kind, Staged, Sent},
 		#gtp{type = update_bearer_response,
 		     ie = #{?'Bearer Contexts' := BearerCtxs}},
 		_Request, #{session := connected} = State,
@@ -812,11 +813,11 @@ handle_response({update_dedicated_bearers, Kind, Staged},
     %% carries a list of rule names in one Charging-Rule-Report -- so per-bearer
     %% calls meant N PFCP requests and N CCR-Updates for one response (#81).
     {Data1, RuleNames, DelEBIs} =
-	ie_foldl(fun(BC, Acc) -> apply_bearer_update_result(Kind, BC, Staged, Acc) end,
+	ie_foldl(fun(BC, Acc) -> apply_bearer_update_result(Kind, BC, Staged, Sent, Acc) end,
 		 {Data, [], []}, BearerCtxs),
     finish_update_bearer_failures({Data1, RuleNames, DelEBIs}, AccessTunnel, State);
 
-handle_response({update_dedicated_bearers, Kind, Staged},
+handle_response({update_dedicated_bearers, Kind, Staged, _Sent},
 		#gtp{type = update_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause}}},
 		_Request, #{session := connected} = State,
@@ -845,7 +846,7 @@ handle_response({update_dedicated_bearers, Kind, Staged},
 	      AccessTunnel, State)
     end;
 
-handle_response({update_dedicated_bearers, Kind, Staged}, timeout,
+handle_response({update_dedicated_bearers, Kind, Staged, _Sent}, timeout,
 		#gtp{type = update_bearer_request}, #{session := connected} = State,
 		#{tunnels := #{'Access' := AccessTunnel}} = Data) ->
     ?LOG(error, "batched Update Bearer Request timed out; ~p bearer(s) affected",
@@ -863,7 +864,7 @@ handle_response({update_dedicated_bearers, Kind, Staged}, timeout,
 %% results of the fan-out. Feeding the default's own context through the same fold
 %% is harmless: it is not in Staged, and both commit_staged_descriptor/3 and
 %% apply_bearer_update_result/4 skip an unstaged EBI.
-handle_response({subscribed_qos_update, CommandReqKey, OldSOpts, Staged},
+handle_response({subscribed_qos_update, CommandReqKey, OldSOpts, Staged, Sent},
 		#gtp{type = update_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause},
 			    ?'Bearer Contexts' := BearerCtxs} = IEs},
@@ -881,7 +882,7 @@ handle_response({subscribed_qos_update, CommandReqKey, OldSOpts, Staged},
 	    gtp_context:trigger_usage_report(self(), URRActions, PCtx),
 	    {Data1, RuleNames, DelEBIs} =
 		ie_foldl(fun(BC, Acc) ->
-				 apply_bearer_update_result(subscribed_qos, BC, Staged, Acc)
+				 apply_bearer_update_result(subscribed_qos, BC, Staged, Sent, Acc)
 			 end, {Data#{aaa_session => S1}, [], []}, BearerCtxs),
 	    finish_update_bearer_failures({Data1, RuleNames, DelEBIs}, AccessTunnel, State);
        true ->
@@ -890,7 +891,7 @@ handle_response({subscribed_qos_update, CommandReqKey, OldSOpts, Staged},
 	    delete_context(undefined, link_broken, State, Data)
     end;
 
-handle_response({subscribed_qos_update, CommandReqKey, _, _}, timeout,
+handle_response({subscribed_qos_update, CommandReqKey, _, _, _}, timeout,
 		#gtp{type = update_bearer_request},
 		#{session := connected} = State, Data) ->
     ?LOG(error, "Update Bearer Request failed with timeout"),
@@ -947,12 +948,12 @@ subscribed_arp_fan_out(OldSOpts, NewARP, Context, #{dedicated := Dedicated} = Da
     DefaultEBI = Context#context.default_bearer_id,
     case NewARP =/= undefined andalso OldARP =/= undefined andalso NewARP =/= OldARP of
 	true ->
-	    {Contexts, Staged} =
+	    {Sent, Staged} =
 		maps:fold(fan_out_arp(OldARP, NewARP, DefaultEBI, _, _, _),
-			  {[], #{}}, Dedicated),
-	    {Contexts, Staged, rekey_default_qci_arp(DefaultEBI, NewARP, Data)};
+			  {#{}, #{}}, Dedicated),
+	    {Sent, Staged, rekey_default_qci_arp(DefaultEBI, NewARP, Data)};
 	false ->
-	    {[], #{}, Data}
+	    {#{}, #{}, Data}
     end.
 
 %% Fan the re-authorized ARP out to one dedicated bearer, or decline to.
@@ -988,7 +989,7 @@ fan_out_arp(_OldARP, NewARP, _DefaultEBI, EBI, #ded_bearer{qos = undefined}, Acc
 fan_out_arp(_OldARP, NewARP, _DefaultEBI, EBI, #ded_bearer{qos = QoS} = Desc, {Cs, St}) ->
     NewQoS = set_qos_arp(QoS, NewARP),
     NewDesc = Desc#ded_bearer{arp = NewARP, qos = NewQoS},
-    {[update_bearer_context(EBI, NewQoS, undefined) | Cs], St#{EBI => NewDesc}}.
+    {Cs#{EBI => update_bearer_context(EBI, NewQoS, undefined)}, St#{EBI => NewDesc}}.
 
 %% New ARP carried in the command's Bearer Level QoS, as a {PL, PCI, PVI} tuple.
 command_bearer_arp(#{?'Bearer Level QoS' :=
@@ -1021,13 +1022,23 @@ set_qos_arp(QoS, NewARP) ->
 send_dedicated_bearers_update(_Kind, [], _ExtraIEs, _Staged, _AccessTunnel) ->
     ok;
 send_dedicated_bearers_update(Kind, Contexts, ExtraIEs, Staged, AccessTunnel) ->
-    BearerCtxIEs = [update_bearer_context(EBI, QoS, FlowInfo)
-		    || {EBI, QoS, FlowInfo} <- Contexts],
+    Sent = #{EBI => update_bearer_context(EBI, QoS, FlowInfo)
+	     || {EBI, QoS, FlowInfo} <- Contexts},
+    send_bearer_update_ies(Kind, Sent, ExtraIEs, Staged, AccessTunnel).
+
+%% Emit one batched Update Bearer Request from already-built Bearer Contexts,
+%% carrying them in the request tag so a temporarily-rejected bearer can be
+%% re-sent verbatim on the next reachability signal (#34) without rebuilding the
+%% QoS/TFT from a descriptor that may have moved on since.
+send_bearer_update_ies(_Kind, Sent, _ExtraIEs, _Staged, _AccessTunnel)
+  when map_size(Sent) =:= 0 ->
+    ok;
+send_bearer_update_ies(Kind, Sent, ExtraIEs, Staged, AccessTunnel) ->
     Type = update_bearer_request,
-    RequestIEs0 = ExtraIEs ++ BearerCtxIEs,
+    RequestIEs0 = ExtraIEs ++ maps:values(Sent),
     RequestIEs = gtp_v2_c:build_recovery(Type, AccessTunnel, false, RequestIEs0),
     send_request(AccessTunnel, ?T3, ?N3, Type, RequestIEs,
-		 {update_dedicated_bearers, Kind, Staged}).
+		 {update_dedicated_bearers, Kind, Staged, Sent}).
 
 update_bearer_context(EBI, QoS, FlowInfo) ->
     Group0 = [#v2_eps_bearer_id{eps_bearer_id = EBI}, encode_bearer_level_qos(QoS)],
@@ -1205,8 +1216,7 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
     ModifiedBearers = smf_gsn_lib:detect_modified_bearers(NewPCC, Dedicated),
     Contexts = [{EBI, QoS, FlowInfo}
 		|| {EBI, QoS, FlowInfo, _Desc} <- ModifiedBearers],
-    Staged = maps:from_list([{EBI, Desc}
-			     || {EBI, _QoS, _FlowInfo, Desc} <- ModifiedBearers]),
+    Staged = #{EBI => Desc || {EBI, _QoS, _FlowInfo, Desc} <- ModifiedBearers},
     send_dedicated_bearers_update(rule_change, Contexts, [], Staged, AccessTunnel),
     RemovedEBIs0 = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
     %% The default bearer's EBI can appear here (its {qci_arp,QCI,ARP} entry
@@ -1607,21 +1617,26 @@ apply_bearer_update_result(_Kind,
 			   #v2_bearer_context{group = #{
 			       ?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI},
 			       ?'Cause' := #v2_cause{v2_cause = request_accepted}}},
-			   Staged, {Data, Rules, DelEBIs}) ->
+			   Staged, _Sent, {Data, Rules, DelEBIs}) ->
     {commit_staged_descriptor(EBI, Staged, Data), Rules, DelEBIs};
 apply_bearer_update_result(Kind,
 			   #v2_bearer_context{group = #{
 			       ?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI},
 			       ?'Cause' := #v2_cause{v2_cause = Cause}}},
-			   Staged, Acc) ->
+			   Staged, Sent, {Data, _, _} = Acc) ->
     case smf_gsn_lib:bearer_update_cause_class(Cause) of
 	temporary ->
-	    %% TODO(#34): re-attempt the Update when the UE is next reachable
-	    %% (mirroring the Create-path power-saving retry); for now hold the
-	    %% change without removing the rule or deleting the bearer (dossier §8).
+	    %% TS 23.401 5.4.1 step 3/12 (dossier dedicated-bearers-eps.md §8):
+	    %% "UE temporarily not reachable due to power saving" and "temporarily
+	    %% rejected due to handover/TAU/RAU in progress" call for re-attempting
+	    %% the SAME procedure once the UE is reachable, not for removing the
+	    %% rule or deleting the bearer. Hold the exact Bearer Context that was
+	    %% sent, plus its staged descriptor, and re-emit on the next Modify
+	    %% Bearer Request -- mirroring the Create-path retry_pending_bearers/2.
 	    ?LOG(warning, "Update Bearer Request for dedicated bearer ~p temporarily "
-		 "rejected (~p); change not applied this round", [EBI, Cause]),
-	    Acc;
+		 "rejected (~p); holding it for retry when the UE is reachable",
+		 [EBI, Cause]),
+	    setelement(1, Acc, stage_update_retry(Kind, EBI, Staged, Sent, Data));
 	terminal when is_map_key(EBI, Staged) ->
 	    stage_update_bearer_failure(Kind, EBI, Cause, Acc);
 	terminal ->
@@ -1633,12 +1648,56 @@ apply_bearer_update_result(Kind,
 		 [EBI, Cause]),
 	    Acc
     end;
-apply_bearer_update_result(_Kind, BearerContext, _Staged, Acc) ->
+apply_bearer_update_result(_Kind, BearerContext, _Staged, _Sent, Acc) ->
     %% A Bearer Context missing an EPS Bearer ID or Cause is malformed; skip it
     %% without aborting processing of the batch's remaining contexts.
     ?LOG(warning, "malformed Bearer Context in Update Bearer Response, skipping: ~p",
 	 [BearerContext]),
     Acc.
+
+%% Hold one temporarily-rejected bearer for retry: the Bearer Context exactly as
+%% sent, its staged descriptor, and the Kind that decides the failure policy when
+%% the retry is answered. Keyed by EBI, so a bearer rejected twice is held once.
+stage_update_retry(Kind, EBI, Staged, Sent, Data) ->
+    case Sent of
+	#{EBI := BearerCtx} ->
+	    Retry = maps:get(retry_updates, Data, #{}),
+	    Desc = maps:get(EBI, Staged, undefined),
+	    Data#{retry_updates => Retry#{EBI => {Kind, BearerCtx, Desc}}};
+	#{} ->
+	    %% The peer named a bearer this request did not carry -- nothing to
+	    %% re-send. Treated as held, not failed: it is still a temporary cause.
+	    ?LOG(warning, "temporary reject for bearer ~p which this Update Bearer "
+		 "Request did not carry; nothing to retry", [EBI]),
+	    Data
+    end.
+
+%% A Modify Bearer Request signals the UE is reachable again (TS 23.401 5.4.1
+%% step 12). Re-emit the Update Bearer Requests held for temporarily-rejected
+%% bearers, then clear the hold. Grouped by Kind because that is what selects the
+%% failure policy for the answer; in practice there is one group.
+%%
+%% Always the network-initiated batched form, even for bearers first sent by the
+%% subscribed-QoS path: that request also answered a Modify Bearer Command, and
+%% the command was answered on the first response. A retry must not answer it
+%% again.
+retry_pending_updates(AccessTunnel, Data) ->
+    Retry = maps:get(retry_updates, Data, #{}),
+    ByKind =
+	maps:fold(
+	  fun(EBI, {Kind, BearerCtx, Desc}, Acc) ->
+		  {Sent0, Staged0} = maps:get(Kind, Acc, {#{}, #{}}),
+		  Staged = case Desc of
+			       undefined -> Staged0;
+			       _         -> Staged0#{EBI => Desc}
+			   end,
+		  Acc#{Kind => {Sent0#{EBI => BearerCtx}, Staged}}
+	  end, #{}, Retry),
+    maps:foreach(
+      fun(Kind, {Sent, Staged}) ->
+	      send_bearer_update_ies(Kind, Sent, [], Staged, AccessTunnel)
+      end, ByKind),
+    Data#{retry_updates => #{}}.
 
 %% Per-bearer Cause for one EBI within the response's Bearer Contexts, which may
 %% be a single IE or a list. `undefined` when the peer omitted that bearer.
@@ -1892,19 +1951,19 @@ emit_subscribed_qos_update(#{req_key := ReqKey, seq_no := SeqNo, src := Src,
     %% carries "Several IEs with this type ... to represent a list of Bearers",
     %% so the default bearer and every fanned-out dedicated bearer ride in ONE
     %% Update Bearer Request -- not one for the default and a second for the rest.
-    {DedCtxs, Staged, Data1} =
+    {DedSent, Staged, Data1} =
 	subscribed_arp_fan_out(OldSOpts, effective_arp(AuthQoS, Bearer), Context, Data),
 
     Type = update_bearer_request,
     RequestIEs0 =
 	[AMBR,
 	 #v2_bearer_context{group = effective_bearer_group(AuthQoS, Bearer, EBI)}
-	 | DedCtxs],
+	 | maps:values(DedSent)],
     RequestIEs = gtp_v2_c:build_recovery(Type, AccessTunnel, false, RequestIEs0),
     Msg = msg(AccessTunnel, Type, RequestIEs),
     send_request(
       AccessTunnel, Src, IP, Port, ?T3, ?N3, Msg#gtp{seq_no = SeqNo},
-      {subscribed_qos_update, ReqKey, OldSOpts, Staged}),
+      {subscribed_qos_update, ReqKey, OldSOpts, Staged, DedSent}),
     Data1.
 
 %% Authorized APN-AMBR wins over the command's. Session values are bps, the IE
