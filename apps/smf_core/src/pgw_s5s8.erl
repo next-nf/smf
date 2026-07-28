@@ -817,7 +817,7 @@ handle_response({update_dedicated_bearers, Kind, Staged, Sent},
 		 {Data, [], []}, BearerCtxs),
     finish_update_bearer_failures({Data1, RuleNames, DelEBIs}, AccessTunnel, State);
 
-handle_response({update_dedicated_bearers, Kind, Staged, Sent},
+handle_response({update_dedicated_bearers, Kind, Staged, _Sent},
 		#gtp{type = update_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause}}},
 		_Request, #{session := connected} = State,
@@ -826,7 +826,6 @@ handle_response({update_dedicated_bearers, Kind, Staged, Sent},
     %% (e.g. context_not_found, TS 29.274 §7.2.16) -- there is nothing to fold
     %% per-bearer, so apply the message-level Cause class to every EBI staged
     %% for this batch instead of crashing with function_clause.
-    _ = Sent,
     ?LOG(warning, "batched Update Bearer Response carried no Bearer Contexts; "
 	 "applying message-level Cause ~p to ~p staged bearer(s)",
 	 [Cause, map_size(Staged)]),
@@ -1023,8 +1022,8 @@ set_qos_arp(QoS, NewARP) ->
 send_dedicated_bearers_update(_Kind, [], _ExtraIEs, _Staged, _AccessTunnel) ->
     ok;
 send_dedicated_bearers_update(Kind, Contexts, ExtraIEs, Staged, AccessTunnel) ->
-    Sent = maps:from_list([{EBI, update_bearer_context(EBI, QoS, FlowInfo)}
-			   || {EBI, QoS, FlowInfo} <- Contexts]),
+    Sent = #{EBI => update_bearer_context(EBI, QoS, FlowInfo)
+	     || {EBI, QoS, FlowInfo} <- Contexts},
     send_bearer_update_ies(Kind, Sent, ExtraIEs, Staged, AccessTunnel).
 
 %% Emit one batched Update Bearer Request from already-built Bearer Contexts,
@@ -1217,8 +1216,7 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
     ModifiedBearers = smf_gsn_lib:detect_modified_bearers(NewPCC, Dedicated),
     Contexts = [{EBI, QoS, FlowInfo}
 		|| {EBI, QoS, FlowInfo, _Desc} <- ModifiedBearers],
-    Staged = maps:from_list([{EBI, Desc}
-			     || {EBI, _QoS, _FlowInfo, Desc} <- ModifiedBearers]),
+    Staged = #{EBI => Desc || {EBI, _QoS, _FlowInfo, Desc} <- ModifiedBearers},
     send_dedicated_bearers_update(rule_change, Contexts, [], Staged, AccessTunnel),
     RemovedEBIs0 = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
     %% The default bearer's EBI can appear here (its {qci_arp,QCI,ARP} entry
