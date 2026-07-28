@@ -186,7 +186,7 @@ handle_request(ReqKey,
     SessionOpts2 = init_session_qos(IEs, SessionOpts1),
 
 
-    {Verdict, Cause, SessionOpts, Context, BearerMap, PCC4, PCtx,
+    {Verdict, Cause, SessionOpts, Context, BearerMap, _Dedicated, PCC4, PCtx,
      S1, PCF1, C1, A1} =
 	case smf_gtp_gsn_lib:create_session(APN, pdp_alloc(EUA), DAF, UpSelInfo,
 					     S0, PCF0, C0, A0,

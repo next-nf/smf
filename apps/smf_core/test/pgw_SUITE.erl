@@ -2114,30 +2114,50 @@ simple_session_request(Config) ->
 create_session_multi_bearer() ->
     [{doc, "Check that a CSR with multiple bearer contexts creates all bearers"}].
 create_session_multi_bearer(Config) ->
+    SMRCount =
+	fun() ->
+		length([X || #pfcp{type = session_modification_request} = X
+				 <- smf_test_sx_up:history('pgw-u01')])
+	end,
+    SMRBefore = SMRCount(),
+
     {GtpC, _, Response} = create_session(multi_bearer, Config),
 
-    %% response must contain bearer contexts for both EBI 5 and EBI 6
-    %% multiple bearers share instance 0 and are stored as a list
+    %% The CSR asks for EBI 5 (default) and EBI 6 (QCI 1, ARP {2,1,0}). The PCRF
+    %% installs only rulebase m2m0001, whose rules carry no QoS-Information, so
+    %% every rule binds to the default bearer and NOTHING binds to EBI 6.
+    %%
+    %% A bearer with no PCC rule (or none that survived the charging decision)
+    %% is not established: it gets no PDR, so the UPF is never told about it and
+    %% the response must reject it rather than hand back an F-TEID the UPF has
+    %% never heard of. TS 29.274 7.2.2 carries the not-created bearers as
+    %% Bearer Context at instance 1 with a per-bearer Cause.
     ?match(
        #gtp{type = create_session_response,
-	    ie = #{{v2_bearer_context, 0} := [_,_]}},
+	    ie = #{{v2_bearer_context, 0} := #v2_bearer_context{},
+		   {v2_bearer_context, 1} :=
+		       #v2_bearer_context{
+			  group = #{{v2_cause, 0} :=
+					#v2_cause{v2_cause = no_resources_available},
+				    {v2_eps_bearer_id, 0} :=
+					#v2_eps_bearer_id{eps_bearer_id = 6}}}}},
        Response),
 
-    %% The additional (non-default) bearer EBI 6 must get a canonical descriptor
-    %% built from its CSR Bearer Level QoS, so ARP fan-out / modified-bearer
-    %% detection cover it. The default bearer (EBI 5) is not a dedicated bearer.
     CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
-    #{dedicated := Dedicated} = smf_context:test_cmd(gtp, CtxKey, info),
-    %% CSR Bearer Level QoS for EBI 6 is 1000/2000 kbps MBR, 500/1000 kbps GBR;
-    %% the descriptor stores bps, so the map must carry the *1000 values.
-    ?match(#{6 := #ded_bearer{ebi = 6, qci = 1, arp = {2, 1, 0},
-			      qos = #{'QoS-Class-Identifier' := 1,
-				      'Max-Requested-Bandwidth-UL' := 1000000,
-				      'Max-Requested-Bandwidth-DL' := 2000000,
-				      'Guaranteed-Bitrate-UL' := 500000,
-				      'Guaranteed-Bitrate-DL' := 1000000}}},
-	   Dedicated),
+    #{dedicated := Dedicated, bearers := BearerMap} =
+	smf_context:test_cmd(gtp, CtxKey, info),
+
+    %% A rejected bearer leaves no trace in the context: no bearer map entry, no
+    %% {qci_arp, _, _} key that a later PCC rule could bind to, no descriptor.
+    ?assertNot(maps:is_key({'Access', 6}, BearerMap)),
+    ?assertNot(maps:is_key({qci_arp, 1, {2, 1, 0}}, BearerMap)),
+    ?assertNot(maps:is_key(6, Dedicated)),
     ?assertNot(maps:is_key(5, Dedicated)),
+
+    %% The whole PDN connection is provisioned by the one Session Establishment
+    %% of the create-session exchange. Staging the extra bearers afterwards used
+    %% to cost a second PFCP request; there must be none.
+    ?equal(SMRBefore, SMRCount()),
 
     delete_session(GtpC),
 

@@ -235,26 +235,31 @@ handle_request(ReqKey,
     SessionOpts1 = init_session_from_gtp_req(IEs, AAAopts, AccessTunnel, AccessBearer1, SessionOpts0),
     %% SessionOpts = init_session_qos(ReqQoSProfile, SessionOpts1),
 
-    {Verdict, Cause, SessionOpts, Context, BearerMap, PCC4, PCtx,
+    %% Additional bearer contexts (handover) are staged into the bearer map from
+    %% inside create_session, before the PFCP Session Establishment, so the whole
+    %% PDN connection is provisioned in one exchange.
+    StageExtra = stage_additional_bearers(IEs, Context1),
+
+    {Verdict, Cause, SessionOpts, Context, BearerMap, ExtraBearers, PCC4, PCtx,
      S1, PCF1, C1, A1} =
        case smf_gtp_gsn_lib:create_session(APN, pdn_alloc(PAA), DAF, UpSelInfo,
 					    S0, PCF0, C0, A0,
-					    SessionOpts1, Context1, AccessTunnel, AccessBearer1, PCC0) of
+					    SessionOpts1, Context1, AccessTunnel, AccessBearer1,
+					    PCC0, StageExtra) of
 	   {ok, Result} -> Result;
 	   {error, Err} -> throw(Err)
        end,
 
-    FinalData =
+    #{dedicated := Dedicated, rejected := Rejected} = ExtraBearers,
+    FinalData1 =
 	Data#{context => Context, pfcp => PCtx, pcc => PCC4,
 	      tunnels => Tunnels#{'Access' => AccessTunnel}, bearers => BearerMap,
+	      dedicated => maps:merge(maps:get(dedicated, Data, #{}), Dedicated),
 	      aaa_session => S1, pcf => PCF1, charging => C1, aaa_auth => A1},
-
-    %% Process additional bearer contexts (instance > 0) for handover scenarios
-    FinalData1 = process_additional_bearer_contexts(IEs, AccessTunnel, FinalData),
 
     ResponseIEs = create_session_response(Cause, SessionOpts, IEs,
 					  AccessTunnel,
-					  maps:get(bearers, FinalData1),
+					  BearerMap, Rejected,
 					  Context),
     Response = response(create_session_response, AccessTunnel, ResponseIEs, Request),
     gtp_context:send_response(ReqKey, Request, Response),
@@ -1032,71 +1037,43 @@ find_bearer_by_ebi(EBI, [_ | Rest]) ->
 %% Process additional bearer contexts in CSR.
 %% In GTPv2, multiple bearers all use the same instance (0); put_ie stores them as a list.
 %% Skip the default bearer (already handled by create_session) and install the rest.
-process_additional_bearer_contexts(IEs, AccessTunnel,
-                                   #{context := #context{default_bearer_id = DefaultEBI}} = Data) ->
+%% Build the staging fun smf_gtp_gsn_lib:create_session/14 applies to the bearer
+%% map just before the PFCP Session Establishment. A Create Session Request may
+%% carry several Bearer Contexts to be created (handover); all of them belong in
+%% the one establishment exchange, so this only accumulates -- nothing here talks
+%% to the UPF.
+stage_additional_bearers(IEs, #context{default_bearer_id = DefaultEBI}) ->
     BearerCtxs = case IEs of
                      #{?'Bearer Contexts to be created' := L} when is_list(L) -> L;
                      #{?'Bearer Contexts to be created' := S} -> [S];
                      _ -> []
                  end,
-    %% Stage every additional bearer first, then re-provision the UPF ONCE.
-    %% modify_session/5 rebuilds the complete PFCP rule set from the final PCC
-    %% context and bearer map and puts only the diff on the wire, so a single
-    %% call after the fold carries every bearer. Calling it per bearer would
-    %% send N Session Modification Requests and walk the UPF through
-    %% intermediate rule sets (#79).
-    Staged =
-	lists:foldl(
-	  fun(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
-                                           #v2_eps_bearer_id{eps_bearer_id = EBI}} = Group}, D)
-		when EBI /= DefaultEBI ->
-		  stage_additional_bearer(Group, AccessTunnel, D);
-	     (_, D) ->
-		  D
-	  end, Data, BearerCtxs),
-    reprovision_bearers(Staged).
-
-%% Re-provision the UPF for an accumulated bearer-map / PCC change. A failed
-%% modification is non-fatal here as on every other bearer path: the
-%% control-plane change stands and only the new PCtx is dropped.
-reprovision_bearers(#{bearers := BearerMap, pfcp := PCtx0, pcc := PCC} = Data) ->
-    case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap, PCtx0) of
-	{ok, {PCtx, _, _}} -> Data#{pfcp := PCtx};
-	{error, _}         -> Data
+    fun(BearerMap, _Context) ->
+	    lists:foldl(
+	      fun(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
+						   #v2_eps_bearer_id{eps_bearer_id = EBI}} = Group},
+		  Acc) when EBI /= DefaultEBI ->
+		      stage_additional_bearer(EBI, Group, Acc);
+		 (_, Acc) ->
+		      Acc
+	      end, {BearerMap, #{}, []}, BearerCtxs)
     end.
 
-%% Stage one additional bearer into the bearer map and descriptor table. Pure
-%% apart from the TEI allocation — no PFCP round trip; the caller re-provisions
-%% once for the whole batch.
-stage_additional_bearer(BearerGroup, _AccessTunnel,
-			#{bearers := BearerMap0, pfcp := PCtx0} = Data) ->
+%% Stage one additional bearer into the bearer map and descriptor table. Purely
+%% accumulative: it fills in the REMOTE side from the request and names its key,
+%% leaving the local F-TEID to smf_gtp_gsn_lib:create_session/14 -- which assigns
+%% it exactly as it does the default bearer's, so an FTUP node allocates for this
+%% bearer too, in the same establishment exchange.
+stage_additional_bearer(EBI, BearerGroup, {BearerMap0, Ded0, Keys}) ->
+    Key = {'Access', EBI},
+    AccessBearer = update_bearer_from_response(BearerGroup, #bearer{interface = 'Access'}),
+    BearerMap1 = BearerMap0#{Key => AccessBearer},
     case BearerGroup of
-        #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} ->
-            DefaultBearer = smf_gsn_lib:get_access_default_bearer(BearerMap0),
-            #bearer{vrf = VRF, local = #fq_teid{ip = PgwUIP}} = DefaultBearer,
-            case smf_tei_mngr:alloc_tei(PCtx0) of
-                {ok, DataTEI} ->
-                    AccessBearer0 = #bearer{interface = 'Access', vrf = VRF,
-                                            local = #fq_teid{ip = PgwUIP, teid = DataTEI}},
-                    AccessBearer = update_bearer_from_response(BearerGroup, AccessBearer0),
-                    BearerMap1 = BearerMap0#{{'Access', EBI} => AccessBearer},
-                    Ded0 = maps:get(dedicated, Data, #{}),
-                    {BearerMap, Dedicated} = case BearerGroup of
-                        #{?'Bearer Level QoS' :=
-                              #v2_bearer_level_quality_of_service{} = BLQoS} ->
-                            #ded_bearer{qci = QCI, arp = ARP} = Desc =
-                                ded_bearer_from_blqos(EBI, BLQoS),
-                            {BearerMap1#{{qci_arp, QCI, ARP} => EBI},
-                             Ded0#{EBI => Desc}};
-                        _ ->
-                            {BearerMap1, Ded0}
-                    end,
-                    Data#{bearers := BearerMap, dedicated := Dedicated};
-                _ ->
-                    Data
-            end;
-        _ ->
-            Data
+	#{?'Bearer Level QoS' := #v2_bearer_level_quality_of_service{} = BLQoS} ->
+	    #ded_bearer{qci = QCI, arp = ARP} = Desc = ded_bearer_from_blqos(EBI, BLQoS),
+	    {BearerMap1#{{qci_arp, QCI, ARP} => EBI}, Ded0#{EBI => Desc}, [Key | Keys]};
+	_ ->
+	    {BearerMap1, Ded0, [Key | Keys]}
     end.
 
 create_dedicated_bearer(PTI, LinkedEBI, QoS, TFTBin, ChId, AccessBearer, Tunnel) ->
@@ -2649,6 +2626,18 @@ change_reporting_action(_, 'UTRAN', #{'rai-change' := true}, IE) ->
 change_reporting_action(_, _, _Triggers, IE) ->
     IE.
 
+%% A bearer the request asked for that policy/charging did not authorize is
+%% reported as not created. TS 29.274 7.2.2 (Table 7.2.2-2) makes the per-bearer
+%% Cause mandatory, so the peer learns which bearers it may keep -- TS 23.401
+%% Annex D states the same principle from the MME side: establish the bearers it
+%% can and deactivate those it cannot. No F-TEID is returned: there is no PDR and
+%% the UPF was never told about the bearer.
+rejected_bearer_contexts(EBIs) ->
+    [#v2_bearer_context{
+	instance = 1,
+	group = [#v2_cause{v2_cause = no_resources_available},
+		 #v2_eps_bearer_id{eps_bearer_id = EBI}]} || EBI <- EBIs].
+
 change_reporting_actions(RequestIEs, IE0) ->
     Indications = gtp_v2_c:get_indication_flags(RequestIEs),
     Triggers = smf_charging:reporting_triggers(),
@@ -2658,10 +2647,10 @@ change_reporting_actions(RequestIEs, IE0) ->
     _IE = change_reporting_action(CRSI, ENBCRSI, RequestIEs, Triggers, IE0).
 
 create_session_response(Cause, SessionOpts, RequestIEs,
-			Tunnel, BearerMap,
+			Tunnel, BearerMap, Rejected,
 			#context{ms_ip = #ue_ip{v4 = MSv4, v6 = MSv6}} = Context) ->
 
-    IE0 = bearer_context(SessionOpts, BearerMap, Context, []),
+    IE0 = bearer_context(SessionOpts, BearerMap, Context, rejected_bearer_contexts(Rejected)),
     IE1 = pdn_pco(SessionOpts, RequestIEs, IE0),
     IE2 = change_reporting_actions(RequestIEs, IE1),
 

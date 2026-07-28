@@ -10,7 +10,7 @@
 -compile([{parse_transform, do},
 	  {parse_transform, cut}]).
 
--export([connect_upf_candidates/4, create_session/13]).
+-export([connect_upf_candidates/4, create_session/13, create_session/14]).
 -export([triggered_charging_event/4, usage_report/3,
 	 close_context/4, close_context_proc/3]).
 -export([update_tunnel_endpoint/2,
@@ -35,18 +35,36 @@ connect_upf_candidates(APN, Services, NodeSelect, PeerUpNode) ->
 
     {ok, {Candidates, SxConnectId}}.
 
+%% Interfaces whose establishment request carries only the default bearer.
 create_session(APN, PAA, DAF, UPSelInfo, Session, PCF, Charging, Auth,
 	       SessionOpts, Context, AccessTunnel, AccessBearer, PCC) ->
+    create_session(APN, PAA, DAF, UPSelInfo, Session, PCF, Charging, Auth,
+		   SessionOpts, Context, AccessTunnel, AccessBearer, PCC,
+		   fun(BearerMap, _Context) -> {BearerMap, #{}, []} end).
+
+%% StageExtra folds any further bearers the establishment request asked for into
+%% the bearer map, and is applied BEFORE the PFCP Session Establishment so that
+%% one exchange provisions every bearer. It runs after apply_authorized_qos/4 so
+%% an additional bearer's {qci_arp, _, _} key still wins over the default's, as
+%% it did when this staging ran after establishment.
+%%
+%% It stages the remote side only and names the keys it added; their local
+%% F-TEIDs are assigned here, through the same assign_local_data_teid/5 the
+%% default bearer goes through, so an FTUP node allocates for every bearer in
+%% the one establishment exchange.
+create_session(APN, PAA, DAF, UPSelInfo, Session, PCF, Charging, Auth,
+	       SessionOpts, Context, AccessTunnel, AccessBearer, PCC, StageExtra) ->
     try
 	{ok, create_session_fun(APN, PAA, DAF, UPSelInfo, Session, PCF, Charging, Auth,
-				SessionOpts, Context, AccessTunnel, AccessBearer, PCC)}
+				SessionOpts, Context, AccessTunnel, AccessBearer, PCC,
+				StageExtra)}
     catch
 	throw:Error ->
 	    {error, Error}
     end.
 
 create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Charging0, Auth0,
-		   SessionOpts0, Context0, AccessTunnel, AccessBearer, PCC0) ->
+		   SessionOpts0, Context0, AccessTunnel, AccessBearer, PCC0, StageExtra) ->
 
     smf_sx_node:wait_connect(SxConnectId),
 
@@ -124,8 +142,24 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
     %% authorized APN-AMBR, either of which may override the subscribed values.
     %% Enforce them from here on, before the bearer map is handed to PFCP and
     %% before the Create Session Response is built (#73).
-    {SessionOpts4, BearerMap} =
+    {SessionOpts4, BearerMap2} =
 	apply_authorized_qos(GxSession, SessionOpts3, EBI, BearerMap1),
+
+    %% Fold in the request's further bearer contexts before anything reaches the
+    %% UPF. A multi-bearer establishment is ONE PFCP exchange: staging these
+    %% afterwards would establish the session without them and then modify it to
+    %% add them, exposing an intermediate rule set the UE never asked for.
+    {BearerMap2a, Dedicated, ExtraKeys} = StageExtra(BearerMap2, Context),
+    BearerMap =
+	lists:foldl(
+	  fun(Key, BM0) ->
+		  case smf_gsn_lib:assign_local_data_teid(
+			 Key, PCtx0, NodeCaps, AccessTunnel, BM0) of
+		      {ok, BM} -> BM;
+		      {error, ErrX} ->
+			  throw(ErrX#ctx_err{context = Context, tunnel = AccessTunnel})
+		  end
+	  end, BearerMap2a, ExtraKeys),
 
     RuleBase = smf_charging:rulebase(),
     {PCC1, PCCErrors1} = smf_pcc_context:gx_events_to_pcc_ctx(GxEvents, '_', RuleBase, PCC0),
@@ -156,8 +190,17 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
     PCC3 = smf_pcc_context:session_events_to_pcc_ctx(AuthSEvs, PCC2),
     PCC4 = smf_pcc_context:session_events_to_pcc_ctx(RfSEvs, PCC3),
 
-    {PCtx, BearerMap2, SessionInfo} =
-	case smf_pfcp_context:create_session(gtp_context, PCC4, PCtx0, BearerMap, Context) of
+    %% A bearer the request asked for is established only if policy AND charging
+    %% authorized it: some PCC rule must still bind to it. Rules that got no
+    %% charging decision were already dropped from the PCC context by
+    %% gy_events_to_pcc_ctx/3, so "a rule still binds" is exactly that condition.
+    %% An unauthorized bearer gets no PDR, so it must not reach the UPF at all --
+    %% it is dropped here, before the establishment, and reported back for the
+    %% response to reject (TS 29.274 7.2.2: per-bearer Cause is mandatory).
+    {BearerMapF, Rejected} = drop_unauthorized_bearers(ExtraKeys, PCC4, BearerMap),
+
+    {PCtx, BearerMap3, SessionInfo} =
+	case smf_pfcp_context:create_session(gtp_context, PCC4, PCtx0, BearerMapF, Context) of
 	       {ok, Result10} -> Result10;
 	       {error, Err10} -> throw(Err10#ctx_err{context = Context, tunnel = AccessTunnel})
 	   end,
@@ -176,16 +219,47 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
 	       {PCF1, Session5}
 	end,
 
-    case gtp_context:remote_context_register_new(AccessTunnel, BearerMap2, Context) of
+    case gtp_context:remote_context_register_new(AccessTunnel, BearerMap3, Context) of
 	ok ->
-	    {ok, Cause, SessionOpts, Context, BearerMap2, PCC4, PCtx,
+	    {ok, Cause, SessionOpts, Context, BearerMap3, extra(Dedicated, Rejected), PCC4, PCtx,
 	     Session6, PCF2, Charging2, Auth2};
 	{error, #ctx_err{level = Level, where = {File, Line}}} ->
 	    ?LOG(debug, #{type => ctx_err, level => Level, file => File,
 			  line => Line, reply => system_failure}),
-	    {error, system_failure, SessionOpts, Context, BearerMap2, PCC4, PCtx,
-	     Session6, PCF2, Charging2, Auth2}
+	    {error, system_failure, SessionOpts, Context, BearerMap3, extra(Dedicated, Rejected),
+	     PCC4, PCtx, Session6, PCF2, Charging2, Auth2}
     end.
+
+extra(Dedicated, Rejected) ->
+    #{dedicated => maps:without(Rejected, Dedicated), rejected => Rejected}.
+
+%% Partition the staged extra bearers into those a PCC rule binds to and those it
+%% does not. Binding is by {qci_arp, QCI, ARP}, the same key resolve_access_bearer/2
+%% uses when it picks the bearer a rule's PDR is built against.
+drop_unauthorized_bearers([], _PCC, BearerMap) ->
+    {BearerMap, []};
+drop_unauthorized_bearers(Keys, #pcc_ctx{rules = Rules}, BearerMap) ->
+    Bound =
+	maps:fold(
+	  fun(_Name, Definition, Acc) ->
+		  case smf_gsn_lib:get_rule_qci_arp(Definition) of
+		      {QCI, ARP} ->
+			  case maps:get({qci_arp, QCI, ARP}, BearerMap, undefined) of
+			      EBI when is_integer(EBI) -> Acc#{EBI => []};
+			      _                        -> Acc
+			  end;
+		      _ ->
+			  Acc
+		  end
+	  end, #{}, Rules),
+    lists:foldl(
+      fun({'Access', EBI} = Key, {BM, Rej}) ->
+	      case is_map_key(EBI, Bound) of
+		  true  -> {BM, Rej};
+		  false -> {smf_gsn_lib:remove_bearer_metadata_for_ebi(EBI, maps:remove(Key, BM)),
+			    [EBI | Rej]}
+	      end
+      end, {BearerMap, []}, Keys).
 
 %% apply_authorized_qos/4 — enforce the CCA-I's authorized default-bearer QoS.
 %%
