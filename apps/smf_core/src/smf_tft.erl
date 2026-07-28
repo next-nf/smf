@@ -16,6 +16,8 @@
 	      parse_flow_description/1, format_flow_description/1, pf_ids_to_sdf/2,
 	      flow_info_to_pf_add_group/1]).
 
+-include_lib("kernel/include/logger.hrl").
+
 %%%===================================================================
 %%% API
 %%%===================================================================
@@ -329,12 +331,29 @@ flow_info_list_to_filters([], _Used, _Precedence, Sdf) -> {[], Sdf};
 flow_info_list_to_filters([FlowInfo | Rest], Used, Precedence, Sdf0) ->
     Id = lowest_free_id(Used),
     Filter = flow_info_to_filter(FlowInfo, Id, Precedence),
-    %% TODO(#32): a duplicate Gx Packet-Filter-Identifier silently overwrites the
-    %% earlier sdf_to_pf entry. The UE bearer procedures (#22) now invert this map
-    %% via pf_ids_to_sdf/2, so the uniqueness assumption is load-bearing.
     Sdf = case sdf_filter_id(FlowInfo) of
-              undefined -> Sdf0;
-              SdfId     -> Sdf0#{SdfId => Id}
+              undefined ->
+                  Sdf0;
+              SdfId when is_map_key(SdfId, Sdf0) ->
+                  %% TS 29.212 5.3.55: the PCRF assigns the packet filter
+                  %% identifier and "within the scope of the PCRF is unique per
+                  %% UE", so a rule carrying the same one twice is malformed.
+                  %% Two TFT filters would then share one SDF handle, and there
+                  %% is no honest mapping: removing that handle drops a filter
+                  %% the UE never named, while keeping it strands the other. So
+                  %% neither filter is mapped -- the entry is marked ambiguous,
+                  %% and pf_ids_to_sdf/2 refuses to resolve either id rather than
+                  %% resolve one of them wrongly. Both filters stay in the TFT;
+                  %% it is only the Gx round-trip that is refused.
+                  ?LOG(warning,
+                       "duplicate Gx Packet-Filter-Identifier ~p within one PCC "
+                       "rule (TS 29.212 5.3.55 requires it unique per UE); its "
+                       "packet filters cannot be mapped back to an SDF, so a "
+                       "UE-requested change naming them will be rejected",
+                       [SdfId]),
+                  Sdf0#{SdfId => ambiguous};
+              SdfId ->
+                  Sdf0#{SdfId => Id}
           end,
     {Rest1, Sdf1} =
         flow_info_list_to_filters(Rest, Used bor (1 bsl Id), Precedence - 1, Sdf),
@@ -349,13 +368,19 @@ sdf_filter_id(_) -> undefined.
 %% Given the TFT packet-filter ids (0..15) a Bearer Resource Command asks to
 %% remove and the bearer's sdf_to_pf map (#{SDF-handle => TFT-id}), return the
 %% Gx SDF Packet-Filter-Identifier handles the CCR-U must reference (TS 29.212
-%% §4.5.2). Fails loudly rather than guessing: the forward map is not guaranteed
-%% injective (TODO(#32)), so a shared TFT id makes it non-invertible; and a
-%% requested id we do not hold is a malformed command. The caller turns either
-%% error into a Bearer Resource Failure Indication.
--spec pf_ids_to_sdf([0..15], #{binary() => 0..15}) ->
+%% §4.5.2). Fails loudly rather than guessing: a shared TFT id makes the map
+%% non-invertible, and a requested id we do not hold is a malformed command. The
+%% caller turns either error into a Bearer Resource Failure Indication.
+%%
+%% Entries marked `ambiguous` carry a Packet-Filter-Identifier the PCRF reused
+%% within one rule (see flow_info_list_to_filters/4). They are dropped before
+%% inverting, so the filters behind them resolve to nothing and a request naming
+%% one fails as unknown -- while every other filter on the same bearer keeps
+%% working, which a whole-map rejection would not allow.
+-spec pf_ids_to_sdf([0..15], #{binary() => 0..15 | ambiguous}) ->
           {ok, [binary()]} | {error, ambiguous_sdf_to_pf | {unknown_pf_id, 0..15}}.
-pf_ids_to_sdf(PfIds, SdfToPf) ->
+pf_ids_to_sdf(PfIds, SdfToPf0) ->
+    SdfToPf = maps:filter(fun(_, V) -> V =/= ambiguous end, SdfToPf0),
     Rev = maps:fold(fun(Sdf, Pf, Acc) -> Acc#{Pf => Sdf} end, #{}, SdfToPf),
     case map_size(Rev) =:= map_size(SdfToPf) of
         false -> {error, ambiguous_sdf_to_pf};

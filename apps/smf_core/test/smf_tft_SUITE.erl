@@ -41,6 +41,7 @@ all() ->
      flow_info_to_tft_map_no_sdf,
      flow_info_to_tft_map_captures_sdf,
      flow_info_to_tft_map_bare_binary_sdf,
+     flow_info_to_tft_map_duplicate_sdf,
      pf_ids_to_sdf_test,
      flow_info_to_pf_add_group_test,
      flow_info_to_pf_modify_group_test].
@@ -526,9 +527,49 @@ pf_ids_to_sdf_test(_Config) ->
     {ok, []} = smf_tft:pf_ids_to_sdf([], Map),
     %% unknown id -> loud error (UE asked to delete a filter we don't hold)
     {error, {unknown_pf_id, 7}} = smf_tft:pf_ids_to_sdf([0, 7], Map),
-    %% non-injective forward map -> not invertible -> loud error (TODO(#32))
+    %% two SDF handles sharing one TFT id -> not invertible -> loud error
     Dup = #{<<"sdfA">> => 0, <<"sdfB">> => 0},
     {error, ambiguous_sdf_to_pf} = smf_tft:pf_ids_to_sdf([0], Dup),
+    %% an `ambiguous` entry (PCRF reused a Packet-Filter-Identifier, #32) resolves
+    %% to nothing at all, so its filters read as unknown rather than resolving to
+    %% the wrong SDF -- while the other handles on the bearer keep working.
+    Amb = #{<<"sdfA">> => 0, <<"sdfB">> => ambiguous, <<"sdfC">> => 2},
+    {ok, [<<"sdfA">>, <<"sdfC">>]} = smf_tft:pf_ids_to_sdf([0, 2], Amb),
+    {error, {unknown_pf_id, 1}} = smf_tft:pf_ids_to_sdf([1], Amb),
+    ok.
+
+flow_info_to_tft_map_duplicate_sdf() ->
+    [{doc, "TS 29.212 5.3.55 makes the Packet-Filter-Identifier unique per UE. "
+      "If a PCC rule reuses one, both filters are still installed in the TFT, "
+      "but the SDF mapping is marked ambiguous so neither resolves back -- "
+      "rather than one of them silently resolving to the wrong SDF"}].
+flow_info_to_tft_map_duplicate_sdf(_Config) ->
+    FlowInfo = [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+                  'Flow-Direction' => [2],
+                  'Packet-Filter-Identifier' => [<<"sdf-dup">>]},
+                #{'Flow-Description' => [<<"permit out ip from 10.0.0.0/8 to assigned">>],
+                  'Flow-Direction' => [1],
+                  'Packet-Filter-Identifier' => [<<"sdf-dup">>]},
+                #{'Flow-Description' => [<<"permit out ip from any to assigned">>],
+                  'Flow-Direction' => [1],
+                  'Packet-Filter-Identifier' => [<<"sdf-ok">>]}],
+    {_Bin, Filters, SdfToPf} = smf_tft:flow_info_to_tft_map(FlowInfo),
+
+    %% every filter is still installed -- the TFT itself is unaffected
+    ?assertEqual(3, length(Filters)),
+
+    %% the reused handle is marked, the well-formed one still points at a filter
+    ?assertEqual(ambiguous, maps:get(<<"sdf-dup">>, SdfToPf)),
+    Ids = [Id || #{id := Id} <- Filters],
+    ?assert(lists:member(maps:get(<<"sdf-ok">>, SdfToPf), Ids)),
+
+    %% neither of the duplicate's filters can be resolved back to an SDF, but the
+    %% well-formed one can -- a UE delete naming it still works.
+    OkId = maps:get(<<"sdf-ok">>, SdfToPf),
+    {ok, [<<"sdf-ok">>]} = smf_tft:pf_ids_to_sdf([OkId], SdfToPf),
+    [DupId | _] = [I || I <- Ids, I =/= OkId],
+    ?assertMatch({error, {unknown_pf_id, DupId}},
+                 smf_tft:pf_ids_to_sdf([DupId], SdfToPf)),
     ok.
 
 flow_info_to_pf_add_group_test(_Config) ->
