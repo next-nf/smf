@@ -1173,11 +1173,6 @@ initiate_create_dedicated_bearer(PTI, QCI, ARP, QoS, FlowInfo, DefaultEBI, Acces
     end.
 
 
-%% Network-initiated single-bearer deactivation: a batch of one, no PTI.
-initiate_delete_dedicated_bearer(EBI, AccessTunnel, Data) ->
-    send_dedicated_bearers_delete([EBI], AccessTunnel),
-    Data.
-
 %% UE-requested single-bearer deactivation (bearer_resource_command
 %% delete_existing_tft, TS 29.274 7.2.9.2): echoes the PTI and sends exactly one
 %% EBI — NOT routed through the network-initiated batched send (§7.2.9.2 NOTE).
@@ -1586,9 +1581,10 @@ finish_update_bearer_failures({Data0, RuleNames, DelEBIs}, AccessTunnel, State) 
 		_  -> report_bearer_failure(RuleNames, Data0)
 	    end,
     %% A subscribed-QoS terminal failure also deletes the bearer (5.4.2.2 step 7).
-    Data = lists:foldl(
-	     fun(EBI, D) -> initiate_delete_dedicated_bearer(EBI, AccessTunnel, D) end,
-	     Data1, DelEBIs),
+    %% One Delete Bearer Request for the whole batch: TS 29.274 7.2.9.2 carries a
+    %% list of EPS Bearer IDs, and handle_response/5 already takes the list back.
+    send_dedicated_bearers_delete(DelEBIs, AccessTunnel),
+    Data = Data1,
     async_m:run_async(reprovision_proc(maps:get(bearers, Data)),
 		      fun(_V, S, D) -> {next_state, S, D} end,
 		      fun(_R, S, D) -> {next_state, S, D} end,
