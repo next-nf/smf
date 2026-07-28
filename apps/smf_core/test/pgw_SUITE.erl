@@ -6957,7 +6957,7 @@ modify_bearer_command_arp_fanout_temporary_hold(Config) ->
 
     %% Complete the Create Bearer exchange to install the dedicated bearer.
     DedEBI = 6,
-    _GtpCDed = complete_create_bearer(Cntl, GtpC, DedEBI),
+    GtpCDed = complete_create_bearer(Cntl, GtpC, DedEBI),
 
     %% The dedicated bearer must be installed under the default's ARP.
     #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
@@ -6983,13 +6983,41 @@ modify_bearer_command_arp_fanout_temporary_hold(Config) ->
     ?equal({ok, timeout}, recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok)),
     ?equal([], outstanding_requests()),
 
-    %% No Delete Bearer Request must follow a temporary Cause; the bearer
-    %% is held on its previously confirmed descriptor (TODO(#34)).
+    %% No Delete Bearer Request must follow a temporary Cause; the bearer keeps
+    %% its previously confirmed descriptor, still at the OLD ARP.
     ?equal(timeout, recv_pdu(Cntl, undefined, 500, fun(Why) -> Why end)),
     #{dedicated := Ded} = smf_context:test_cmd(gtp, CtxKey, info),
-    ?assert(maps:is_key(DedEBI, Ded)),
+    ?match(#{DedEBI := #ded_bearer{arp = {10, 1, 0}}}, Ded),
 
-    delete_session(GtpC2),
+    %% TS 23.401 5.4.1 step 12: a Modify Bearer Request signals the UE is
+    %% reachable again, so the held Update Bearer Request is re-emitted -- as the
+    %% network-initiated batched form carrying ONLY the dedicated bearer. It must
+    %% not answer the Modify Bearer Command again; that was answered above.
+    {GtpC3, _, _} = modify_bearer(tei_update, GtpC2),
+
+    Retry = recv_pdu(Cntl, ?TIMEOUT),
+    #gtp{type = update_bearer_request,
+	 ie = #{{v2_bearer_context, 0} := RetryCtxs}} = Retry,
+    ?match([_], bearer_ctxs_for(DedEBI, RetryCtxs)),
+    ?equal([], bearer_ctxs_for(5, RetryCtxs)),
+    %% ...carrying the same new ARP the first attempt did.
+    ?match([#v2_bearer_context{
+	       group = #{{v2_bearer_level_quality_of_service, 0} :=
+			     #v2_bearer_level_quality_of_service{pl = 5}}}],
+	   bearer_ctxs_for(DedEBI, RetryCtxs)),
+
+    %% Accept it this time; the staged descriptor commits at the new ARP.
+    send_pdu(Cntl, GtpC, two_bearer_update_response(
+			   Retry, GtpCDed, [{DedEBI, request_accepted}])),
+    ct:sleep(200),
+    #{dedicated := DedAfter} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{DedEBI := #ded_bearer{arp = {5, _, _}}}, DedAfter),
+
+    %% The hold is cleared -- a further reachability signal re-sends nothing.
+    {GtpC4, _, _} = modify_bearer(tei_update, GtpC3),
+    ?equal(timeout, recv_pdu(Cntl, undefined, 500, fun(Why) -> Why end)),
+
+    delete_session(GtpC4),
 
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4tunnels(?TIMEOUT),
