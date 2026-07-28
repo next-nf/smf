@@ -273,7 +273,7 @@ handle_request(ReqKey,
 			   {nsapi, 1} := #nsapi{},
 			   ?'Quality of Service Profile' := ReqQoSProfile
 			  } = _IEs} = Request,
-	       _Resent, #{session := connected} = _State,
+	       _Resent, #{session := connected} = State,
 	       #{context := Context,
 		 tunnels := #{'Access' := AccessTunnel0} = Tunnels,
 		 bearers := BearerMap0, pfcp := PCtx0, pcc := PCC,
@@ -294,27 +294,15 @@ handle_request(ReqKey,
 			     local = #fq_teid{ip = LocalIP, teid = DataTEI}},
 	    BearerMap1 = BearerMap0#{{'Access', NSAPI} => AccessBearer},
 
-	    case smf_pfcp_context:modify_session(PCC, [], #{}, BearerMap1, PCtx0) of
-		{ok, {PCtx, _, _}} ->
-		    ResponseIEs0 = [#cause{value = request_accepted},
-				    context_charging_id(Context),
-				    ReqQoSProfile],
-		    ResponseIEs1 = tunnel_elements(AccessTunnel, ResponseIEs0),
-		    ResponseIEs = bearer_elements_for_secondary(AccessBearer, ResponseIEs1),
-		    Response = response(create_pdp_context_response, AccessTunnel,
-					ResponseIEs, Request),
-		    gtp_context:send_response(ReqKey, Request, Response),
-		    Actions = context_idle_action([], Context),
-		    {keep_state,
-		     Data#{bearers := BearerMap1, pfcp := PCtx,
-			   tunnels := Tunnels#{'Access' => AccessTunnel}},
-		     Actions};
-		{error, _} ->
-		    Response = response(create_pdp_context_response, AccessTunnel0,
-					system_failure),
-		    gtp_context:send_response(ReqKey, Request, Response),
-		    keep_state_and_data
-	    end;
+	    Proc = smf_gtp_gsn_lib:apply_bearer_change_proc(
+		     BearerMap1, [], false, PCtx0, PCC),
+	    Req = #{req_key => ReqKey, request => Request, qos_profile => ReqQoSProfile,
+		    context => Context, tunnels => Tunnels,
+		    access_tunnel => AccessTunnel, old_access_tunnel => AccessTunnel0,
+		    access_bearer => AccessBearer, bearers => BearerMap1},
+	    OkFun = fun(V, S, D) -> secondary_pdp_ctx_ok(V, S, D, Req) end,
+	    ErrFun = fun(E, S, D) -> secondary_pdp_ctx_err(E, S, D, Req) end,
+	    async_m:run_async(Proc, OkFun, ErrFun, State, Data);
 	_ ->
 	    Response = response(create_pdp_context_response, AccessTunnel0,
 				system_failure),
@@ -325,6 +313,35 @@ handle_request(ReqKey,
 handle_request(ReqKey, _Msg, _Resent, _State, _Data) ->
     gtp_context:request_finished(ReqKey),
     keep_state_and_data.
+
+%% Secondary PDP context: the accept response reports the newly provisioned
+%% bearer, so it goes out once the UPF has it. Unlike the Update PDP Context
+%% path a PFCP failure is answered, not thrown — the secondary context simply
+%% does not come up and the primary one is untouched, which is what the
+%% synchronous {error, _} branch did.
+secondary_pdp_ctx_ok({PCtx, _SessionInfo}, State, Data,
+		     #{req_key := ReqKey, request := Request, qos_profile := ReqQoSProfile,
+		       context := Context, tunnels := Tunnels, access_tunnel := AccessTunnel,
+		       access_bearer := AccessBearer, bearers := BearerMap1}) ->
+    ResponseIEs0 = [#cause{value = request_accepted},
+		    context_charging_id(Context),
+		    ReqQoSProfile],
+    ResponseIEs1 = tunnel_elements(AccessTunnel, ResponseIEs0),
+    ResponseIEs = bearer_elements_for_secondary(AccessBearer, ResponseIEs1),
+    Response = response(create_pdp_context_response, AccessTunnel, ResponseIEs, Request),
+    gtp_context:send_response(ReqKey, Request, Response),
+    Actions = context_idle_action([], Context),
+    {next_state, State,
+     Data#{bearers := BearerMap1, pfcp := PCtx,
+	   tunnels := Tunnels#{'Access' => AccessTunnel}},
+     Actions}.
+
+secondary_pdp_ctx_err(_Reason, State, Data,
+		      #{req_key := ReqKey, request := Request,
+			old_access_tunnel := AccessTunnel0}) ->
+    Response = response(create_pdp_context_response, AccessTunnel0, system_failure),
+    gtp_context:send_response(ReqKey, Request, Response),
+    {next_state, State, Data}.
 
 %% The Update PDP Context Response is built from the PFCP result, so it goes out
 %% from here rather than from the handler. {next_state, ...} (not keep_state)
