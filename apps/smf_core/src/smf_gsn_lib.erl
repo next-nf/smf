@@ -1241,9 +1241,11 @@ is_gbr_qci(75) -> true;
 is_gbr_qci(76) -> true;
 is_gbr_qci(_)  -> false.
 
-%% Classify a GTPv2 per-bearer Cause on an Update Bearer Response (dossier §8;
-%% TS 23.401 §5.4.1, §5.4.2.2 step 7). Temporary causes mean "retry when the UE is
-%% reachable", and must never trigger rule removal or bearer deletion.
+%% Classify a GTPv2 per-bearer Cause on an Update or Delete Bearer Response
+%% (dossier §8; TS 23.401 §5.4.1, §5.4.2.2 step 7). Temporary causes mean "retry
+%% when the UE is reachable", and must never trigger rule removal or bearer
+%% deletion. TS 29.274 §7.2.10.2 lists the same temporary cause for the Delete
+%% Bearer Response, so the classification is shared.
 bearer_update_cause_class(request_accepted) ->
     accepted;
 bearer_update_cause_class(ue_is_temporarily_not_reachable_due_to_power_saving) ->

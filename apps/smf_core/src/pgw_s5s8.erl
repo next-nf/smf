@@ -774,17 +774,22 @@ handle_response({create_bearer, _PgwFTEID}, timeout,
 
 handle_response({delete_dedicated_bearers, EBIs},
 		#gtp{type = delete_bearer_response,
-		     ie = #{?'Cause' := #v2_cause{v2_cause = _Cause}}},
+		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause}} = IEs},
 		_Request, State,
 		#{bearers := BearerMap0, dedicated := Ded0} = Data0) ->
-    %% TODO(#35): honor the per-bearer Cause in the Delete Bearer Response and release
-    %% only accepted EBIs; today the whole batch is released (as the single-EBI clause did).
+    %% TS 29.274 7.2.10.2: the response repeats a Bearer Context for every EBI
+    %% the request named -- "All the bearer contexts included in the EPS Bearer
+    %% IDs IE of the corresponding Delete Bearer Request shall be included" --
+    %% each with its own Cause. Release only the ones the peer actually deleted;
+    %% a bearer it refused still exists there, so dropping it locally would put
+    %% the two out of step.
+    Released = released_bearers(EBIs, Cause, IEs),
     BearerMap = lists:foldl(
 		  fun(EBI, BM) ->
 			  smf_gsn_lib:remove_bearer_metadata_for_ebi(
 			    EBI, maps:remove({'Access', EBI}, BM))
-		  end, BearerMap0, EBIs),
-    Data1 = Data0#{dedicated := maps:without(EBIs, Ded0),
+		  end, BearerMap0, Released),
+    Data1 = Data0#{dedicated := maps:without(Released, Ded0),
 		   bearers := BearerMap},
     %% Re-provision PFCP asynchronously (#65). The bearer removal is committed
     %% above either way -- this path always treated a failed modification as
@@ -917,6 +922,49 @@ handle_response({From, TermCause},
 handle_response(_CommandReqKey, _Response, _Request, #{session := SState}, _Data)
   when SState =/= connected ->
     keep_state_and_data.
+
+%% Which of the requested EBIs the peer actually deleted.
+%%
+%% A response may legitimately carry only a message-level Cause (§7.2.10.2 lists
+%% "Context not found" and "Temporarily rejected due to handover/TAU/RAU
+%% procedure in progress" among them), in which case it applies to the whole
+%% batch. Otherwise the per-bearer Cause governs, and an EBI the peer omitted
+%% counts as not deleted -- the spec requires it to be echoed, so its absence is
+%% not consent.
+released_bearers(EBIs, MsgCause, IEs) ->
+    Causes = delete_bearer_causes(IEs),
+    lists:filter(
+      fun(EBI) ->
+	      C = maps:get(EBI, Causes, MsgCause),
+	      case smf_gsn_lib:bearer_update_cause_class(C) of
+		  accepted ->
+		      true;
+		  temporary ->
+		      %% TODO(#103): re-attempt on the next reachability signal,
+		      %% as the Update path does since #34.
+		      ?LOG(warning, "peer temporarily refused to delete bearer ~p "
+			   "(~p); keeping it", [EBI, C]),
+		      false;
+		  terminal ->
+		      ?LOG(warning, "peer refused to delete bearer ~p (~p); keeping "
+			   "it -- it now has no bound PCC rule", [EBI, C]),
+		      false
+	      end
+      end, EBIs).
+
+%% #{EBI => Cause} from the response's Bearer Contexts, which may be a single IE
+%% or a list, and may be absent entirely.
+delete_bearer_causes(#{?'Bearer Contexts' := BearerCtxs}) ->
+    ie_foldl(
+      fun(#v2_bearer_context{group = #{?'EPS Bearer ID' :=
+					   #v2_eps_bearer_id{eps_bearer_id = EBI},
+				       ?'Cause' := #v2_cause{v2_cause = C}}}, Acc) ->
+	      Acc#{EBI => C};
+	 (_, Acc) ->
+	      Acc
+      end, #{}, BearerCtxs);
+delete_bearer_causes(_IEs) ->
+    #{}.
 
 %% The delete_bearer caller (if there is one — the cast entry points pass a bare
 %% atom) is answered once the teardown is actually done, as it was when the PFCP
