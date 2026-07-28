@@ -837,11 +837,9 @@ handle_response({CommandReqKey, _}, timeout, #gtp{type = update_bearer_request},
 
 handle_response({From, TermCause}, timeout, #gtp{type = delete_bearer_request},
 		State, Data0) ->
-    Data = smf_gtp_gsn_lib:close_context(?API, TermCause, Data0),
-    if is_tuple(From) -> gen_statem:reply(From, {error, timeout});
-       true -> ok
-    end,
-    {next_state, State#{session := shutdown}, Data};
+    Proc = smf_gtp_gsn_lib:close_context_proc(?API, TermCause, Data0),
+    OkFun = fun(Data, S, _D) -> delete_bearer_done(Data, S, From, {error, timeout}) end,
+    async_m:run_async(Proc, OkFun, fun teardown_err/3, State, Data0);
 
 handle_response({From, TermCause},
 		#gtp{type = delete_bearer_response,
@@ -849,15 +847,22 @@ handle_response({From, TermCause},
 		_Request, State,
 		#{context := Context} = Data0) ->
     process_secondary_rat_usage_data_reports(IEs, Context, Data0),
-    Data = smf_gtp_gsn_lib:close_context(?API, TermCause, Data0),
-    if is_tuple(From) -> gen_statem:reply(From, {ok, RespCause});
-       true -> ok
-    end,
-    {next_state, State#{session := shutdown}, Data};
+    Proc = smf_gtp_gsn_lib:close_context_proc(?API, TermCause, Data0),
+    OkFun = fun(Data, S, _D) -> delete_bearer_done(Data, S, From, {ok, RespCause}) end,
+    async_m:run_async(Proc, OkFun, fun teardown_err/3, State, Data0);
 
 handle_response(_CommandReqKey, _Response, _Request, #{session := SState}, _Data)
   when SState =/= connected ->
     keep_state_and_data.
+
+%% The delete_bearer caller (if there is one — the cast entry points pass a bare
+%% atom) is answered once the teardown is actually done, as it was when the PFCP
+%% deletion blocked inline.
+delete_bearer_done(Data, State, From, Reply) ->
+    if is_tuple(From) -> gen_statem:reply(From, Reply);
+       true -> ok
+    end,
+    {next_state, State#{session := shutdown}, Data}.
 
 %%%===================================================================
 %%% Dedicated Bearer helpers
