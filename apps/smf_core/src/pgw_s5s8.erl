@@ -940,7 +940,7 @@ released_bearers(EBIs, MsgCause, IEs) ->
 		  accepted ->
 		      true;
 		  temporary ->
-		      %% TODO(#103): re-attempt on the next reachability signal,
+		      %% TODO(#104): re-attempt on the next reachability signal,
 		      %% as the Update path does since #34.
 		      ?LOG(warning, "peer temporarily refused to delete bearer ~p "
 			   "(~p); keeping it", [EBI, C]),
