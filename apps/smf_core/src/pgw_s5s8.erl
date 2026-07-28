@@ -49,9 +49,21 @@
 -define('RAT Type',					{v2_rat_type, 0}).
 -define('Sender F-TEID for Control Plane',		{v2_fully_qualified_tunnel_endpoint_identifier, 0}).
 -define('Access Point Name',				{v2_access_point_name, 0}).
--define('Bearer Contexts to be created',		{v2_bearer_context, 0}).
--define('Bearer Contexts to be modified',		{v2_bearer_context, 0}).
--define('Bearer Contexts',				{v2_bearer_context, 0}).
+%% Bearer Context lists (TS 29.274). Every message carrying bearers puts its
+%% primary list at instance 0 and, where it has one, a REMOVAL list at instance
+%% 1 -- a different list with a different meaning, not more of the same. The
+%% instance-0 aliases are one key under several names because the spec names the
+%% IE per message; always use the name that message's own IE table uses, so the
+%% reader can find the table. Note the INNER group's instances are NOT alike
+%% across messages either (e.g. the S5/S8-U SGW F-TEID is instance 2 in a Create
+%% Session Request but 1 in a Modify Bearer Request), which is why the receive
+%% side matches on interface_type rather than on instance.
+-define('Bearer Contexts to be created',		{v2_bearer_context, 0}).  %% 7.2.1
+-define('Bearer Contexts to be modified',		{v2_bearer_context, 0}).  %% 7.2.7
+-define('Bearer Context',				{v2_bearer_context, 0}).  %% 7.2.14, exactly one: the default bearer
+-define('Bearer Contexts',				{v2_bearer_context, 0}).  %% 7.2.3/7.2.4/7.2.15/7.2.16/7.2.17
+-define('Bearer Contexts to be removed',		{v2_bearer_context, 1}).  %% 7.2.1, 7.2.7
+-define('Bearer Contexts marked for removal',		{v2_bearer_context, 1}).  %% 7.2.2, 7.2.8
 -define('Protocol Configuration Options',		{v2_protocol_configuration_options, 0}).
 -define('ME Identity',					{v2_mobile_equipment_identity, 0}).
 -define('APN-AMBR',					{v2_aggregate_maximum_bit_rate, 0}).
@@ -91,14 +103,14 @@ request_spec(v2, modify_bearer_request, _) ->
     [];
 request_spec(v2, modify_bearer_command, _) ->
     [{?'APN-AMBR' ,						mandatory},
-     {?'Bearer Contexts to be modified',			mandatory}];
+     {?'Bearer Context',					mandatory}];
 request_spec(v2, delete_bearer_command, _) ->
     [{?'Bearer Contexts',					mandatory}];
 request_spec(v2, resume_notification, _) ->
     [{?'IMSI',							mandatory}];
 request_spec(v2, create_bearer_response, _) ->
     [{?'Cause',                                                         mandatory},
-     {?'Bearer Contexts to be created',                                 mandatory}];
+     {?'Bearer Contexts',                                               mandatory}];
 request_spec(v2, bearer_resource_command, _) ->
     [{?'Linked EPS Bearer ID',                                          mandatory},
      {?'Procedure Transaction Id',                                      mandatory},
@@ -319,7 +331,7 @@ handle_request(#request{src = Src, ip = IP, port = Port} = ReqKey,
 	       #gtp{type = modify_bearer_command,
 		    seq_no = SeqNo,
 		    ie = #{?'APN-AMBR' := AMBR,
-			   ?'Bearer Contexts to be modified' :=
+			   ?'Bearer Context' :=
 			       #v2_bearer_context{
 				   group = #{?'EPS Bearer ID' := EBI} = Bearer}} = IEs},
 	       _Resent, #{session := connected} = State,
@@ -693,7 +705,7 @@ handle_response(ReqInfo, #gtp{version = v1} = Msg, Request, State, Data) ->
 handle_response({create_bearer, PgwFTEID},
 		#gtp{type = create_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause},
-			    ?'Bearer Contexts to be created' :=
+			    ?'Bearer Contexts' :=
 				#v2_bearer_context{group = BearerCtxGroup}}},
 		_Request, #{session := connected} = State,
 		#{bearers := BearerMap0, pcc := PCC,
@@ -788,7 +800,7 @@ handle_response({delete_dedicated_bearers, _EBIs}, timeout,
 
 handle_response({update_dedicated_bearers, Kind, Staged},
 		#gtp{type = update_bearer_response,
-		     ie = #{?'Bearer Contexts to be modified' := BearerCtxs}},
+		     ie = #{?'Bearer Contexts' := BearerCtxs}},
 		_Request, #{session := connected} = State,
 		#{tunnels := #{'Access' := AccessTunnel}} = Data) ->
     %% Network-initiated batched Update Bearer Request (M3 rule change / M5
@@ -854,7 +866,7 @@ handle_response({update_dedicated_bearers, Kind, Staged}, timeout,
 handle_response({subscribed_qos_update, CommandReqKey, OldSOpts, Staged},
 		#gtp{type = update_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause},
-			    ?'Bearer Contexts to be modified' := BearerCtxs} = IEs},
+			    ?'Bearer Contexts' := BearerCtxs} = IEs},
 		_Request, #{session := connected} = State,
 		#{pfcp := PCtx, tunnels := #{'Access' := AccessTunnel}, bearers := BearerMap,
 		  context := #context{default_bearer_id = DefaultEBI},
