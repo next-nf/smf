@@ -537,10 +537,14 @@ handle_request(ReqKey,
     case match_tunnel(?'S5/S8-C SGW', AccessTunnel, FqTEID) of
 	ok ->
 	    process_secondary_rat_usage_data_reports(IEs, Context, Data0),
-	    Data = smf_gtp_gsn_lib:close_context(?API, normal, Data0),
-	    Response = response(delete_session_response, AccessTunnel, request_accepted),
-	    gtp_context:send_response(ReqKey, Request, Response),
-	    {next_state, State#{session := shutdown}, Data};
+	    Proc = smf_gtp_gsn_lib:close_context_proc(?API, normal, Data0),
+	    OkFun = fun(Data, S, _D) ->
+			    Response = response(delete_session_response, AccessTunnel,
+						request_accepted),
+			    gtp_context:send_response(ReqKey, Request, Response),
+			    {next_state, S#{session := shutdown}, Data}
+		    end,
+	    async_m:run_async(Proc, OkFun, fun teardown_err/3, State, Data0);
 
 	{error, ReplyIEs} ->
 	    Response = response(delete_session_response, AccessTunnel, ReplyIEs),
@@ -589,6 +593,14 @@ handle_request(ReqKey,
 handle_request(ReqKey, _Msg, _Resent, _State, _Data) ->
     gtp_context:request_finished(ReqKey),
     keep_state_and_data.
+
+%% close_context_proc/3 has no error channel — a Session Deletion that fails or
+%% goes unanswered only costs the final usage report, and the teardown proceeds
+%% either way. This exists so a driver-level failure (which would otherwise have
+%% no callback) still lands the context in shutdown rather than wedging it live.
+teardown_err(Reason, State, Data) ->
+    ?LOG(error, "teardown procedure failed with ~p", [Reason]),
+    {next_state, State#{session := shutdown}, Data}.
 
 %% The Modify Bearer Response is built from the PFCP result, so it goes out from
 %% here rather than from the handler. {next_state, ...} (not keep_state) because
