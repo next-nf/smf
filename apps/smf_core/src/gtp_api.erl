@@ -50,9 +50,12 @@
 			  Data :: map()) ->
     gen_statem:event_handler_result(term()).
 
--callback close_context(Side :: atom(), Reason :: atom(),
-			Notify :: 'active' | 'silent',
-			State :: term(), Data :: map()) -> term().
+%% Returns an async_m procedure yielding the closed Data. The teardown awaits the
+%% PFCP Session Deletion reply, so the caller must run it and move the context to
+%% `session := shutdown` from the resulting callback, not before.
+-callback close_context_proc(Side :: atom(), Reason :: atom(),
+			     Notify :: 'active' | 'silent',
+			     State :: term(), Data :: map()) -> term().
 -callback delete_context(From :: term(), TermCause :: atom(),
 			 State :: term(), Data :: map()) -> term().
 

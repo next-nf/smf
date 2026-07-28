@@ -17,7 +17,7 @@
 	 handle_request/5, handle_response/5,
 	 handle_event/4, terminate/3]).
 
--export([delete_context/4, close_context/5]).
+-export([delete_context/4, close_context_proc/5]).
 -export([handle_dedicated_bearer_changes/3]).
 -ignore_xref([handle_dedicated_bearer_changes/3]).
 
@@ -261,10 +261,14 @@ handle_request(ReqKey,
 	       #gtp{type = delete_pdp_context_request, ie = _IEs} = Request,
 	       _Resent, #{session := connected} = State,
 	       #{tunnels := #{'Access' := AccessTunnel}} = Data0) ->
-    Data = smf_gtp_gsn_lib:close_context(?API, normal, Data0),
-    Response = response(delete_pdp_context_response, AccessTunnel, request_accepted),
-    gtp_context:send_response(ReqKey, Request, Response),
-    {next_state, State#{session := shutdown}, Data};
+    Proc = smf_gtp_gsn_lib:close_context_proc(?API, normal, Data0),
+    OkFun = fun(Data, S, _D) ->
+		    Response = response(delete_pdp_context_response, AccessTunnel,
+					request_accepted),
+		    gtp_context:send_response(ReqKey, Request, Response),
+		    {next_state, S#{session := shutdown}, Data}
+	    end,
+    async_m:run_async(Proc, OkFun, fun teardown_err/3, State, Data0);
 
 %% Secondary PDP Context — has Linked NSAPI
 handle_request(ReqKey,
@@ -381,8 +385,9 @@ handle_response(alive_check,
 		#gtp{type = update_pdp_context_response,
 		     ie = #{?'Cause' := #cause{value = context_not_found}}},
 		_Request, State, Data0) ->
-    Data = smf_gtp_gsn_lib:close_context(?API, cp_inactivity_timeout, Data0),
-    {next_state, State#{session := shutdown}, Data};
+    Proc = smf_gtp_gsn_lib:close_context_proc(?API, cp_inactivity_timeout, Data0),
+    OkFun = fun(Data, S, _D) -> {next_state, S#{session := shutdown}, Data} end,
+    async_m:run_async(Proc, OkFun, fun teardown_err/3, State, Data0);
 
 handle_response(alive_check, _, #gtp{type = update_pdp_context_request}, State, Data) ->
     %% cause /= Request Accepted or timeout
@@ -408,21 +413,34 @@ handle_response({initiate_pdp_ctx, _}, timeout,
 
 handle_response({From, TermCause}, timeout, #gtp{type = delete_pdp_context_request},
 		State, Data0) ->
-    Data = smf_gtp_gsn_lib:close_context(?API, TermCause, Data0),
-    if is_tuple(From) -> gen_statem:reply(From, {error, timeout});
-       true -> ok
-    end,
-    {next_state, State#{session := shutdown}, Data};
+    Proc = smf_gtp_gsn_lib:close_context_proc(?API, TermCause, Data0),
+    OkFun = fun(Data, S, _D) -> delete_pdp_ctx_done(Data, S, From, {error, timeout}) end,
+    async_m:run_async(Proc, OkFun, fun teardown_err/3, State, Data0);
 
 handle_response({From, TermCause},
 		#gtp{type = delete_pdp_context_response,
 		     ie = #{?'Cause' := #cause{value = Cause}}},
 		_Request, State,
 		Data0) ->
-    Data = smf_gtp_gsn_lib:close_context(?API, TermCause, Data0),
-    if is_tuple(From) -> gen_statem:reply(From, {ok, Cause});
+    Proc = smf_gtp_gsn_lib:close_context_proc(?API, TermCause, Data0),
+    OkFun = fun(Data, S, _D) -> delete_pdp_ctx_done(Data, S, From, {ok, Cause}) end,
+    async_m:run_async(Proc, OkFun, fun teardown_err/3, State, Data0).
+
+%% The delete_pdp_context caller (if there is one -- the cast entry points pass a
+%% bare atom) is answered once the teardown is actually done, as it was when the
+%% PFCP deletion blocked inline.
+delete_pdp_ctx_done(Data, State, From, Reply) ->
+    if is_tuple(From) -> gen_statem:reply(From, Reply);
        true -> ok
     end,
+    {next_state, State#{session := shutdown}, Data}.
+
+%% close_context_proc/3 has no error channel -- a Session Deletion that fails or
+%% goes unanswered only costs the final usage report, and the teardown proceeds
+%% either way. This exists so a driver-level failure (which would otherwise have
+%% no callback) still lands the context in shutdown rather than wedging it live.
+teardown_err(Reason, State, Data) ->
+    ?LOG(error, "teardown procedure failed with ~p", [Reason]),
     {next_state, State#{session := shutdown}, Data}.
 
 terminate(_Reason, _State, #{pfcp := PCtx, context := Context}) ->
@@ -503,8 +521,8 @@ encode_eua(Org, Number, IPv4, IPv6) ->
 		      pdp_type_number = Number,
 		      pdp_address = <<IPv4/binary, IPv6/binary >>}.
 
-close_context(_Side, Reason, _Notify, _State, Data) ->
-    smf_gtp_gsn_lib:close_context(?API, Reason, Data).
+close_context_proc(_Side, Reason, _Notify, _State, Data) ->
+    smf_gtp_gsn_lib:close_context_proc(?API, Reason, Data).
 
 handle_dedicated_bearer_changes(OldPCC, NewPCC,
 				#{bearers := BearerMap,

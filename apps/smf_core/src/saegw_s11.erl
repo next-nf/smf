@@ -17,7 +17,7 @@
 	 handle_request/5, handle_response/5,
 	 handle_event/4, terminate/3]).
 
--export([delete_context/4, close_context/5]).
+-export([delete_context/4, close_context_proc/5]).
 -export([handle_dedicated_bearer_changes/3]).
 -ignore_xref([handle_dedicated_bearer_changes/3]).
 
@@ -326,10 +326,14 @@ handle_request(ReqKey,
 
     case match_tunnel(?'S11-C MME', AccessTunnel, FqTEID) of
 	ok ->
-	    Data = smf_gtp_gsn_lib:close_context(?API, normal, Data0),
-	    Response = response(delete_session_response, AccessTunnel, request_accepted),
-	    gtp_context:send_response(ReqKey, Request, Response),
-	    {next_state, State#{session := shutdown}, Data};
+	    Proc = smf_gtp_gsn_lib:close_context_proc(?API, normal, Data0),
+	    OkFun = fun(Data, S, _D) ->
+			    Response = response(delete_session_response, AccessTunnel,
+						request_accepted),
+			    gtp_context:send_response(ReqKey, Request, Response),
+			    {next_state, S#{session := shutdown}, Data}
+		    end,
+	    async_m:run_async(Proc, OkFun, fun teardown_err/3, State, Data0);
 
 	{error, ReplyIEs} ->
 	    Response = response(delete_session_response, AccessTunnel, ReplyIEs),
@@ -413,11 +417,9 @@ handle_response({CommandReqKey, _}, timeout, #gtp{type = update_bearer_request},
 
 handle_response({From, TermCause}, timeout, #gtp{type = delete_bearer_request},
 		State, Data0) ->
-    Data = smf_gtp_gsn_lib:close_context(?API, TermCause, Data0),
-    if is_tuple(From) -> gen_statem:reply(From, {error, timeout});
-       true -> ok
-    end,
-    {next_state, State#{session := shutdown}, Data};
+    Proc = smf_gtp_gsn_lib:close_context_proc(?API, TermCause, Data0),
+    OkFun = fun(Data, S, _D) -> delete_bearer_done(Data, S, From, {error, timeout}) end,
+    async_m:run_async(Proc, OkFun, fun teardown_err/3, State, Data0);
 
 handle_response({From, TermCause},
 		#gtp{type = delete_bearer_response,
@@ -427,11 +429,9 @@ handle_response({From, TermCause},
 
     Data1 = Data0#{tunnels => Tunnels#{'Access' => AccessTunnel}},
 
-    Data = smf_gtp_gsn_lib:close_context(?API, TermCause, Data1),
-    if is_tuple(From) -> gen_statem:reply(From, {ok, Cause});
-       true -> ok
-    end,
-    {next_state, State#{session := shutdown}, Data};
+    Proc = smf_gtp_gsn_lib:close_context_proc(?API, TermCause, Data1),
+    OkFun = fun(Data, S, _D) -> delete_bearer_done(Data, S, From, {ok, Cause}) end,
+    async_m:run_async(Proc, OkFun, fun teardown_err/3, State, Data1);
 
 handle_response(_CommandReqKey, _Response, _Request, #{session := SState}, _Data)
   when SState =/= connected ->
@@ -508,8 +508,25 @@ encode_paa(IPv4, IPv6) when IPv4 /= undefined, IPv6 /= undefined ->
 encode_paa(Type, IPv4, IPv6) ->
     #v2_pdn_address_allocation{type = Type, address = <<IPv6/binary, IPv4/binary>>}.
 
-close_context(_Side, Reason, _Notify, _State, Data) ->
-    smf_gtp_gsn_lib:close_context(?API, Reason, Data).
+close_context_proc(_Side, Reason, _Notify, _State, Data) ->
+    smf_gtp_gsn_lib:close_context_proc(?API, Reason, Data).
+
+%% The delete_bearer caller (if there is one -- the cast entry points pass a bare
+%% atom) is answered once the teardown is actually done, as it was when the PFCP
+%% deletion blocked inline.
+delete_bearer_done(Data, State, From, Reply) ->
+    if is_tuple(From) -> gen_statem:reply(From, Reply);
+       true -> ok
+    end,
+    {next_state, State#{session := shutdown}, Data}.
+
+%% close_context_proc/3 has no error channel -- a Session Deletion that fails or
+%% goes unanswered only costs the final usage report, and the teardown proceeds
+%% either way. This exists so a driver-level failure (which would otherwise have
+%% no callback) still lands the context in shutdown rather than wedging it live.
+teardown_err(Reason, State, Data) ->
+    ?LOG(error, "teardown procedure failed with ~p", [Reason]),
+    {next_state, State#{session := shutdown}, Data}.
 
 handle_dedicated_bearer_changes(_OldPCC, _NewPCC, Data) ->
     Data.

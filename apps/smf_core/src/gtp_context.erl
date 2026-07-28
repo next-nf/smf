@@ -462,9 +462,12 @@ handle_event({call, From},
 	    {keep_state_and_data, [{reply, From, {ok, PCtx}}]};
 
 	Side ->
-	    Data = close_context(Side, remote_failure, State, Data0),
-	    Actions = [{reply, From, {ok, PCtx}}],
-	    {next_state, State#{session := shutdown}, Data, Actions}
+	    %% Answer the UPF's Session Report before tearing down: the reply is the
+	    %% cause for its Session Report Response, and the teardown now awaits a
+	    %% PFCP Session Deletion of its own rather than completing inline.
+	    gen_statem:reply(From, {ok, PCtx}),
+	    run_teardown(close_context_proc(Side, remote_failure, State, Data0),
+			 State, Data0, [])
     end;
 
 %% PFCP Session Deleted By the UP function
@@ -719,13 +722,13 @@ handle_event({call, _From}, delete_context, _State, _Data) ->
     {keep_state_and_data, [postpone]};
 
 handle_event({call, From}, terminate_context, State, Data0) ->
-    Data = close_context('Access', normal, State, Data0),
-    {next_state, State#{session := shutdown}, Data, [{reply, From, ok}]};
+    run_teardown(close_context_proc('Access', normal, State, Data0),
+		 State, Data0, [{reply, From, ok}]);
 
 handle_event({call, From}, {peer_down, Path, Notify}, State,
 	     #{tunnels := #{'Access' := #tunnel{path = Path}}} = Data0) ->
-    Data = close_context('Access', peer_restart, Notify, State, Data0),
-    {next_state, State#{session := shutdown}, Data, [{reply, From, ok}]};
+    run_teardown(close_context_proc('Access', peer_restart, Notify, State, Data0),
+		 State, Data0, [{reply, From, ok}]);
 
 handle_event({call, From}, {peer_down, _Path, _Notify}, _State, _Data) ->
     {keep_state_and_data, [{reply, From, ok}]};
@@ -740,8 +743,7 @@ handle_event(cast, {delete_context, Reason}, State, Data) ->
 handle_event(info, {'DOWN', _MonitorRef, Type, Pid, _Info}, State,
 	     #{pfcp := #pfcp_ctx{node = Pid}} = Data0)
   when Type == process; Type == pfcp ->
-    Data = close_context(both, upf_failure, State, Data0),
-    {next_state, State#{session := shutdown}, Data};
+    run_teardown(close_context_proc(both, upf_failure, State, Data0), State, Data0, []);
 
 handle_event({timeout, context_idle}, stop_session, State, Data) ->
     delete_context(undefined, cp_inactivity_timeout, State, Data);
@@ -1168,11 +1170,25 @@ fteid_tunnel_side_f(#f_teid{ipv4 = IPv4, ipv6 = IPv6, teid = TEID} = FqTEID,
 fteid_tunnel_side_f(FqTEID, {_, _, Iter}) ->
     fteid_tunnel_side_f(FqTEID, maps:next(Iter)).
 
-close_context(Side, Reason, Notify, State, #{interface := Interface} = Data) ->
-    Interface:close_context(Side, Reason, Notify, State, Data).
+close_context_proc(Side, Reason, Notify, State, #{interface := Interface} = Data) ->
+    Interface:close_context_proc(Side, Reason, Notify, State, Data).
 
-close_context(Side, Reason, State, Data) ->
-    close_context(Side, Reason, active, State, Data).
+close_context_proc(Side, Reason, State, Data) ->
+    close_context_proc(Side, Reason, active, State, Data).
+
+%% Run a teardown procedure and land the context in shutdown once it completes.
+%% The transition happens HERE, in the callback, and not before: entering shutdown
+%% casts `stop` to self to be the last message in the inbox, so doing it while the
+%% procedure is still awaiting the PFCP Session Deletion reply would kill the
+%% context before the final usage report arrived. The teardown has no error
+%% channel (a failed deletion only costs the report), so both callbacks shut down.
+run_teardown(Proc, State, Data, Actions) ->
+    OkFun = fun(D, S, _) -> {next_state, S#{session := shutdown}, D, Actions} end,
+    ErrFun = fun(R, S, D) ->
+		     ?LOG(error, "teardown procedure failed with ~p", [R]),
+		     {next_state, S#{session := shutdown}, D, Actions}
+	     end,
+    async_m:run_async(Proc, OkFun, ErrFun, State, Data).
 
 delete_context(From, Reason, State, #{interface := Interface} = Data) ->
     Interface:delete_context(From, Reason, State, Data).

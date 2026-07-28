@@ -17,7 +17,7 @@
 	 handle_request/5, handle_response/5,
 	 handle_event/4, terminate/3]).
 
--export([delete_context/4, close_context/5]).
+-export([delete_context/4, close_context_proc/5]).
 -export([init_session/4, init_session_from_gtp_req/5, update_session_from_gtp_req/4]).
 -export([handle_dedicated_bearer_changes/3]).
 -ignore_xref([handle_dedicated_bearer_changes/3]).	% called via Interface variable
@@ -537,10 +537,14 @@ handle_request(ReqKey,
     case match_tunnel(?'S5/S8-C SGW', AccessTunnel, FqTEID) of
 	ok ->
 	    process_secondary_rat_usage_data_reports(IEs, Context, Data0),
-	    Data = smf_gtp_gsn_lib:close_context(?API, normal, Data0),
-	    Response = response(delete_session_response, AccessTunnel, request_accepted),
-	    gtp_context:send_response(ReqKey, Request, Response),
-	    {next_state, State#{session := shutdown}, Data};
+	    Proc = smf_gtp_gsn_lib:close_context_proc(?API, normal, Data0),
+	    OkFun = fun(Data, S, _D) ->
+			    Response = response(delete_session_response, AccessTunnel,
+						request_accepted),
+			    gtp_context:send_response(ReqKey, Request, Response),
+			    {next_state, S#{session := shutdown}, Data}
+		    end,
+	    async_m:run_async(Proc, OkFun, fun teardown_err/3, State, Data0);
 
 	{error, ReplyIEs} ->
 	    Response = response(delete_session_response, AccessTunnel, ReplyIEs),
@@ -589,6 +593,14 @@ handle_request(ReqKey,
 handle_request(ReqKey, _Msg, _Resent, _State, _Data) ->
     gtp_context:request_finished(ReqKey),
     keep_state_and_data.
+
+%% close_context_proc/3 has no error channel — a Session Deletion that fails or
+%% goes unanswered only costs the final usage report, and the teardown proceeds
+%% either way. This exists so a driver-level failure (which would otherwise have
+%% no callback) still lands the context in shutdown rather than wedging it live.
+teardown_err(Reason, State, Data) ->
+    ?LOG(error, "teardown procedure failed with ~p", [Reason]),
+    {next_state, State#{session := shutdown}, Data}.
 
 %% The Modify Bearer Response is built from the PFCP result, so it goes out from
 %% here rather than from the handler. {next_state, ...} (not keep_state) because
@@ -825,11 +837,9 @@ handle_response({CommandReqKey, _}, timeout, #gtp{type = update_bearer_request},
 
 handle_response({From, TermCause}, timeout, #gtp{type = delete_bearer_request},
 		State, Data0) ->
-    Data = smf_gtp_gsn_lib:close_context(?API, TermCause, Data0),
-    if is_tuple(From) -> gen_statem:reply(From, {error, timeout});
-       true -> ok
-    end,
-    {next_state, State#{session := shutdown}, Data};
+    Proc = smf_gtp_gsn_lib:close_context_proc(?API, TermCause, Data0),
+    OkFun = fun(Data, S, _D) -> delete_bearer_done(Data, S, From, {error, timeout}) end,
+    async_m:run_async(Proc, OkFun, fun teardown_err/3, State, Data0);
 
 handle_response({From, TermCause},
 		#gtp{type = delete_bearer_response,
@@ -837,15 +847,22 @@ handle_response({From, TermCause},
 		_Request, State,
 		#{context := Context} = Data0) ->
     process_secondary_rat_usage_data_reports(IEs, Context, Data0),
-    Data = smf_gtp_gsn_lib:close_context(?API, TermCause, Data0),
-    if is_tuple(From) -> gen_statem:reply(From, {ok, RespCause});
-       true -> ok
-    end,
-    {next_state, State#{session := shutdown}, Data};
+    Proc = smf_gtp_gsn_lib:close_context_proc(?API, TermCause, Data0),
+    OkFun = fun(Data, S, _D) -> delete_bearer_done(Data, S, From, {ok, RespCause}) end,
+    async_m:run_async(Proc, OkFun, fun teardown_err/3, State, Data0);
 
 handle_response(_CommandReqKey, _Response, _Request, #{session := SState}, _Data)
   when SState =/= connected ->
     keep_state_and_data.
+
+%% The delete_bearer caller (if there is one — the cast entry points pass a bare
+%% atom) is answered once the teardown is actually done, as it was when the PFCP
+%% deletion blocked inline.
+delete_bearer_done(Data, State, From, Reply) ->
+    if is_tuple(From) -> gen_statem:reply(From, Reply);
+       true -> ok
+    end,
+    {next_state, State#{session := shutdown}, Data}.
 
 %%%===================================================================
 %%% Dedicated Bearer helpers
@@ -2060,8 +2077,8 @@ encode_paa(IPv4, IPv6) when IPv4 /= undefined, IPv6 /= undefined ->
 encode_paa(Type, IPv4, IPv6) ->
     #v2_pdn_address_allocation{type = Type, address = <<IPv6/binary, IPv4/binary>>}.
 
-close_context(_Side, Reason, _Notify, _State, Data) ->
-    smf_gtp_gsn_lib:close_context(?API, Reason, Data).
+close_context_proc(_Side, Reason, _Notify, _State, Data) ->
+    smf_gtp_gsn_lib:close_context_proc(?API, Reason, Data).
 
 map_attr('APN', #{?'Access Point Name' := #v2_access_point_name{apn = APN}}) ->
     iolist_to_binary(lists:join($., APN));

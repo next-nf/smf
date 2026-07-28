@@ -17,6 +17,8 @@
 	 modify_session_async/5,
 	 modify_session_result/2,
 	 delete_session/2,
+	 delete_session_async/2,
+	 delete_session_result/1,
 	 session_liveness_check/1,
 	 usage_report_to_charging_events/3,
 	 query_usage_report/1, query_usage_report/2
@@ -62,18 +64,31 @@ modify_session(PCC, URRActions, Opts, BearerMap, PCtx0)
 %% delete_session/2
 delete_session(Reason, PCtx)
   when Reason /= upf_failure ->
-    Req = #pfcp{version = v1, type = session_deletion_request, seq_no = 0, ie = []},
-    case smf_sx_node:call(PCtx, Req) of
-	#pfcp{type = session_deletion_response,
-	      ie = #{pfcp_cause := 'Request accepted'} = IEs} ->
-	    maps:get(usage_report_sdr, IEs, undefined);
-
-	_Other ->
-	    ?LOG(warning, "PFCP: Session Deletion failed with ~p",
-			  [_Other]),
-	    undefined
-    end;
+    delete_session_result(smf_sx_node:call(PCtx, session_deletion_request()));
 delete_session(_Reason, _PCtx) ->
+    undefined.
+
+%% delete_session_async/2 — same request as delete_session/2, but issued without
+%% blocking the context. Shares the guard: a teardown caused by the UPF going
+%% away has no session left to delete and no report to harvest.
+delete_session_async(Reason, PCtx)
+  when Reason /= upf_failure ->
+    {request, smf_sx_node:send_request(PCtx, session_deletion_request())};
+delete_session_async(_Reason, _PCtx) ->
+    no_request.
+
+session_deletion_request() ->
+    #pfcp{version = v1, type = session_deletion_request, seq_no = 0, ie = []}.
+
+%% delete_session_result/1 — harvest the final usage report from a deletion
+%% response (the blocking call's or the async reply's). Deletion never fails a
+%% teardown: anything but an accepted response just means the final counters are
+%% lost, so it yields `undefined` and the teardown carries on.
+delete_session_result(#pfcp{type = session_deletion_response,
+			    ie = #{pfcp_cause := 'Request accepted'} = IEs}) ->
+    maps:get(usage_report_sdr, IEs, undefined);
+delete_session_result(_Other) ->
+    ?LOG(warning, "PFCP: Session Deletion failed with ~p", [_Other]),
     undefined.
 
 session_liveness_check(#pfcp_ctx{} = PCtx) ->
