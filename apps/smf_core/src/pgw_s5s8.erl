@@ -2626,17 +2626,32 @@ change_reporting_action(_, 'UTRAN', #{'rai-change' := true}, IE) ->
 change_reporting_action(_, _, _Triggers, IE) ->
     IE.
 
-%% A bearer the request asked for that policy/charging did not authorize is
-%% reported as not created. TS 29.274 7.2.2 (Table 7.2.2-2) makes the per-bearer
-%% Cause mandatory, so the peer learns which bearers it may keep -- TS 23.401
-%% Annex D states the same principle from the MME side: establish the bearers it
-%% can and deactivate those it cannot. No F-TEID is returned: there is no PDR and
-%% the UPF was never told about the bearer.
+%% A bearer the request asked for that policy/charging did not authorize.
+%%
+%% TS 29.274 7.2.2, Table 7.2.2-2 NOTE 1/2/3: the responder "shall return ALL
+%% bearers with the 'Bearer Context Created' IEs ... but with different Cause
+%% values. Bearers that were not accepted shall have an appropriate rejection
+%% value in the Cause IE." So a rejected bearer rides in Bearer Contexts created
+%% (instance 0) alongside the accepted ones, distinguished only by its Cause --
+%% NOT in Bearer Contexts marked for removal (instance 1), which Table 7.2.2-3
+%% reserves for bearers the *request* asked to remove.
+%%
+%% No F-TEID: there is no PDR and the UPF was never told about the bearer. The
+%% peer removes these by a separate procedure (NOTE 1/2/3).
 rejected_bearer_contexts(EBIs) ->
     [#v2_bearer_context{
-	instance = 1,
+	instance = 0,
 	group = [#v2_cause{v2_cause = no_resources_available},
 		 #v2_eps_bearer_id{eps_bearer_id = EBI}]} || EBI <- EBIs].
+
+%% TS 29.274 7.2.2 lists "Request accepted partially" among the message-specific
+%% causes. The default bearer is still up -- a failed default bearer is a
+%% message-level failure cause and never reaches here -- so a partly-authorized
+%% request is exactly that: accepted, partially.
+partial_cause(request_accepted, [_|_]) ->
+    request_accepted_partially;
+partial_cause(Cause, _Rejected) ->
+    Cause.
 
 change_reporting_actions(RequestIEs, IE0) ->
     Indications = gtp_v2_c:get_indication_flags(RequestIEs),
@@ -2651,10 +2666,11 @@ create_session_response(Cause, SessionOpts, RequestIEs,
 			#context{ms_ip = #ue_ip{v4 = MSv4, v6 = MSv6}} = Context) ->
 
     IE0 = bearer_context(SessionOpts, BearerMap, Context, rejected_bearer_contexts(Rejected)),
+    %% every bearer the request asked for is represented in IE0 by now
     IE1 = pdn_pco(SessionOpts, RequestIEs, IE0),
     IE2 = change_reporting_actions(RequestIEs, IE1),
 
-    [Cause,
+    [partial_cause(Cause, Rejected),
      #v2_apn_restriction{restriction_type_value = 0},
      context_charging_id(Context),
      s5s8_pgw_gtp_c_tei(Tunnel),

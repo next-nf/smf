@@ -2130,18 +2130,34 @@ create_session_multi_bearer(Config) ->
     %% A bearer with no PCC rule (or none that survived the charging decision)
     %% is not established: it gets no PDR, so the UPF is never told about it and
     %% the response must reject it rather than hand back an F-TEID the UPF has
-    %% never heard of. TS 29.274 7.2.2 carries the not-created bearers as
-    %% Bearer Context at instance 1 with a per-bearer Cause.
+    %% never heard of.
+    %%
+    %% TS 29.274 7.2.2 Table 7.2.2-2 NOTE 1/2/3: ALL bearers come back in Bearer
+    %% Contexts created (instance 0); the rejected ones are distinguished only by
+    %% their Cause. The message-level Cause is "Request accepted partially".
     ?match(
        #gtp{type = create_session_response,
-	    ie = #{{v2_bearer_context, 0} := #v2_bearer_context{},
-		   {v2_bearer_context, 1} :=
-		       #v2_bearer_context{
-			  group = #{{v2_cause, 0} :=
-					#v2_cause{v2_cause = no_resources_available},
-				    {v2_eps_bearer_id, 0} :=
-					#v2_eps_bearer_id{eps_bearer_id = 6}}}}},
+	    ie = #{{v2_cause, 0} :=
+		       #v2_cause{v2_cause = request_accepted_partially},
+		   {v2_bearer_context, 0} := [_, _]}},
        Response),
+    #gtp{ie = #{{v2_bearer_context, 0} := BearerCtxs}} = Response,
+    [Rejected6] =
+	[BC || #v2_bearer_context{
+		  group = #{{v2_eps_bearer_id, 0} :=
+				#v2_eps_bearer_id{eps_bearer_id = 6}}} = BC <- BearerCtxs],
+    ?match(#v2_bearer_context{
+	      group = #{{v2_cause, 0} := #v2_cause{v2_cause = no_resources_available}}},
+	   Rejected6),
+    %% ...and the accepted default bearer still carries its F-TEID.
+    [Accepted5] =
+	[BC || #v2_bearer_context{
+		  group = #{{v2_eps_bearer_id, 0} :=
+				#v2_eps_bearer_id{eps_bearer_id = 5}}} = BC <- BearerCtxs],
+    ?match(#v2_bearer_context{
+	      group = #{{v2_cause, 0} := #v2_cause{v2_cause = request_accepted},
+			{v2_fully_qualified_tunnel_endpoint_identifier, 2} := _}},
+	   Accepted5),
 
     CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
     #{dedicated := Dedicated, bearers := BearerMap} =

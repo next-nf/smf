@@ -1200,15 +1200,15 @@ validate_response(create_session_request, multi_bearer, Response,
 		  #gtpc{local_control_tei = LocalCntlTEI} = GtpC0) ->
     validate_seq_no(Response, GtpC0),
     validate_teid(Response, GtpC0),
-    %% Only the bearers a PCC rule binds to are created; the rest come back at
-    %% instance 1 (not created) with a per-bearer Cause. With the default Gx
-    %% answer that is EBI 5 created and EBI 6 rejected.
+    %% TS 29.274 7.2.2 Table 7.2.2-2 NOTE 1/2/3: every requested bearer comes back
+    %% in Bearer Contexts created, accepted and rejected alike, distinguished by
+    %% the per-bearer Cause. With the default Gx answer EBI 5 is accepted and
+    %% EBI 6 is not, so the message-level Cause is "Request accepted partially".
     ?match(
        #gtp{type = create_session_response,
 	    tei = LocalCntlTEI,
-	    ie = #{{v2_cause,0} := #v2_cause{v2_cause = request_accepted},
-		   {v2_bearer_context,0} := #v2_bearer_context{},
-		   {v2_bearer_context,1} := #v2_bearer_context{}}},
+	    ie = #{{v2_cause,0} := #v2_cause{v2_cause = request_accepted_partially},
+		   {v2_bearer_context,0} := [_,_]}},
        Response),
     #gtp{ie = #{{v2_fully_qualified_tunnel_endpoint_identifier,1} :=
 		    #v2_fully_qualified_tunnel_endpoint_identifier{
