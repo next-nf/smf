@@ -2137,7 +2137,7 @@ modify_bearer_multi_bearer(Config) ->
 
     %% Spawn a dedicated bearer so the request has two bearers to name.
     DedRule = #{'Charging-Rule-Definition' =>
-		    [#{'Charging-Rule-Name' => [<<"ded-mb-rule">>],
+		    [#{'Charging-Rule-Name' => <<"ded-mb-rule">>,
 		       'Flow-Information' =>
 			   [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
 			      'Flow-Direction' => [2]}],
@@ -6172,7 +6172,7 @@ gx_rar_dedicated_bearer_create(Config) ->
     %% Install a PCC rule with a QCI/ARP different from the default bearer
     %% to trigger dedicated bearer creation (BCM = UE_NW set in init_per_testcase)
     DedRule = #{'Charging-Rule-Definition' =>
-                    [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+                    [#{'Charging-Rule-Name' => <<"ded-rule-1">>,
                        'Flow-Information' =>
                            [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
                               'Flow-Direction' => [2]}],
@@ -6326,7 +6326,7 @@ gx_rar_dedicated_bearer_create_unarmed(Config) ->
     %% to trigger dedicated bearer creation (BCM = UE_NW set in init_per_testcase),
     %% but WITHOUT Resource-Allocation-Notification -- the PCRF did not arm it.
     DedRule = #{'Charging-Rule-Definition' =>
-                    [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+                    [#{'Charging-Rule-Name' => <<"ded-rule-1">>,
                        'Flow-Information' =>
                            [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
                               'Flow-Direction' => [2]}],
@@ -6499,7 +6499,7 @@ default_qci_arp_rule_binds_to_default(Config) ->
     %% Install a PCC rule whose QoS matches the default bearer's QCI/ARP
     %% (QCI 8, ARP PL=10,PCI=1,PVI=0 from create_session).
     DefRule = #{'Charging-Rule-Definition' =>
-		    [#{'Charging-Rule-Name' => [<<"def-qos-rule">>],
+		    [#{'Charging-Rule-Name' => <<"def-qos-rule">>,
 		       'Flow-Information' =>
 			   [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
 			      'Flow-Direction' => [2]}],
@@ -6565,7 +6565,7 @@ modify_bearer_command_arp_fanout(Config) ->
     %% (PL=10, PCI=1, PVI=0 from create_session) so the resulting dedicated
     %% bearer carries the same ARP as the default bearer.
     DedRule = #{'Charging-Rule-Definition' =>
-		    [#{'Charging-Rule-Name' => [<<"ded-arp-rule">>],
+		    [#{'Charging-Rule-Name' => <<"ded-arp-rule">>,
 		       'Flow-Information' =>
 			   [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
 			      'Flow-Direction' => [2]}],
@@ -6721,7 +6721,7 @@ modify_bearer_command_arp_fanout_delete_on_fail(Config) ->
     %% (PL=10, PCI=1, PVI=0 from create_session) so the resulting dedicated
     %% bearer carries the same ARP as the default bearer.
     DedRule = #{'Charging-Rule-Definition' =>
-		    [#{'Charging-Rule-Name' => [<<"ded-arp-rule">>],
+		    [#{'Charging-Rule-Name' => <<"ded-arp-rule">>,
 		       'Flow-Information' =>
 			   [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
 			      'Flow-Direction' => [2]}],
@@ -6829,7 +6829,7 @@ modify_bearer_command_arp_fanout_temporary_hold(Config) ->
     %% (PL=10, PCI=1, PVI=0 from create_session) so the resulting dedicated
     %% bearer carries the same ARP as the default bearer.
     DedRule = #{'Charging-Rule-Definition' =>
-		    [#{'Charging-Rule-Name' => [<<"ded-arp-rule">>],
+		    [#{'Charging-Rule-Name' => <<"ded-arp-rule">>,
 		       'Flow-Information' =>
 			   [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
 			      'Flow-Direction' => [2]}],
@@ -6942,7 +6942,7 @@ default_bearer_arp_rekey_binds_new_rule(Config) ->
     {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
     #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
     DefRule = #{'Charging-Rule-Definition' =>
-		    [#{'Charging-Rule-Name' => [<<"new-arp-rule">>],
+		    [#{'Charging-Rule-Name' => <<"new-arp-rule">>,
 		       'Flow-Information' =>
 			   [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
 			      'Flow-Direction' => [2]}],
@@ -7004,7 +7004,7 @@ default_arp_rekey_skips_dedicated_collision(Config) ->
     RuleFun =
 	fun(Name, QCI, PL) ->
 		#{'Charging-Rule-Definition' =>
-		      [#{'Charging-Rule-Name' => [Name],
+		      [#{'Charging-Rule-Name' => Name,
 			 'Flow-Information' =>
 			     [#{'Flow-Description' =>
 				    [<<"permit out ip from any to assigned">>],
@@ -7110,7 +7110,7 @@ gx_rar_dedicated_bearer_modify(Config) ->
     %% First RAR: install a GBR rule with a QCI/ARP different from the default
     %% bearer, creating a dedicated bearer (QCI 1, ARP PL=2).
     Rule1 = #{'Charging-Rule-Definition' =>
-		  [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+		  [#{'Charging-Rule-Name' => <<"ded-rule-1">>,
 		     'Flow-Information' =>
 			 [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
 			    'Flow-Direction' => [2]}],
@@ -7199,7 +7199,7 @@ gx_rar_dedicated_bearer_modify(Config) ->
     %% Request for DedEBI.
     #{aaa_session := SessionOpts2} = smf_context:test_cmd(gtp, CtxKey, info),
     Rule2 = #{'Charging-Rule-Definition' =>
-		  [#{'Charging-Rule-Name' => [<<"ded-rule-2">>],
+		  [#{'Charging-Rule-Name' => <<"ded-rule-2">>,
 		     'Flow-Information' =>
 			 [#{'Flow-Description' =>
 				[<<"permit out ip from any to assigned">>],
@@ -7388,7 +7388,7 @@ gx_rar_dedicated_bearer_update_message_level_reject(Config) ->
 
     %% First RAR: install a rule on QCI 1 / ARP PL=2, creating a dedicated bearer.
     Rule1 = #{'Charging-Rule-Definition' =>
-		  [#{'Charging-Rule-Name' => [<<"msglvl-rule-1">>],
+		  [#{'Charging-Rule-Name' => <<"msglvl-rule-1">>,
 		     'Flow-Information' =>
 			 [#{'Flow-Description' =>
 				[<<"permit out ip from any to assigned">>],
@@ -7425,7 +7425,7 @@ gx_rar_dedicated_bearer_update_message_level_reject(Config) ->
     %% staging DedEBI.
     #{aaa_session := SessionOpts2} = smf_context:test_cmd(gtp, CtxKey, info),
     Rule2 = #{'Charging-Rule-Definition' =>
-		  [#{'Charging-Rule-Name' => [<<"msglvl-rule-2">>],
+		  [#{'Charging-Rule-Name' => <<"msglvl-rule-2">>,
 		     'Flow-Information' =>
 			 [#{'Flow-Description' =>
 				[<<"permit out ip from any to assigned">>],
@@ -7514,7 +7514,7 @@ gx_rar_two_dedicated_bearers_batched_update(Config) ->
     RuleFun =
 	fun(Name, QCI, PL, UL, DL) ->
 		#{'Charging-Rule-Definition' =>
-		      [#{'Charging-Rule-Name' => [Name],
+		      [#{'Charging-Rule-Name' => Name,
 			 'Flow-Information' =>
 			     [#{'Flow-Description' =>
 				    [<<"permit out ip from any to assigned">>],
@@ -7636,7 +7636,7 @@ gx_rar_two_dedicated_bearers_batched_delete(Config) ->
     RuleFun =
 	fun(Name, QCI, PL, UL, DL) ->
 		#{'Charging-Rule-Definition' =>
-		      [#{'Charging-Rule-Name' => [Name],
+		      [#{'Charging-Rule-Name' => Name,
 			 'Flow-Information' =>
 			     [#{'Flow-Description' =>
 				    [<<"permit out ip from any to assigned">>],
@@ -7695,11 +7695,8 @@ gx_rar_two_dedicated_bearers_batched_delete(Config) ->
     %% Both dedicated bearers end up with no bound rules, so this must batch
     %% into ONE Delete Bearer Request carrying both EBIs.
     #{aaa_session := SOpts2} = smf_context:test_cmd(gtp, CtxKey, info),
-    %% The rules were installed via Charging-Rule-Definition, whose (list-valued)
-    %% Charging-Rule-Name field becomes the PCC rules map key verbatim; echo that
-    %% same list-of-a-list shape back so the remove event's key lookup hits.
     RemoveCR = [{pcc, remove, [#{'Charging-Rule-Name' =>
-				      [[<<"ded-rule-1">>], [<<"ded-rule-2">>]]}]}],
+				      [<<"ded-rule-1">>, <<"ded-rule-2">>]}]}],
     Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
 			  session = SOpts2, events = RemoveCR},
     {_, Resp2, _, _} =
@@ -7769,7 +7766,7 @@ gx_rar_removed_rule_on_default_bearer_no_delete(Config) ->
     #{aaa_session := SOpts0} = smf_context:test_cmd(gtp, CtxKey, info),
     DefaultQARule =
 	#{'Charging-Rule-Definition' =>
-	      [#{'Charging-Rule-Name' => [<<"default-qa-rule">>],
+	      [#{'Charging-Rule-Name' => <<"default-qa-rule">>,
 		 'Flow-Information' =>
 		     [#{'Flow-Description' =>
 			    [<<"permit out ip from any to assigned">>],
@@ -7810,7 +7807,7 @@ gx_rar_removed_rule_on_default_bearer_no_delete(Config) ->
     %% {8,{10,1,0}} with no bound rule left in NewPCC, maps it via the bearer
     %% map to DefaultEBI -- exactly the LBI-leak scenario.
     #{aaa_session := SOpts1} = smf_context:test_cmd(gtp, CtxKey, info),
-    RemoveCR = [{pcc, remove, [#{'Charging-Rule-Name' => [[<<"default-qa-rule">>]]}]}],
+    RemoveCR = [{pcc, remove, [#{'Charging-Rule-Name' => [<<"default-qa-rule">>]}]}],
     Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
 			  session = SOpts1, events = RemoveCR},
     {_, Resp1, _, _} =
@@ -7862,7 +7859,7 @@ gx_rar_bearer_binding_reeval(Config) ->
 
     %% First RAR: install ded-rule-1 at QCI 1, ARP PL=2 → dedicated bearer.
     Rule1 = #{'Charging-Rule-Definition' =>
-		  [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+		  [#{'Charging-Rule-Name' => <<"ded-rule-1">>,
 		     'Flow-Information' =>
 			 [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
 			    'Flow-Direction' => [2]}],
@@ -7924,7 +7921,7 @@ gx_rar_bearer_binding_reeval(Config) ->
     %% and a Delete Bearer Request for the now-empty old bearer (EBI 6).
     #{aaa_session := SessionOpts2} = smf_context:test_cmd(gtp, CtxKey, info),
     Rule1b = #{'Charging-Rule-Definition' =>
-		   [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+		   [#{'Charging-Rule-Name' => <<"ded-rule-1">>,
 		      'Flow-Information' =>
 			  [#{'Flow-Description' =>
 				 [<<"permit out ip from any to assigned">>],
@@ -8056,7 +8053,7 @@ gx_dedicated_bearer_create_failure(Config) ->
     %% Install a PCC rule with a QCI/ARP different from the default bearer
     %% to trigger dedicated bearer creation (BCM = UE_NW set in init_per_testcase)
     DedRule = #{'Charging-Rule-Definition' =>
-                    [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+                    [#{'Charging-Rule-Name' => <<"ded-rule-1">>,
                        'Flow-Information' =>
                            [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
                               'Flow-Direction' => [2]}],
@@ -8164,7 +8161,7 @@ gx_dedicated_bearer_create_power_saving_retry(Config) ->
     %% Install a PCC rule with a QCI/ARP different from the default bearer
     %% to trigger dedicated bearer creation (BCM = UE_NW set in init_per_testcase)
     DedRule = #{'Charging-Rule-Definition' =>
-                    [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+                    [#{'Charging-Rule-Name' => <<"ded-rule-1">>,
                        'Flow-Information' =>
                            [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
                               'Flow-Direction' => [2]}],
@@ -8332,7 +8329,7 @@ gx_dedicated_bearer_create_partial_reject(Config) ->
     %% Install a PCC rule with a QCI/ARP different from the default bearer
     %% to trigger dedicated bearer creation (BCM = UE_NW set in init_per_testcase)
     DedRule = #{'Charging-Rule-Definition' =>
-                    [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+                    [#{'Charging-Rule-Name' => <<"ded-rule-1">>,
                        'Flow-Information' =>
                            [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
                               'Flow-Direction' => [2]}],
@@ -9410,7 +9407,7 @@ mme_delete_bearer_command(Config) ->
     %% Install a PCC rule with a QCI/ARP different from the default bearer to
     %% trigger dedicated bearer creation (BCM = UE_NW set in init_per_testcase).
     DedRule = #{'Charging-Rule-Definition' =>
-                    [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+                    [#{'Charging-Rule-Name' => <<"ded-rule-1">>,
                        'Flow-Information' =>
                            [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
                               'Flow-Direction' => [2]}],
@@ -9569,7 +9566,7 @@ mme_delete_bearer_command_multi(Config) ->
     RuleFun =
         fun(Name, QCI, PL) ->
                 #{'Charging-Rule-Definition' =>
-                      [#{'Charging-Rule-Name' => [Name],
+                      [#{'Charging-Rule-Name' => Name,
                          'Flow-Information' =>
                              [#{'Flow-Description' =>
                                     [<<"permit out ip from any to assigned">>],
@@ -9695,7 +9692,7 @@ dedicated_bearer_session_delete(Config) ->
                           session = SessionOpts, events = []},
 
     DedRule = #{'Charging-Rule-Definition' =>
-                    [#{'Charging-Rule-Name' => [<<"ded-rule-1">>],
+                    [#{'Charging-Rule-Name' => <<"ded-rule-1">>,
                        'Flow-Information' =>
                            [#{'Flow-Description' => [<<"permit out ip from any to assigned">>],
                               'Flow-Direction' => [2]}],
