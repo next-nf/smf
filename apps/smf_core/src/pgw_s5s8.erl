@@ -947,23 +947,48 @@ subscribed_arp_fan_out(OldSOpts, NewARP, Context, #{dedicated := Dedicated} = Da
     DefaultEBI = Context#context.default_bearer_id,
     case NewARP =/= undefined andalso OldARP =/= undefined andalso NewARP =/= OldARP of
 	true ->
-	    %% TODO(#31): the is_map(QoS) guard skips a descriptor with undefined
-	    %% QoS; the pre-branch code still fanned out with a QCI-only fallback.
 	    {Contexts, Staged} =
-		maps:fold(
-		  fun(EBI, #ded_bearer{arp = ARP, qos = QoS} = Desc, {Cs, St})
-			when ARP =:= OldARP, EBI =/= DefaultEBI, is_map(QoS) ->
-			  NewQoS = set_qos_arp(QoS, NewARP),
-			  NewDesc = Desc#ded_bearer{arp = NewARP, qos = NewQoS},
-			  {[update_bearer_context(EBI, NewQoS, undefined) | Cs],
-			   St#{EBI => NewDesc}};
-		     (_, _, Acc) ->
-			  Acc
-		  end, {[], #{}}, Dedicated),
+		maps:fold(fan_out_arp(OldARP, NewARP, DefaultEBI, _, _, _),
+			  {[], #{}}, Dedicated),
 	    {Contexts, Staged, rekey_default_qci_arp(DefaultEBI, NewARP, Data)};
 	false ->
 	    {[], #{}, Data}
     end.
+
+%% Fan the re-authorized ARP out to one dedicated bearer, or decline to.
+%%
+%% The default bearer is excluded: its ARP is carried by the Update Bearer
+%% Request this fan-out rides in, not by a fanned-out context. Today it is never
+%% in `dedicated` at all, so this is belt-and-braces -- but #90 proposes giving
+%% the default a descriptor, which would make the guard load-bearing.
+fan_out_arp(_OldARP, _NewARP, DefaultEBI, EBI, _Desc, Acc) when EBI =:= DefaultEBI ->
+    Acc;
+%% Only bearers still carrying the PREVIOUS subscribed ARP are affected
+%% (TS 23.401 5.4.2.2 step 5).
+fan_out_arp(OldARP, _NewARP, _DefaultEBI, _EBI, #ded_bearer{arp = ARP}, Acc)
+  when ARP =/= OldARP ->
+    Acc;
+%% A descriptor with no QoS is skipped rather than fanned out with a QCI-only
+%% fallback (#31). smf_gsn_lib:aggregate_bearer_qos/2 yields `undefined` only
+%% when NO PCC rule is bound to the bearer, and encode_bearer_level_qos/1
+%% defaults a missing MBR/GBR to 0 -- so the QCI-only fallback the pre-descriptor
+%% code used would signal GBR=0/MBR=0 to the UE, destroying a GBR bearer's
+%% guarantees in order to carry an ARP change. Declining is the lesser harm.
+%%
+%% This is a transient state: the bearer's spawning rule was removed between its
+%% Create Bearer Request and the Response that installed it, and the next PCC
+%% change deletes it via detect_removed_bearers/3. Until then its stored ARP is
+%% stale, so say so rather than skipping silently.
+fan_out_arp(_OldARP, NewARP, _DefaultEBI, EBI, #ded_bearer{qos = undefined}, Acc) ->
+    ?LOG(warning, "subscribed ARP changed to ~p but dedicated bearer ~p has no "
+	 "bound PCC rule and therefore no QoS to re-signal; leaving it unchanged "
+	 "(its stored ARP is now stale until the next PCC change removes it)",
+	 [NewARP, EBI]),
+    Acc;
+fan_out_arp(_OldARP, NewARP, _DefaultEBI, EBI, #ded_bearer{qos = QoS} = Desc, {Cs, St}) ->
+    NewQoS = set_qos_arp(QoS, NewARP),
+    NewDesc = Desc#ded_bearer{arp = NewARP, qos = NewQoS},
+    {[update_bearer_context(EBI, NewQoS, undefined) | Cs], St#{EBI => NewDesc}}.
 
 %% New ARP carried in the command's Bearer Level QoS, as a {PL, PCI, PVI} tuple.
 command_bearer_arp(#{?'Bearer Level QoS' :=
