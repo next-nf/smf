@@ -12,7 +12,7 @@
 
 -export([connect_upf_candidates/4, create_session/13]).
 -export([triggered_charging_event/4, usage_report/3,
-	 close_context/3, close_context/4, close_context_proc/3]).
+	 close_context/4, close_context_proc/3]).
 -export([update_tunnel_endpoint/2,
 	 apply_bearer_change_proc/5, access_bearer_change_proc/6]).
 
@@ -331,21 +331,12 @@ usage_report(_URRActions, _UsageReport, #{aaa_session := _} = Data) ->
     Data.
 
 
-%% close_context/3
-close_context(_, {API, TermCause}, Context) ->
-    close_context(API, TermCause, Context);
-close_context(API, TermCause, #{pfcp := PCtx} = Data)
-  when is_atom(TermCause) ->
-    UsageReport = smf_pfcp_context:delete_session(TermCause, PCtx),
-    close_context(API, TermCause, UsageReport, Data);
-close_context(_API, _TermCause, Data) ->
-    Data.
-
-%% close_context_proc/3 — async twin of close_context/3, for callers that can run
-%% their teardown as an async_m procedure. Yields the closed Data for the caller
-%% to commit; it never travels the error channel, because a failed or unanswered
-%% Session Deletion only costs the final usage report (delete_session_result/1
-%% yields `undefined`) and must not stop the teardown.
+%% close_context_proc/3 — tear the context down: delete the PFCP session, harvest
+%% the final usage report from the response and close out the accounting with it.
+%% Yields the closed Data for the caller to commit; it never travels the error
+%% channel, because a failed or unanswered Session Deletion only costs the final
+%% usage report (delete_session_result/1 yields `undefined`) and must not stop the
+%% teardown.
 %%
 %% The caller must move to `session := shutdown` from its OkFun, not before: the
 %% shutdown enter casts `stop` to itself to be the last message in the inbox, so
