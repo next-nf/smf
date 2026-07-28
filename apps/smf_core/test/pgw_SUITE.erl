@@ -6575,36 +6575,31 @@ modify_bearer_command_arp_fanout(Config) ->
     %% Send a Modify Bearer Command changing the subscribed ARP to PL=5.
     {GtpC2, Cmd} = modify_bearer_command({arp_change, 5}, GtpC),
 
-    %% The PGW emits the default-bearer Update Bearer Request (echoing the
-    %% command seq_no) with the new ARP.
-    UBRDefault = recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok),
+    %% TS 23.401 5.4.2.2 step 5 is ONE modification of the PDN connection, and
+    %% TS 29.274 7.2.15 carries a list of Bearer Contexts -- so the PGW emits a
+    %% SINGLE Update Bearer Request (echoing the command seq_no) carrying the
+    %% default bearer AND every dedicated bearer the ARP change fanned out to.
+    UBR = recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok),
     #gtp{type = update_bearer_request,
-	 ie = #{{v2_bearer_context, 0} :=
-		    #v2_bearer_context{
-		       group = #{{v2_eps_bearer_id, 0} :=
-				     #v2_eps_bearer_id{eps_bearer_id = 5},
-				 {v2_bearer_level_quality_of_service, 0} :=
-				     #v2_bearer_level_quality_of_service{pl = 5}}}}} =
-	UBRDefault,
+	 ie = #{{v2_bearer_context, 0} := UBRCtxs}} = UBR,
+    ?equal(2, length(UBRCtxs)),
 
-    %% ... and a separate network-initiated Update Bearer Request for the
-    %% DEDICATED bearer carrying its unchanged QCI/GBR/MBR but the new ARP.
-    UBRDed = recv_pdu(Cntl, ?TIMEOUT),
-    #gtp{type = update_bearer_request,
-	 ie = #{{v2_bearer_context, 0} :=
-		    #v2_bearer_context{
-		       group = #{{v2_eps_bearer_id, 0} :=
-				     #v2_eps_bearer_id{eps_bearer_id = DedEBI},
-				 {v2_bearer_level_quality_of_service, 0} :=
-				     #v2_bearer_level_quality_of_service{
-					pl = 5, label = 1,
-					guaranteed_bit_rate_for_uplink = 6,
-					maximum_bit_rate_for_downlink = 8}}}}} =
-	UBRDed,
+    %% the default bearer, at the new ARP...
+    ?match([#v2_bearer_context{
+	       group = #{{v2_bearer_level_quality_of_service, 0} :=
+			     #v2_bearer_level_quality_of_service{pl = 5}}}],
+	   bearer_ctxs_for(5, UBRCtxs)),
+    %% ...and the dedicated bearer, unchanged QCI/GBR/MBR but the new ARP.
+    ?match([#v2_bearer_context{
+	       group = #{{v2_bearer_level_quality_of_service, 0} :=
+			     #v2_bearer_level_quality_of_service{
+				pl = 5, label = 1,
+				guaranteed_bit_rate_for_uplink = 6,
+				maximum_bit_rate_for_downlink = 8}}}],
+	   bearer_ctxs_for(DedEBI, UBRCtxs)),
 
-    %% Answer both Update Bearer Requests to complete the exchanges.
-    send_pdu(GtpC2, make_response(UBRDefault, simple, GtpC2)),
-    send_pdu(Cntl, GtpC, make_response(UBRDed, simple, GtpCDed)),
+    %% One response answers both bearers.
+    send_pdu(GtpC2, make_response(UBR, simple, GtpC2)),
 
     ?equal({ok, timeout}, recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok)),
     ?equal([], outstanding_requests()),
@@ -6686,27 +6681,18 @@ modify_bearer_command_arp_fanout_delete_on_fail(Config) ->
     %% Send a Modify Bearer Command changing the subscribed ARP to PL=5.
     {GtpC2, Cmd} = modify_bearer_command({arp_change, 5}, GtpC),
 
-    %% The PGW emits the default-bearer Update Bearer Request (echoing the
-    %% command seq_no) with the new ARP.
-    UBRDefault = recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok),
-    ?match(#gtp{type = update_bearer_request}, UBRDefault),
-
-    %% ... and a separate network-initiated Update Bearer Request for the
-    %% DEDICATED bearer.
-    UBRDed = recv_pdu(Cntl, ?TIMEOUT),
+    %% One Update Bearer Request carrying the default AND the dedicated bearer.
+    UBR = recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok),
     #gtp{type = update_bearer_request,
-	 ie = #{{v2_bearer_context, 0} :=
-		    #v2_bearer_context{
-		       group = #{{v2_eps_bearer_id, 0} :=
-				     #v2_eps_bearer_id{eps_bearer_id = DedEBI}}}}} =
-	UBRDed,
+	 ie = #{{v2_bearer_context, 0} := UBRCtxs}} = UBR,
+    ?match([_], bearer_ctxs_for(DedEBI, UBRCtxs)),
 
     %% Accept the default bearer's update, but reject the dedicated bearer's
     %% with a terminal per-bearer Cause (M5 subscribed-QoS Modify failure).
-    send_pdu(GtpC2, make_response(UBRDefault, simple, GtpC2)),
-    DedResp = two_bearer_update_response(UBRDed, GtpCDed,
-					 [{DedEBI, no_resources_available}]),
-    send_pdu(Cntl, GtpC, DedResp),
+    Resp = two_bearer_update_response(UBR, GtpC2,
+				      [{5, request_accepted},
+				       {DedEBI, no_resources_available}]),
+    send_pdu(GtpC2, Resp),
 
     ?equal({ok, timeout}, recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok)),
 
@@ -6794,7 +6780,7 @@ modify_bearer_command_arp_fanout_temporary_hold(Config) ->
 
     %% Complete the Create Bearer exchange to install the dedicated bearer.
     DedEBI = 6,
-    GtpCDed = complete_create_bearer(Cntl, GtpC, DedEBI),
+    _GtpCDed = complete_create_bearer(Cntl, GtpC, DedEBI),
 
     %% The dedicated bearer must be installed under the default's ARP.
     #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
@@ -6803,24 +6789,19 @@ modify_bearer_command_arp_fanout_temporary_hold(Config) ->
     %% Send a Modify Bearer Command changing the subscribed ARP to PL=5.
     {GtpC2, Cmd} = modify_bearer_command({arp_change, 5}, GtpC),
 
-    UBRDefault = recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok),
-    ?match(#gtp{type = update_bearer_request}, UBRDefault),
-
-    UBRDed = recv_pdu(Cntl, ?TIMEOUT),
+    %% One Update Bearer Request carrying the default AND the dedicated bearer.
+    UBR = recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok),
     #gtp{type = update_bearer_request,
-	 ie = #{{v2_bearer_context, 0} :=
-		    #v2_bearer_context{
-		       group = #{{v2_eps_bearer_id, 0} :=
-				     #v2_eps_bearer_id{eps_bearer_id = DedEBI}}}}} =
-	UBRDed,
+	 ie = #{{v2_bearer_context, 0} := UBRCtxs}} = UBR,
+    ?match([_], bearer_ctxs_for(DedEBI, UBRCtxs)),
 
     %% Accept the default bearer's update, but answer the dedicated bearer's
     %% with a temporary per-bearer Cause (UE unreachable due to power saving).
-    send_pdu(GtpC2, make_response(UBRDefault, simple, GtpC2)),
-    DedResp = two_bearer_update_response(
-		 UBRDed, GtpCDed,
-		 [{DedEBI, ue_is_temporarily_not_reachable_due_to_power_saving}]),
-    send_pdu(Cntl, GtpC, DedResp),
+    Resp = two_bearer_update_response(
+	     UBR, GtpC2,
+	     [{5, request_accepted},
+	      {DedEBI, ue_is_temporarily_not_reachable_due_to_power_saving}]),
+    send_pdu(GtpC2, Resp),
 
     ?equal({ok, timeout}, recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok)),
     ?equal([], outstanding_requests()),
@@ -7274,6 +7255,14 @@ complete_create_bearer(Cntl, GtpC, DedEBI) ->
 %% Build an update_bearer_response carrying one Bearer Context per {EBI, Cause}
 %% pair in BearerCauses, echoing Req's seq_no (TS 29.274 §7.2.16). Extends the
 %% single-bearer construction in smf_pgw_test_lib:make_response/3 to a batch.
+%% Select the Bearer Context(s) for one EBI out of an Update Bearer Request's
+%% (possibly multi-element) Bearer Contexts list.
+bearer_ctxs_for(EBI, BearerCtxs) ->
+    [BC || #v2_bearer_context{
+	      group = #{{v2_eps_bearer_id, 0} :=
+			    #v2_eps_bearer_id{eps_bearer_id = E}}} = BC
+	       <- lists:flatten([BearerCtxs]), E =:= EBI].
+
 two_bearer_update_response(#gtp{seq_no = SeqNo}, #gtpc{restart_counter = RCnt,
 							remote_control_tei = RemoteCntlTEI},
 			   BearerCauses) ->
