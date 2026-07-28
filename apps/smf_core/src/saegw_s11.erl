@@ -51,8 +51,15 @@
 -define('RAT Type',					{v2_rat_type, 0}).
 -define('Sender F-TEID for Control Plane',		{v2_fully_qualified_tunnel_endpoint_identifier, 0}).
 -define('Access Point Name',				{v2_access_point_name, 0}).
--define('Bearer Contexts to be created',		{v2_bearer_context, 0}).
--define('Bearer Contexts to be modified',		{v2_bearer_context, 0}).
+%% See the note on the same defines in pgw_s5s8.erl: the instance-0 aliases are
+%% one key under the name each message's own IE table uses, and instance 1 is a
+%% DIFFERENT list (bearers to be removed / marked for removal), not more of the same.
+-define('Bearer Contexts to be created',		{v2_bearer_context, 0}).  %% 7.2.1
+-define('Bearer Contexts to be modified',		{v2_bearer_context, 0}).  %% 7.2.7
+-define('Bearer Context',				{v2_bearer_context, 0}).  %% 7.2.14, exactly one: the default bearer
+-define('Bearer Contexts',				{v2_bearer_context, 0}).  %% 7.2.15/7.2.16
+-define('Bearer Contexts to be removed',		{v2_bearer_context, 1}).  %% 7.2.1, 7.2.7
+-define('Bearer Contexts marked for removal',		{v2_bearer_context, 1}).  %% 7.2.2, 7.2.8
 -define('Protocol Configuration Options',		{v2_protocol_configuration_options, 0}).
 -define('ME Identity',					{v2_mobile_equipment_identity, 0}).
 -define('APN-AMBR',					{v2_aggregate_maximum_bit_rate, 0}).
@@ -90,7 +97,7 @@ request_spec(v2, modify_bearer_request, _) ->
     [];
 request_spec(v2, modify_bearer_command, _) ->
     [{?'APN-AMBR' ,						mandatory},
-     {?'Bearer Contexts to be modified',			mandatory}];
+     {?'Bearer Context',					mandatory}];
 request_spec(v2, _, _) ->
     [].
 
@@ -278,7 +285,7 @@ handle_request(#request{src = Src, ip = IP, port = Port} = ReqKey,
 	       #gtp{type = modify_bearer_command,
 		    seq_no = SeqNo,
 		    ie = #{?'APN-AMBR' := AMBR,
-			   ?'Bearer Contexts to be modified' :=
+			   ?'Bearer Context' :=
 			       #v2_bearer_context{
 				  group = #{?'EPS Bearer ID' := EBI} = Bearer}} = IEs},
 	       _Resent, #{session := connected},
@@ -385,7 +392,7 @@ bearer_change_err(#ctx_err{} = E, _State, _Data,
 handle_response({CommandReqKey, OldSOpts},
 		#gtp{type = update_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause},
-			    ?'Bearer Contexts to be modified' :=
+			    ?'Bearer Contexts' :=
 				#v2_bearer_context{
 				   group = #{?'Cause' := #v2_cause{v2_cause = BearerCause}}
 				  }} = IEs},
