@@ -15,9 +15,12 @@
 	 create_session_result/4,
 	 modify_session_async/5,
 	 modify_session_result/2,
+	 await_modify/1,
+	 await_modify_opt/1,
 	 delete_session/2,
 	 delete_session_async/2,
 	 delete_session_result/1,
+	 await_delete/1,
 	 session_liveness_check/1,
 	 usage_report_to_charging_events/3,
 	 query_usage_report/1, query_usage_report/2
@@ -83,6 +86,16 @@ delete_session_result(#pfcp{type = session_deletion_response,
 delete_session_result(_Other) ->
     ?LOG(warning, "PFCP: Session Deletion failed with ~p", [_Other]),
     undefined.
+
+%% await_delete/1 — the async_m step pairing delete_session_async/2 with
+%% delete_session_result/1: yields the final usage report, or `undefined` when
+%% there was no session to delete. Never travels the error channel — see
+%% delete_session_result/1: a failed deletion must not stop a teardown.
+await_delete({request, ReqId}) ->
+    do([async_m || Reply <- async_m:await(ReqId),
+		   async_m:return(delete_session_result(Reply))]);
+await_delete(no_request) ->
+    async_m:return(undefined).
 
 session_liveness_check(#pfcp_ctx{} = PCtx) ->
     Req = #pfcp{version = v1, type = session_modification_request, seq_no = 0, ie = []},
@@ -280,6 +293,33 @@ modify_session_result(#pfcp{type = session_modification_response,
     {ok, {PCtx, UsageReport, SessionInfo}};
 modify_session_result(_Other, _PCtx) ->
     {error, ?CTX_ERR(?FATAL, system_failure)}.
+
+%% await_modify/1 — the async_m step that pairs modify_session_async/5 with
+%% modify_session_result/2: await the reply and decode it, or short-circuit with
+%% the unchanged PCtx when the rule diff was empty and nothing went on the wire.
+%% A non-accepted reply yields {error, #ctx_err{FATAL}}, which travels the
+%% procedure's error channel to its ErrFun.
+await_modify({request, ReqId, PCtx}) ->
+    do([async_m || Reply <- async_m:await(ReqId),
+		   async_m:lift(modify_session_result(Reply, PCtx))]);
+await_modify({no_request, PCtx}) ->
+    async_m:return({PCtx, undefined, #{}}).
+
+%% Tolerant sibling of await_modify/1: yields the new PCtx, or `undefined` when
+%% the UPF refused, instead of short-circuiting down the error channel. For
+%% callers whose control-plane change is already committed and for whom a failed
+%% re-provisioning costs only the new PCtx.
+await_modify_opt({request, ReqId, PCtx}) ->
+    do([async_m ||
+	   Reply <- async_m:await(ReqId),
+	   async_m:return(
+	     case modify_session_result(Reply, PCtx) of
+		 {ok, {PCtx1, _, _}} -> PCtx1;
+		 {error, _}          -> undefined
+	     end)
+       ]);
+await_modify_opt({no_request, PCtx}) ->
+    async_m:return(PCtx).
 
 %%%===================================================================
 %%% PCC to Sx translation functions

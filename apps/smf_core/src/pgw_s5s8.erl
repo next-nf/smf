@@ -1328,16 +1328,49 @@ initiate_ue_delete_dedicated_bearer(PTI, EBI, Tunnel, Data) ->
 		 {delete_dedicated_bearers, [EBI]}),
     Data.
 
+%% The Gx half every UE-requested bearer-resource procedure shares (#22 Inc2-Inc6):
+%% report the requested change to the PCRF as a Gx CCR-Update, await the decision,
+%% fold the CCA's rule events into the PCC context, report back any rule the PCEF
+%% could not install, and commit all three to Data.
+%%
+%% Yields the updated PCC context. The caller decides the outcome from it rather
+%% than this deciding for them, because "did this empty the bearer" is not the
+%% same question for every procedure.
+ue_gx_ccr_update_proc(SOpts, Passes) ->
+    do([async_m ||
+	   #{pcf := PCF0, aaa_session := Session0, pcc := PCC0} <- async_m:get_data(),
+	   Now = erlang:monotonic_time(),
+	   {Result, PCF1, Session1, Events} <-
+	       gx_ccr_update(PCF0, Session0, SOpts, #{now => Now}),
+	   ok <- async_m:lift(ccr_result(Result)),
+	   {PCC1, PCCErrors} = apply_gx_events(Passes, Events, PCC0),
+	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),
+	   async_m:modify_data(_#{pcf := PCF2, aaa_session := Session2, pcc := PCC1}),
+	   async_m:return(PCC1)
+       ]).
+
+%% Fold the CCA's rule events into the PCC context, one pass per operation.
+%% Only the LAST pass's errors survive, and the pass order always ends in
+%% `install`: TS 29.212 4.5.12 has removal never fail -- a {not_found, {rule,_}}
+%% from a remove pass means the requested end state (rule absent) already holds,
+%% so there is nothing to report. See report_pcc_failures/4.
+apply_gx_events(Passes, Events, PCC0) ->
+    RuleBase = smf_charging:rulebase(),
+    lists:foldl(
+      fun(Pass, {PCC, _Errors}) ->
+	      smf_pcc_context:gx_events_to_pcc_ctx(Events, Pass, RuleBase, PCC)
+      end, {PCC0, []}, Passes).
+
 %% ue_delete_filters_proc/4 — async_m procedure for a UE-requested
 %% delete_packet_filters (Bearer Resource Command, TS 23.401 §5.4.5, #22 Inc2).
-%% Reports the removed SDF filters to the PCRF over a Gx CCR-Update, awaits the
-%% decision, applies the PCC delta, and — when the bearer's last bound rule is
-%% gone — runs the single-bearer deactivation echoing the PTI. Correlation
-%% (EBI/PTI/tunnel) rides the closure across the await; no separate map needed.
+%% Reports the removed SDF filters to the PCRF over a Gx CCR-Update, applies the
+%% PCC delta, and — when the bearer's last bound rule is gone — runs the
+%% single-bearer deactivation echoing the PTI. Correlation (EBI/PTI/tunnel) rides
+%% the closure across the await; no separate map needed.
 ue_delete_filters_proc(EBI, PfIds, PTI, AccessTunnel) ->
     do([async_m ||
-	   #{pcf := PCF0, aaa_session := Session0, pcc := PCC0,
-	     bearers := BearerMap, dedicated := Dedicated, pfcp := PCtx0} <- async_m:get_data(),
+	   #{pcc := PCC0, bearers := BearerMap,
+	     dedicated := Dedicated, pfcp := PCtx0} <- async_m:get_data(),
 	   #ded_bearer{sdf_to_pf = SdfToPf} = maps:get(EBI, Dedicated),
 	   SdfHandles <- async_m:lift(smf_tft:pf_ids_to_sdf(PfIds, SdfToPf)),
 	   PFs = [#{'Packet-Filter-Identifier' => H} || H <- SdfHandles],
@@ -1346,86 +1379,50 @@ ue_delete_filters_proc(EBI, PfIds, PTI, AccessTunnel) ->
 		     'Packet-Filter-Operation' =>
 			 ?'DIAMETER_GX_PACKET-FILTER-OPERATION_DELETION',
 		     'Packet-Filter-Information' => PFs},
-	   Now = erlang:monotonic_time(),
-	   {async, ReqId} =
-	       smf_aaa_pcf:invoke(PCF0, Session0, SOpts, {gx, 'CCR-Update'},
-				  #{pipeline_async => true, now => Now}),
-	   {Result, PCF1, Session1, Events} <- await_pipeline(ReqId),
-	   ok <- async_m:lift(ccr_result(Result)),
-	   RuleBase = smf_charging:rulebase(),
 	   %% Fold BOTH passes: a delete may also carry a PCRF-proposed replacement
 	   %% rule in the same CCA -- this closed the Inc2 remove-only deferral (#22).
-	   %% Remove-pass errors are dropped on purpose -- see report_pcc_failures/4.
-	   {PCC1, _} = smf_pcc_context:gx_events_to_pcc_ctx(Events, remove, RuleBase, PCC0),
-	   {PCC2, PCCErrors} =
-	       smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC1),
-	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),
-	   %% Commit the Gx/PCC results (shared by both outcomes).
-	   async_m:modify_data(
-	     fun(D) -> D#{pcf := PCF2, aaa_session := Session2, pcc := PCC2} end),
+	   PCC1 <- ue_gx_ccr_update_proc(SOpts, [remove, install]),
 	   %% One PTI-correlated single-bearer outcome.
 	   ue_delete_outcome(
-	     lists:member(EBI, smf_gsn_lib:detect_removed_bearers(PCC0, PCC2, BearerMap)),
-	     EBI, PTI, AccessTunnel, PCC2, BearerMap, PCtx0, Dedicated)
+	     lists:member(EBI, smf_gsn_lib:detect_removed_bearers(PCC0, PCC1, BearerMap)),
+	     EBI, PTI, AccessTunnel, PCC1, BearerMap, PCtx0, Dedicated)
        ]).
 
 %% ue_add_filters_proc/4 — async_m procedure for a UE-requested add_packet_filters
 %% (Bearer Resource Command, TS 23.401 §5.4.5, #22 Inc4). Reports the new filters'
-%% content to the PCRF (Gx CCR-U ADDITION), awaits the install, applies the PCC
-%% delta, and emits a PTI-echoing Update Bearer with the expanded TFT. An add never
-%% empties a bearer -> always the Update outcome.
+%% content to the PCRF (Gx CCR-U ADDITION), applies the PCC delta, and emits a
+%% PTI-echoing Update Bearer with the expanded TFT. An add never empties a bearer
+%% -> always the Update outcome.
 ue_add_filters_proc(EBI, FlowInfos, PTI, AccessTunnel) ->
     do([async_m ||
-	   #{pcf := PCF0, aaa_session := Session0, pcc := PCC0,
-	     bearers := BearerMap, dedicated := Dedicated, pfcp := PCtx0} <- async_m:get_data(),
+	   #{bearers := BearerMap,
+	     dedicated := Dedicated, pfcp := PCtx0} <- async_m:get_data(),
 	   Groups = [smf_tft:flow_info_to_pf_add_group(FI) || FI <- FlowInfos],
 	   SOpts = #{'Event-Trigger' =>
 			 ?'DIAMETER_GX_EVENT-TRIGGER_RESOURCE_MODIFICATION_REQUEST',
 		     'Packet-Filter-Operation' =>
 			 ?'DIAMETER_GX_PACKET-FILTER-OPERATION_ADDITION',
 		     'Packet-Filter-Information' => Groups},
-	   Now = erlang:monotonic_time(),
-	   {async, ReqId} =
-	       smf_aaa_pcf:invoke(PCF0, Session0, SOpts, {gx, 'CCR-Update'},
-				  #{pipeline_async => true, now => Now}),
-	   {Result, PCF1, Session1, Events} <- await_pipeline(ReqId),
-	   ok <- async_m:lift(ccr_result(Result)),
-	   RuleBase = smf_charging:rulebase(),
 	   %% An add only installs (nothing to remove).
-	   {PCC1, PCCErrors} =
-	       smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC0),
-	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),
-	   async_m:modify_data(
-	     fun(D) -> D#{pcf := PCF2, aaa_session := Session2, pcc := PCC1} end),
+	   PCC1 <- ue_gx_ccr_update_proc(SOpts, [install]),
 	   ue_update_outcome(EBI, PTI, AccessTunnel, PCC1, BearerMap, PCtx0, Dedicated)
        ]).
 
 %% ue_qos_change_proc/4 — async_m procedure for a UE-requested QoS/GBR change
 %% (Bearer Resource Command no_tft_operation, TS 23.401 §5.4.5, #22 Inc6).
 %% Reports the requested QoS to the PCRF (Gx CCR-U with QoS-Information, no
-%% packet-filter change), awaits the authorized rule (re)install, applies the
-%% PCC delta, and emits a PTI-echoing Update Bearer carrying the new Bearer QoS.
+%% packet-filter change), applies the PCC delta from the authorized rule
+%% (re)install, and emits a PTI-echoing Update Bearer carrying the new Bearer QoS.
 %% A QoS change re-installs the affected rule -> install-only fold -> always the
 %% Update outcome (never empties a bearer).
 ue_qos_change_proc(EBI, ReqQoS, PTI, AccessTunnel) ->
     do([async_m ||
-	   #{pcf := PCF0, aaa_session := Session0, pcc := PCC0,
-	     bearers := BearerMap, dedicated := Dedicated, pfcp := PCtx0} <- async_m:get_data(),
+	   #{bearers := BearerMap,
+	     dedicated := Dedicated, pfcp := PCtx0} <- async_m:get_data(),
 	   SOpts = #{'Event-Trigger' =>
 			 ?'DIAMETER_GX_EVENT-TRIGGER_RESOURCE_MODIFICATION_REQUEST',
 		     'QoS-Information' => ReqQoS},
-	   Now = erlang:monotonic_time(),
-	   {async, ReqId} =
-	       smf_aaa_pcf:invoke(PCF0, Session0, SOpts, {gx, 'CCR-Update'},
-				  #{pipeline_async => true, now => Now}),
-	   {Result, PCF1, Session1, Events} <- await_pipeline(ReqId),
-	   ok <- async_m:lift(ccr_result(Result)),
-	   RuleBase = smf_charging:rulebase(),
-	   {PCC1, PCCErrors} =
-	       smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC0),
-	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),
-	   async_m:modify_data(
-	     fun(D) -> D#{pcf := PCF2, aaa_session := Session2, pcc := PCC1} end),
+	   PCC1 <- ue_gx_ccr_update_proc(SOpts, [install]),
 	   ue_update_outcome(EBI, PTI, AccessTunnel, PCC1, BearerMap, PCtx0, Dedicated)
        ]).
 
@@ -1433,12 +1430,12 @@ ue_qos_change_proc(EBI, ReqQoS, PTI, AccessTunnel) ->
 %% replace_packet_filters (Bearer Resource Command, TS 23.401 §5.4.5, #22 Inc5).
 %% A delete/add hybrid: names each replaced filter by its existing SDF handle
 %% (inverting sdf_to_pf, like delete) AND carries the new content (like add), as a
-%% Gx CCR-U MODIFICATION. Awaits, applies the PCC delta (remove+install), and
-%% dispatches the shared outcome (empty -> Delete edge / non-empty -> Update).
+%% Gx CCR-U MODIFICATION. Applies the PCC delta (remove+install), and dispatches
+%% the shared outcome (empty -> Delete edge / non-empty -> Update).
 ue_replace_filters_proc(EBI, FlowInfos, PTI, AccessTunnel) ->
     do([async_m ||
-	   #{pcf := PCF0, aaa_session := Session0, pcc := PCC0,
-	     bearers := BearerMap, dedicated := Dedicated, pfcp := PCtx0} <- async_m:get_data(),
+	   #{pcc := PCC0, bearers := BearerMap,
+	     dedicated := Dedicated, pfcp := PCtx0} <- async_m:get_data(),
 	   #ded_bearer{sdf_to_pf = SdfToPf} = maps:get(EBI, Dedicated),
 	   UEIds = [Id || #{'Packet-Filter-Identifier' := [<<Id:8>>]} <- FlowInfos],
 	   SdfHandles <- async_m:lift(smf_tft:pf_ids_to_sdf(UEIds, SdfToPf)),
@@ -1449,31 +1446,17 @@ ue_replace_filters_proc(EBI, FlowInfos, PTI, AccessTunnel) ->
 		     'Packet-Filter-Operation' =>
 			 ?'DIAMETER_GX_PACKET-FILTER-OPERATION_MODIFICATION',
 		     'Packet-Filter-Information' => Groups},
-	   Now = erlang:monotonic_time(),
-	   {async, ReqId} =
-	       smf_aaa_pcf:invoke(PCF0, Session0, SOpts, {gx, 'CCR-Update'},
-				  #{pipeline_async => true, now => Now}),
-	   {Result, PCF1, Session1, Events} <- await_pipeline(ReqId),
-	   ok <- async_m:lift(ccr_result(Result)),
-	   RuleBase = smf_charging:rulebase(),
 	   %% A replace can drop the old rule and install the new -> apply both.
-	   %% Remove-pass errors are dropped on purpose -- see report_pcc_failures/4.
-	   {PCC1, _} = smf_pcc_context:gx_events_to_pcc_ctx(Events, remove, RuleBase, PCC0),
-	   {PCC2, PCCErrors} =
-	       smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC1),
-	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),
-	   async_m:modify_data(
-	     fun(D) -> D#{pcf := PCF2, aaa_session := Session2, pcc := PCC2} end),
+	   PCC1 <- ue_gx_ccr_update_proc(SOpts, [remove, install]),
 	   ue_delete_outcome(
-	     lists:member(EBI, smf_gsn_lib:detect_removed_bearers(PCC0, PCC2, BearerMap)),
-	     EBI, PTI, AccessTunnel, PCC2, BearerMap, PCtx0, Dedicated)
+	     lists:member(EBI, smf_gsn_lib:detect_removed_bearers(PCC0, PCC1, BearerMap)),
+	     EBI, PTI, AccessTunnel, PCC1, BearerMap, PCtx0, Dedicated)
        ]).
 
 %% Empty: the bearer's last bound rule is gone -> single-bearer deactivation
 %% echoing the PTI (Increment 2 behaviour, unchanged).
 ue_delete_outcome(true, EBI, PTI, AccessTunnel, _PCC2, _BearerMap, _PCtx0, _Dedicated) ->
-    async_m:modify_data(
-      fun(D) -> initiate_ue_delete_dedicated_bearer(PTI, EBI, AccessTunnel, D) end);
+    async_m:modify_data(initiate_ue_delete_dedicated_bearer(PTI, EBI, AccessTunnel, _));
 %% Non-empty: surviving rules -> the shared Update outcome (Increment 3).
 ue_delete_outcome(false, EBI, PTI, AccessTunnel, PCC2, BearerMap, PCtx0, Dedicated) ->
     ue_update_outcome(EBI, PTI, AccessTunnel, PCC2, BearerMap, PCtx0, Dedicated).
@@ -1485,50 +1468,27 @@ ue_update_outcome(EBI, PTI, AccessTunnel, PCC, BearerMap, PCtx0, Dedicated) ->
     do([async_m ||
 	   Issued <- async_m:lift(
 		       smf_pfcp_context:modify_session_async(PCC, [], #{}, BearerMap, PCtx0)),
-	   {PCtx1, _, _} <- await_pfcp_modify(Issued),
+	   {PCtx1, _, _} <- smf_pfcp_context:await_modify(Issued),
 	   async_m:modify_data(
-	     fun(D) -> emit_ue_update_bearer(EBI, PTI, AccessTunnel, PCC, Dedicated, PCtx1, D) end)
+	     emit_ue_update_bearer(EBI, PTI, AccessTunnel, PCC, Dedicated, PCtx1, _))
        ]).
 
 %% reprovision_proc/1 — re-provision the UPF for a bearer-table change that is
 %% already committed to Data. Every batch-C path treats a failed PFCP
 %% modification as non-fatal (it keeps the control-plane change and drops only
-%% the new PCtx), so this never travels the error channel: await_pfcp_modify_opt/1
+%% the new PCtx), so this never travels the error channel: await_modify_opt/1
 %% yields `undefined` on failure and the commit simply leaves `pfcp` alone.
 reprovision_proc(BearerMap) ->
     do([async_m ||
 	   #{pfcp := PCtx0, pcc := PCC} <- async_m:get_data(),
 	   Issued <- async_m:lift(
 		       smf_pfcp_context:modify_session_async(PCC, [], #{}, BearerMap, PCtx0)),
-	   PCtx <- await_pfcp_modify_opt(Issued),
+	   PCtx <- smf_pfcp_context:await_modify_opt(Issued),
 	   async_m:modify_data(
 	     fun(D) when PCtx =:= undefined -> D;
 		(D)                         -> D#{pfcp := PCtx}
 	     end)
        ]).
-
-%% Tolerant sibling of await_pfcp_modify/1: yields the new PCtx, or `undefined`
-%% when the UPF refused, instead of short-circuiting down the error channel.
-await_pfcp_modify_opt({request, ReqId, PCtx1}) ->
-    do([async_m ||
-	   Reply <- async_m:await(ReqId),
-	   async_m:return(
-	     case smf_pfcp_context:modify_session_result(Reply, PCtx1) of
-		 {ok, {PCtx, _, _}} -> PCtx;
-		 {error, _}         -> undefined
-	     end)
-       ]);
-await_pfcp_modify_opt({no_request, PCtx1}) ->
-    async_m:return(PCtx1).
-
-%% Local mirror of gtp_context:await_modify/1 — await the async PFCP modify reply
-%% (or short-circuit when no PFCP change was needed). A non-accepted reply makes
-%% modify_session_result return {error, #ctx_err{FATAL}}, routed to br_err.
-await_pfcp_modify({request, ReqId, PCtx1}) ->
-    do([async_m || Reply <- async_m:await(ReqId),
-		   async_m:lift(smf_pfcp_context:modify_session_result(Reply, PCtx1))]);
-await_pfcp_modify({no_request, PCtx1}) ->
-    async_m:return({PCtx1, undefined, #{}}).
 
 %% Recompute the target bearer's surviving descriptor and emit the PTI-echoing
 %% Update Bearer Request (reusing the network-initiated send path; PTI rides
@@ -1579,14 +1539,34 @@ report_pcc_failures(PCCErrors, PCF0, Session0, ReqOpts) ->
 	_ -> {PCF0, Session0}
     end.
 
-%% await a whole-pipeline worker (invoke(pipeline_async)). On success the worker
-%% posts the folded {Result, Ctx1, Session1, Events}; on an unexpected crash
-%% async_dispatch delivers {error, {worker_down, _}}. Turn the latter into a
-%% procedure error (routed to br_err -> Bearer Resource Failure Indication)
-%% rather than a badmatch that would crash the context gen_statem.
-await_pipeline(ReqId) ->
-    do([async_m || R <- async_m:await(ReqId),
-                   async_m:lift(pipeline_ok(R))]).
+%% Issue a Gx CCR-Update and yield the pipeline's folded
+%% {Result, PCF1, Session1, Events}, awaiting it without blocking the context.
+%%
+%% smf_aaa_pcf:invoke/5 answers either {async, ReqId} -- a handler suspended, the
+%% common case of a real PCRF round trip -- or the folded result outright, when
+%% nothing in the pipeline needed to wait. Both are normal; only the first has
+%% anything to await. Deciding that here is what lets callers stay linear, and it
+%% removes the bare `{async, ReqId} = invoke(...)` match whose inline-completion
+%% clause was a badmatch that killed the context gen_statem.
+%%
+%% On an unexpected worker crash async_dispatch delivers {error, {worker_down,_}};
+%% pipeline_ok/1 turns that into a procedure error (routed to br_err -> Bearer
+%% Resource Failure Indication) rather than a badmatch.
+gx_ccr_update(PCF, Session, SOpts, Opts) ->
+    do([async_m ||
+	   Reply <- gx_ccr_update_opt(PCF, Session, SOpts, Opts),
+	   async_m:lift(pipeline_ok(Reply))
+       ]).
+
+%% Tolerant sibling of gx_ccr_update/4: yields the pipeline's raw answer --
+%% including a failure -- instead of short-circuiting down the error channel, for
+%% callers that degrade rather than abort on a Gx rejection.
+gx_ccr_update_opt(PCF, Session, SOpts, Opts) ->
+    await_invoke(smf_aaa_pcf:invoke(PCF, Session, SOpts, {gx, 'CCR-Update'},
+				    Opts#{pipeline_async => true})).
+
+await_invoke({async, ReqId}) -> async_m:await(ReqId);
+await_invoke(Folded)         -> async_m:return(Folded).
 
 pipeline_ok({_Result, _Ctx1, _Session1, _Events} = Ok) -> {ok, Ok};
 pipeline_ok({error, _} = Err)                          -> Err.
@@ -1992,15 +1972,14 @@ subscribed_qos_change_proc(Cmd, AccessTunnel, Context) ->
 	       #{'Event-Trigger' =>
 		     ?'DIAMETER_GX_EVENT-TRIGGER_DEFAULT_EPS_BEARER_QOS_CHANGE'},
 	   Now = erlang:monotonic_time(),
-	   {async, ReqId} =
-	       smf_aaa_pcf:invoke(PCF0, S1, SOpts, {gx, 'CCR-Update'},
-				  #{pipeline_async => true, now => Now}),
-	   Reply <- async_m:await(ReqId),
+	   %% Tolerant: qos_change_answer/3 degrades to the command's own QoS on any
+	   %% failure, so this must NOT short-circuit down the error channel.
+	   Reply <- gx_ccr_update_opt(PCF0, S1, SOpts, #{now => Now}),
 	   {PCF1, S2} = qos_change_answer(Reply, PCF0, S1),
-	   async_m:modify_data(fun(D) -> D#{pcf := PCF1, aaa_session := S2} end),
+	   async_m:modify_data(_#{pcf := PCF1, aaa_session := S2}),
 	   AuthQoS = maps:get('Authorized-QoS-Information', S2, #{}),
 	   async_m:modify_data(
-	     fun(D) -> emit_subscribed_qos_update(Cmd, AuthQoS, AccessTunnel, Context, D) end)
+	     emit_subscribed_qos_update(Cmd, AuthQoS, AccessTunnel, Context, _))
        ]).
 
 %% The PCRF's answer only ever *refines* the Update Bearer Request. On any

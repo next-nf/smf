@@ -8,7 +8,8 @@ all() ->
      accessors_read_write, await_captures_rest, lift_injects,
      run_async_complete, run_async_error, run_async_parks, resume_completes,
      resume_multiple_suspends, resume_nested_ordering,
-     async_apply_roundtrip, async_apply_worker_crash, resume_await_tail].
+     async_apply_roundtrip, async_apply_worker_crash, resume_await_tail,
+     handwritten_step_returns, handwritten_step_fails_keeping_state].
 
 %% run a do-block against a trivial (State, Data) = (st, dt)
 return_wraps(_Config) ->
@@ -52,6 +53,32 @@ await_captures_rest(_Config) ->
     {{await, req1, [Cont]}, st, dt} = async_m:run(M, st, dt),
     %% applying the captured continuation to a reply runs the remainder
     {{ok, 12}, st, dt} = async_m:run(Cont(10), st, dt),
+    ok.
+
+%% A hand-written fun(State, Data) step composes with the combinators, no
+%% wrapping needed, and return/3 binds its value like any other success.
+handwritten_step_returns(_Config) ->
+    Step = fun(S, D) -> async_m:return(D * 2, S, D + 1) end,
+    M = do([async_m || X <- Step,
+                       Y <- async_m:get_data(),
+                       async_m:return({X, Y})]),
+    {{ok, {20, 11}}, st, 11} = async_m:run(M, st, 10),
+    ok.
+
+%% The point of fail/3: the state the failing step already changed survives to
+%% the error handler, so it can compensate what was committed before the failure.
+%% A bare async_m:fail/1 could only report the reason, losing the update.
+handwritten_step_fails_keeping_state(_Config) ->
+    Step = fun(S, D) -> async_m:fail(boom, S, D#{committed => true}) end,
+    M = do([async_m || Step,
+                       async_m:modify_data(fun(D) -> D#{unreachable => true} end)]),
+    {{error, boom}, st, #{committed := true} = D} = async_m:run(M, st, #{}),
+    false = maps:is_key(unreachable, D),
+
+    %% and it reaches ErrFun with that state, not the pre-step one
+    ErrFun = fun(R, _S, Data) -> {caught, R, Data} end,
+    {caught, boom, #{committed := true}} =
+        async_m:run_async(M, fun(_, _, _) -> ct:fail(ok_path) end, ErrFun, st, #{}),
     ok.
 
 lift_injects(_Config) ->
