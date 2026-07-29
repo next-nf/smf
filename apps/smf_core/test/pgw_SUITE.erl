@@ -1535,7 +1535,7 @@ end_per_testcase(TestCase, Config)
     %% where the body already cleaned up.
     catch smf_test_sx_up:enable('pgw-u01'),
     catch restore_sx_retransmit(),
-    catch meck:delete(smf_pfcp_context, modify_session_result, 2),
+    catch meck:delete(smf_pfcp_context, modify_session_result, 3),
     end_per_testcase(Config);
 end_per_testcase(_, Config) ->
     end_per_testcase(Config).
@@ -10409,13 +10409,13 @@ async_error_drains_gate(Config) ->
     {ok, PCtx} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
 
     %% Make the resumed step of update_credits_proc fail recoverably:
-    %% await_modify/1 lifts modify_session_result/2 into async_m's error
+    %% await_modify/1 lifts modify_session_result/3 into async_m's error
     %% channel, so a WARNING ctx_err lands in update_credits_err/3 ->
     %% handle_ctx_error/4. No production procedure produces a non-FATAL
     %% post-await error today -- which is exactly why #51 is a landmine
     %% rather than a live bug, and why this has to be injected.
     ok = meck:expect(smf_pfcp_context, modify_session_result,
-                     fun(_Reply, _PCtx) ->
+                     fun(_Reply, _BearerMap, _PCtx) ->
                              {error, ?CTX_ERR(?WARNING, system_failure)}
                      end),
 
@@ -10433,7 +10433,7 @@ async_error_drains_gate(Config) ->
     %% term, so this stayed at 1 forever.
     ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 0 end, 100, 100),
 
-    ok = meck:delete(smf_pfcp_context, modify_session_result, 2),
+    ok = meck:delete(smf_pfcp_context, modify_session_result, 3),
 
     %% ...and the gate really did reopen: a Delete Session Request is a gated
     %% procedure-initiating event, so this completes only if the drain

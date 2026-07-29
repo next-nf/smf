@@ -15,6 +15,7 @@
 	 create_session_result/4,
 	 modify_session_async/5,
 	 modify_session_result/2,
+	 modify_session_result/3,
 	 await_modify/1,
 	 await_modify_opt/1,
 	 delete_session/2,
@@ -275,14 +276,14 @@ session_modification_request(PCtx, _ReqIEs) ->
 modify_session_async(PCC, URRActions, Opts, BearerMap, PCtx0)
   when is_record(PCC, pcc_ctx), is_record(PCtx0, pfcp_ctx) ->
     {PCtx, SxRules} = modification_request_ies(PCC, URRActions, Opts, BearerMap, PCtx0),
-    session_modification_request_async(PCtx, SxRules).
+    session_modification_request_async(BearerMap, PCtx, SxRules).
 
-session_modification_request_async(PCtx, ReqIEs) when ?is_non_empty_opts(ReqIEs) ->
+session_modification_request_async(BearerMap, PCtx, ReqIEs) when ?is_non_empty_opts(ReqIEs) ->
     Req = #pfcp{version = v1, type = session_modification_request, seq_no = 0, ie = ReqIEs},
     ReqId = smf_sx_node:send_request(PCtx, Req),
-    {ok, {request, ReqId, PCtx}};
-session_modification_request_async(PCtx, _ReqIEs) ->
-    {ok, {no_request, PCtx}}.
+    {ok, {request, ReqId, BearerMap, PCtx}};
+session_modification_request_async(BearerMap, PCtx, _ReqIEs) ->
+    {ok, {no_request, BearerMap, PCtx}}.
 
 %% modify_session_result/2 — decode a session modification response into
 %% {PCtx, UsageReport, SessionInfo}.
@@ -294,31 +295,83 @@ modify_session_result(#pfcp{type = session_modification_response,
 modify_session_result(_Other, _PCtx) ->
     {error, ?CTX_ERR(?FATAL, system_failure)}.
 
+%% modify_session_result/3 — as /2, but also resolves the F-TEIDs the UP
+%% allocated for any bearer this modification is bringing up.
+%%
+%% TS 23.214 5.4.3: under FTUP the CP sends a Create PDR carrying the CHOOSE flag
+%% and the UP answers with the allocated F-TEID in a Created PDR IE. A
+%% modification that adds a bearer must fold those back into the bearer map --
+%% exactly what create_session_result/4 does at establishment, and what the
+%% modification path was missing. Without it a bearer added mid-session keeps its
+%% {upf, Key} placeholder and can never be advertised over GTP-C.
+modify_session_result(#pfcp{type = session_modification_response,
+			    ie = #{pfcp_cause := 'Request accepted'} = RespIEs} = Reply,
+		      BearerMap0, PCtx0) ->
+    {ok, {PCtx1, UsageReport, SessionInfo}} = modify_session_result(Reply, PCtx0),
+    {BearerMap, PCtx} = resolve_choose_bearers(RespIEs, BearerMap0, PCtx1),
+    {ok, {PCtx, BearerMap, UsageReport, SessionInfo}};
+modify_session_result(Other, _BearerMap0, PCtx0) ->
+    modify_session_result(Other, PCtx0).
+
+%% Resolve ONLY the bearers still holding a CHOOSE placeholder.
+%%
+%% Unlike an establishment response, a modification response routinely carries
+%% Created PDR IEs for bearers that are already up: modification_request_ies/5
+%% re-sends the whole recomputed rule set, so rules that merely persisted come
+%% back as created PDRs too. Folding those in would overwrite a live bearer's
+%% F-TEID mid-session -- the UP allocates a fresh one per Create PDR -- and break
+%% the tunnel the UE is already using. A bearer is awaiting allocation iff its
+%% local F-TEID is still the {upf, _} placeholder assign_local_data_teid_5/5 put
+%% there; every other bearer is left exactly as it is.
+resolve_choose_bearers(RespIEs, BearerMap, PCtx) ->
+    case RespIEs of
+	#{created_pdr := PDR} when is_map(PDR) ->
+	    resolve_choose_bearer_f(PDR, {BearerMap, PCtx});
+	#{created_pdr := PDRs} when is_list(PDRs) ->
+	    lists:foldl(fun resolve_choose_bearer_f/2, {BearerMap, PCtx}, PDRs);
+	_ ->
+	    {BearerMap, PCtx}
+    end.
+
+resolve_choose_bearer_f(#{pdr_id := #pdr_id{id = PdrId}, f_teid := _} = PDR,
+			{BearerMap, PCtx} = Acc) ->
+    Key = smf_pfcp:get_bearer_key_by_pdr(PdrId, PCtx),
+    case BearerMap of
+	#{Key := #bearer{local = #fq_teid{teid = {upf, _}}}} ->
+	    update_bearer_f(PDR, Acc);
+	_ ->
+	    Acc
+    end;
+resolve_choose_bearer_f(_, Acc) ->
+    Acc.
+
 %% await_modify/1 — the async_m step that pairs modify_session_async/5 with
-%% modify_session_result/2: await the reply and decode it, or short-circuit with
+%% modify_session_result/3: await the reply and decode it, or short-circuit with
 %% the unchanged PCtx when the rule diff was empty and nothing went on the wire.
+%% Yields {PCtx, BearerMap, UsageReport, SessionInfo} -- the bearer map comes back
+%% because a modification that created PDRs has resolved their F-TEIDs into it.
 %% A non-accepted reply yields {error, #ctx_err{FATAL}}, which travels the
 %% procedure's error channel to its ErrFun.
-await_modify({request, ReqId, PCtx}) ->
+await_modify({request, ReqId, BearerMap, PCtx}) ->
     do([async_m || Reply <- async_m:await(ReqId),
-		   async_m:lift(modify_session_result(Reply, PCtx))]);
-await_modify({no_request, PCtx}) ->
-    async_m:return({PCtx, undefined, #{}}).
+		   async_m:lift(modify_session_result(Reply, BearerMap, PCtx))]);
+await_modify({no_request, BearerMap, PCtx}) ->
+    async_m:return({PCtx, BearerMap, undefined, #{}}).
 
 %% Tolerant sibling of await_modify/1: yields the new PCtx, or `undefined` when
 %% the UPF refused, instead of short-circuiting down the error channel. For
 %% callers whose control-plane change is already committed and for whom a failed
 %% re-provisioning costs only the new PCtx.
-await_modify_opt({request, ReqId, PCtx}) ->
+await_modify_opt({request, ReqId, BearerMap, PCtx}) ->
     do([async_m ||
 	   Reply <- async_m:await(ReqId),
 	   async_m:return(
-	     case modify_session_result(Reply, PCtx) of
-		 {ok, {PCtx1, _, _}} -> PCtx1;
-		 {error, _}          -> undefined
+	     case modify_session_result(Reply, BearerMap, PCtx) of
+		 {ok, {PCtx1, _, _, _}} -> PCtx1;
+		 {error, _}             -> undefined
 	     end)
        ]);
-await_modify_opt({no_request, PCtx}) ->
+await_modify_opt({no_request, _BearerMap, PCtx}) ->
     async_m:return(PCtx).
 
 %%%===================================================================

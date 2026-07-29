@@ -323,7 +323,7 @@ handle_request(ReqKey, _Msg, _Resent, _State, _Data) ->
 %% path a PFCP failure is answered, not thrown — the secondary context simply
 %% does not come up and the primary one is untouched, which is what the
 %% synchronous {error, _} branch did.
-secondary_pdp_ctx_ok({PCtx, _SessionInfo}, State, Data,
+secondary_pdp_ctx_ok({PCtx, _BearerMap, _SessionInfo}, State, Data,
 		     #{req_key := ReqKey, request := Request, qos_profile := ReqQoSProfile,
 		       context := Context, tunnels := Tunnels, access_tunnel := AccessTunnel,
 		       access_bearer := AccessBearer, bearers := BearerMap1}) ->
@@ -350,7 +350,7 @@ secondary_pdp_ctx_err(_Reason, State, Data,
 %% The Update PDP Context Response is built from the PFCP result, so it goes out
 %% from here rather than from the handler. {next_state, ...} (not keep_state)
 %% because the drained async_pending re-delivers what the coarse gate postponed.
-update_pdp_context_ok({PCtx, SessionInfo}, State, Data,
+update_pdp_context_ok({PCtx, _BearerMap, SessionInfo}, State, Data,
 		      #{req_key := ReqKey, request := Request, qos_profile := ReqQoSProfile,
 			context := Context, tunnels := Tunnels, access_tunnel := AccessTunnel,
 			bearers := BearerMap, aaa_session := S1}) ->

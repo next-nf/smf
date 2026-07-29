@@ -342,7 +342,9 @@ update_tunnel_endpoint(TunnelOld, Tunnel0) ->
 
 %% Re-provision the UPF for an access bearer change: one PFCP Session
 %% Modification carrying the whole recomputed rule set, awaited without blocking
-%% the context. Yields {PCtx, SessionInfo} for the caller to commit.
+%% the context. Yields {PCtx, BearerMap, SessionInfo} for the caller to commit --
+%% the bearer map comes back because a modification that created PDRs has the UP's
+%% allocated F-TEIDs folded into it (TS 23.214 5.4.3).
 apply_bearer_change_proc(BearerMap, URRActions, SendEM, PCtx0, PCC) ->
     do([async_m ||
 	   Issued <- async_m:lift(
@@ -354,20 +356,20 @@ apply_bearer_change_proc(BearerMap, URRActions, SendEM, PCtx0, PCC) ->
 
 %% The conditional form the GTP request handlers share: re-provision the UPF only
 %% when the access bearer actually changed, otherwise just ask for the usage
-%% report. Both arms yield {PCtx, SessionInfo}; the unchanged arm never suspends,
+%% report. Both arms yield {PCtx, BearerMap, SessionInfo}; the unchanged arm never suspends,
 %% so those requests still answer within the handler call.
-access_bearer_change_proc(false, _BearerMap, URRActions, _SendEM, PCtx0, _PCC) ->
+access_bearer_change_proc(false, BearerMap, URRActions, _SendEM, PCtx0, _PCC) ->
     gtp_context:trigger_usage_report(self(), URRActions, PCtx0),
-    async_m:return({PCtx0, #{}});
+    async_m:return({PCtx0, BearerMap, #{}});
 access_bearer_change_proc(true, BearerMap, URRActions, SendEM, PCtx0, PCC) ->
     apply_bearer_change_proc(BearerMap, URRActions, SendEM, PCtx0, PCC).
 
 modify_opts(true)  -> #{send_end_marker => true};
 modify_opts(false) -> #{}.
 
-apply_bearer_change_result({PCtx, UsageReport, SessionInfo}, URRActions) ->
+apply_bearer_change_result({PCtx, BearerMap, UsageReport, SessionInfo}, URRActions) ->
     gtp_context:usage_report(self(), URRActions, UsageReport),
-    {PCtx, SessionInfo}.
+    {PCtx, BearerMap, SessionInfo}.
 
 %%====================================================================
 %% Charging API

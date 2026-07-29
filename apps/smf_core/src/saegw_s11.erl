@@ -355,7 +355,7 @@ handle_request(ReqKey, _Msg, _Resent, _State, _Data) ->
 %% Both bearer-change responses are built from the PFCP result, so they go out
 %% from here rather than from the handler. {next_state, ...} (not keep_state)
 %% because the drained async_pending re-delivers what the coarse gate postponed.
-modify_bearer_ok({PCtx, SessionInfo}, State, Data,
+modify_bearer_ok({PCtx, _BearerMap, SessionInfo}, State, Data,
 		 #{req_key := ReqKey, request := Request, ebi := EBI, context := Context,
 		   tunnels := Tunnels, access_tunnel := AccessTunnel,
 		   bearers := BearerMap, aaa_session := S1}) ->
@@ -371,7 +371,7 @@ modify_bearer_ok({PCtx, SessionInfo}, State, Data,
     Actions = context_idle_action([], Context),
     {next_state, State, DataNew, Actions}.
 
-release_access_bearers_ok({PCtx, _SessionInfo}, State, Data,
+release_access_bearers_ok({PCtx, _BearerMap, _SessionInfo}, State, Data,
 			  #{req_key := ReqKey, request := Request, context := Context,
 			    access_tunnel := AccessTunnel, bearers := BearerMap}) ->
     ResponseIEs = [#v2_cause{v2_cause = request_accepted}],
