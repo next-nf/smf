@@ -639,7 +639,7 @@ update_bearer_from_req(_AccessTunnel, _Context, BearerContext, Acc) ->
 %% The Modify Bearer Response is built from the PFCP result, so it goes out from
 %% here rather than from the handler. {next_state, ...} (not keep_state) because
 %% the drained async_pending re-delivers what the coarse gate postponed.
-modify_bearer_ok({PCtx, SessionInfo}, State, Data,
+modify_bearer_ok({PCtx, _BearerMap, SessionInfo}, State, Data,
 		 #{req_key := ReqKey, request := Request, ies := IEs, modified := Modified,
 		   context := Context, tunnels := Tunnels, access_tunnel := AccessTunnel,
 		   bearers := BearerMap, aaa_session := S1}) ->
@@ -1468,7 +1468,7 @@ ue_update_outcome(EBI, PTI, AccessTunnel, PCC, BearerMap, PCtx0, Dedicated) ->
     do([async_m ||
 	   Issued <- async_m:lift(
 		       smf_pfcp_context:modify_session_async(PCC, [], #{}, BearerMap, PCtx0)),
-	   {PCtx1, _, _} <- smf_pfcp_context:await_modify(Issued),
+	   {PCtx1, _, _, _} <- smf_pfcp_context:await_modify(Issued),
 	   async_m:modify_data(
 	     emit_ue_update_bearer(EBI, PTI, AccessTunnel, PCC, Dedicated, PCtx1, _))
        ]).
