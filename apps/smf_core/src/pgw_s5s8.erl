@@ -1067,26 +1067,28 @@ set_qos_arp(QoS, NewARP) ->
 %% (§7.2.15 NOTE), which is handled on a separate path and never uses this helper.
 %% Kind (rule_change | subscribed_qos) selects the response failure policy; Staged
 %% maps each EBI to the descriptor to commit when that bearer is accepted.
-send_dedicated_bearers_update(_Kind, [], _ExtraIEs, _Staged, _AccessTunnel) ->
-    ok;
-send_dedicated_bearers_update(Kind, Contexts, ExtraIEs, Staged, AccessTunnel) ->
+send_dedicated_bearers_update(_Kind, [], _ExtraIEs, _Staged, _AccessTunnel, Data) ->
+    Data;
+send_dedicated_bearers_update(Kind, Contexts, ExtraIEs, Staged, AccessTunnel, Data) ->
     Sent = #{EBI => update_bearer_context(EBI, QoS, FlowInfo)
 	     || {EBI, QoS, FlowInfo} <- Contexts},
-    send_bearer_update_ies(Kind, Sent, ExtraIEs, Staged, AccessTunnel).
+    send_bearer_update_ies(Kind, Sent, ExtraIEs, Staged, AccessTunnel, Data).
 
 %% Emit one batched Update Bearer Request from already-built Bearer Contexts,
 %% carrying them in the request tag so a temporarily-rejected bearer can be
 %% re-sent verbatim on the next reachability signal (#34) without rebuilding the
 %% QoS/TFT from a descriptor that may have moved on since.
-send_bearer_update_ies(_Kind, Sent, _ExtraIEs, _Staged, _AccessTunnel)
+send_bearer_update_ies(_Kind, Sent, _ExtraIEs, _Staged, _AccessTunnel, Data)
   when map_size(Sent) =:= 0 ->
-    ok;
-send_bearer_update_ies(Kind, Sent, ExtraIEs, Staged, AccessTunnel) ->
+    Data;
+send_bearer_update_ies(Kind, Sent, ExtraIEs, Staged0, AccessTunnel, Data0) ->
+    {Staged, Data} = stage_outstanding(Staged0, Data0),
     Type = update_bearer_request,
     RequestIEs0 = ExtraIEs ++ maps:values(Sent),
     RequestIEs = gtp_v2_c:build_recovery(Type, AccessTunnel, false, RequestIEs0),
     send_request(AccessTunnel, ?T3, ?N3, Type, RequestIEs,
-		 {update_dedicated_bearers, Kind, Staged, Sent}).
+		 {update_dedicated_bearers, Kind, Staged, Sent}),
+    Data.
 
 update_bearer_context(EBI, QoS, FlowInfo) ->
     Group0 = [#v2_eps_bearer_id{eps_bearer_id = EBI}, encode_bearer_level_qos(QoS)],
@@ -1265,7 +1267,8 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
     Contexts = [{EBI, QoS, FlowInfo}
 		|| {EBI, QoS, FlowInfo, _Desc} <- ModifiedBearers],
     Staged = #{EBI => Desc || {EBI, _QoS, _FlowInfo, Desc} <- ModifiedBearers},
-    send_dedicated_bearers_update(rule_change, Contexts, [], Staged, AccessTunnel),
+    Data2 = send_dedicated_bearers_update(rule_change, Contexts, [], Staged,
+					 AccessTunnel, Data1),
     RemovedEBIs0 = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
     %% The default bearer's EBI can appear here (its {qci_arp,QCI,ARP} entry
     %% loses its last bound rule just like a dedicated bearer's would). Never
@@ -1279,7 +1282,7 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
 		   [DefaultEBI])
     end,
     send_dedicated_bearers_delete(RemovedEBIs, AccessTunnel),
-    Data1.
+    Data2.
 
 initiate_create_dedicated_bearer(PTI, QCI, ARP, QoS, FlowInfo, DefaultEBI, AccessTunnel,
 				 #{bearers := BearerMap0, pfcp := PCtx0,
@@ -1535,9 +1538,10 @@ emit_ue_update_bearer(EBI, PTI, AccessTunnel, PCC2, Dedicated, PCtx1, D) ->
     case smf_gsn_lib:detect_modified_bearers(PCC2, #{EBI => TargetDesc}) of
 	[{_, QoS, FlowInfo, NewDesc}] ->
 	    PTIie = #v2_procedure_transaction_id{pti = PTI},
-	    send_dedicated_bearers_update(rule_change, [{EBI, QoS, FlowInfo}],
-					  [PTIie], #{EBI => NewDesc}, AccessTunnel),
-	    D#{pfcp := PCtx1};
+	    D1 = send_dedicated_bearers_update(rule_change, [{EBI, QoS, FlowInfo}],
+					       [PTIie], #{EBI => NewDesc},
+					       AccessTunnel, D),
+	    D1#{pfcp := PCtx1};
 	[] ->
 	    %% PCRF accepted but left this bearer's rules unchanged -> no TFT change
 	    %% to signal (realistically unreachable for an accepted delete). Ack only.
@@ -1710,7 +1714,10 @@ stage_update_retry(Kind, EBI, Staged, Sent, Data) ->
     case Sent of
 	#{EBI := BearerCtx} ->
 	    Retry = maps:get(retry_updates, Data, #{}),
-	    Desc = maps:get(EBI, Staged, undefined),
+	    Desc = case maps:find(EBI, Staged) of
+		       {ok, {_Ref, D}} -> D;
+		       error           -> undefined
+		   end,
 	    Data#{retry_updates => Retry#{EBI => {Kind, BearerCtx, Desc}}};
 	#{} ->
 	    %% The peer named a bearer this request did not carry -- nothing to
@@ -1741,11 +1748,12 @@ retry_pending_updates(AccessTunnel, Data) ->
 			   end,
 		  Acc#{Kind => {Sent0#{EBI => BearerCtx}, Staged}}
 	  end, #{}, Retry),
-    maps:foreach(
-      fun(Kind, {Sent, Staged}) ->
-	      send_bearer_update_ies(Kind, Sent, [], Staged, AccessTunnel)
-      end, ByKind),
-    Data#{retry_updates => #{}}.
+    Data1 =
+	maps:fold(
+	  fun(Kind, {Sent, Staged}, D) ->
+		  send_bearer_update_ies(Kind, Sent, [], Staged, AccessTunnel, D)
+	  end, Data, ByKind),
+    Data1#{retry_updates => #{}}.
 
 %% Per-bearer Cause for one EBI within the response's Bearer Contexts, which may
 %% be a single IE or a list. `undefined` when the peer omitted that bearer.
@@ -1760,10 +1768,44 @@ bearer_ctx_cause(EBI, BearerCtxs) ->
 	      Acc
       end, undefined, BearerCtxs).
 
+%% Tag a batch's staged descriptors with a token and record it as the newest
+%% outstanding Update for each bearer in the batch (#36).
+%%
+%% Two Gx re-authorizations touching the same EBI produce two Update Bearer
+%% Requests. Their responses are independent transactions and may be answered out
+%% of order, so committing each batch's descriptor unconditionally lets the OLDER
+%% response land last and overwrite the newer state. The token makes "is this
+%% still the current intent for this bearer?" answerable at commit time.
+%%
+%% One token per batch is enough: it is recorded per EBI, so a later batch that
+%% re-stages only some of the bearers supersedes exactly those.
+stage_outstanding(Staged0, Data) ->
+    Ref = erlang:unique_integer([monotonic]),
+    Outstanding = maps:get(bearer_update_ref, Data, #{}),
+    Staged = #{EBI => {Ref, Desc} || EBI := Desc <- Staged0},
+    {Staged,
+     Data#{bearer_update_ref =>
+	       maps:merge(Outstanding, #{EBI => Ref || EBI := _ <- Staged0})}}.
+
+%% Commit a staged descriptor, unless a newer Update Bearer Request for the same
+%% bearer was issued after this batch -- in which case this response is stale and
+%% its descriptor no longer reflects the intent (#36). Dropping it is right even
+%% when the newer request later fails: the failure path acts on the newer intent.
 commit_staged_descriptor(EBI, Staged, #{dedicated := Ded} = Data) ->
+    Outstanding = maps:get(bearer_update_ref, Data, #{}),
     case maps:find(EBI, Staged) of
-	{ok, Desc} -> Data#{dedicated := Ded#{EBI => Desc}};
-	error      -> Data
+	{ok, {Ref, Desc}} ->
+	    case maps:get(EBI, Outstanding, Ref) of
+		Ref ->
+		    Data#{dedicated := Ded#{EBI => Desc}};
+		_Newer ->
+		    ?LOG(warning, "stale Update Bearer Response for bearer ~p: a "
+			 "newer Update was issued after this one; not committing "
+			 "its descriptor", [EBI]),
+		    Data
+	    end;
+	error ->
+	    Data
     end.
 
 %% Terminal Update failure: report the affected PCC rule(s) to the PCRF
@@ -1999,8 +2041,9 @@ emit_subscribed_qos_update(#{req_key := ReqKey, seq_no := SeqNo, src := Src,
     %% carries "Several IEs with this type ... to represent a list of Bearers",
     %% so the default bearer and every fanned-out dedicated bearer ride in ONE
     %% Update Bearer Request -- not one for the default and a second for the rest.
-    {DedSent, Staged, Data1} =
+    {DedSent, Staged0, Data1} =
 	subscribed_arp_fan_out(OldSOpts, effective_arp(AuthQoS, Bearer), Context, Data),
+    {Staged, Data2} = stage_outstanding(Staged0, Data1),
 
     Type = update_bearer_request,
     RequestIEs0 =
@@ -2012,7 +2055,7 @@ emit_subscribed_qos_update(#{req_key := ReqKey, seq_no := SeqNo, src := Src,
     send_request(
       AccessTunnel, Src, IP, Port, ?T3, ?N3, Msg#gtp{seq_no = SeqNo},
       {subscribed_qos_update, ReqKey, OldSOpts, Staged, DedSent}),
-    Data1.
+    Data2.
 
 %% Authorized APN-AMBR wins over the command's. Session values are bps, the IE
 %% is kbps (cf. copy_qos_to_session/2, which scales the other way).

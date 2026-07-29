@@ -972,6 +972,7 @@ common() ->
      default_arp_rekey_skips_dedicated_collision,
      gx_rar_dedicated_bearer_modify,
      gx_rar_dedicated_bearer_update_message_level_reject,
+     gx_rar_same_bearer_update_out_of_order,
      gx_rar_two_dedicated_bearers_batched_update,
      gx_rar_two_dedicated_bearers_batched_delete,
      gx_rar_removed_rule_on_default_bearer_no_delete,
@@ -1351,6 +1352,10 @@ init_per_testcase(gx_rar_dedicated_bearer_modify, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
 init_per_testcase(gx_rar_dedicated_bearer_update_message_level_reject, Config) ->
+    setup_per_testcase(Config),
+    smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
+    Config;
+init_per_testcase(gx_rar_same_bearer_update_out_of_order, Config) ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -7511,6 +7516,96 @@ message_level_update_response(#gtp{seq_no = SeqNo}, #gtpc{restart_counter = RCnt
     IEs = [#v2_recovery{restart_counter = RCnt}, #v2_cause{v2_cause = Cause}],
     #gtp{version = v2, type = update_bearer_response,
 	 tei = RemoteCntlTEI, seq_no = SeqNo, ie = IEs}.
+
+%%--------------------------------------------------------------------
+gx_rar_same_bearer_update_out_of_order() ->
+    [{doc, "#36: two Gx re-authorizations of the SAME bearer produce two Update "
+	   "Bearer Requests. Their responses are independent transactions and may "
+	   "be answered out of order; the older response must not overwrite the "
+	   "descriptor the newer one already committed"}].
+gx_rar_same_bearer_update_out_of_order(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun = fun(Rq, Rs, Avps, SOpts) -> Self ! {'$response', Rq, Rs, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SessionOpts, events = []},
+    RuleName = <<"ooo-rule">>,
+    RuleFun =
+	fun(MBRul) ->
+		#{'Charging-Rule-Definition' =>
+		      [#{'Charging-Rule-Name' => RuleName,
+			 'Flow-Information' =>
+			     [#{'Flow-Description' =>
+				    [<<"permit out ip from any to assigned">>],
+				'Flow-Direction' => [2]}],
+			 'QoS-Information' =>
+			     [#{'QoS-Class-Identifier' => 1,
+				'Max-Requested-Bandwidth-UL' => MBRul,
+				'Max-Requested-Bandwidth-DL' => 8000,
+				'Guaranteed-Bitrate-UL' => 6000,
+				'Guaranteed-Bitrate-DL' => 8000,
+				'Allocation-Retention-Priority' =>
+				    #{'Priority-Level' => 2,
+				      'Pre-emption-Capability' => 1,
+				      'Pre-emption-Vulnerability' => 0}}],
+			 'Metering-Method' => [1],
+			 'Precedence' => [100],
+			 'Online' => [0],
+			 'Offline' => [0]}]}
+	end,
+    Rar = fun(Rule) ->
+		  Server ! AAAReq#aaa_request{events = [{pcc, install, [Rule]}]},
+		  receive {'$response', _, _, _, _} -> ok
+		  after 5000 -> ct:fail(rar_timeout)
+		  end
+	  end,
+
+    %% Create the bearer.
+    Rar(RuleFun(6000)),
+    DedEBI = 6,
+    GtpCDed = complete_create_bearer(Cntl, GtpC, DedEBI),
+
+    %% Two further re-authorizations of the SAME bearer, each changing its MBR.
+    %% Each produces its own Update Bearer Request; neither is answered yet.
+    Rar(RuleFun(7000)),
+    UBR1 = recv_pdu(Cntl, ?TIMEOUT),
+    ?match(#gtp{type = update_bearer_request}, UBR1),
+
+    Rar(RuleFun(9000)),
+    UBR2 = recv_pdu(Cntl, ?TIMEOUT),
+    ?match(#gtp{type = update_bearer_request}, UBR2),
+
+    %% Answer the NEWER one first: its descriptor commits.
+    send_pdu(Cntl, GtpC, two_bearer_update_response(
+			   UBR2, GtpCDed, [{DedEBI, request_accepted}])),
+    ct:sleep(200),
+    #{dedicated := Ded1} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{DedEBI := #ded_bearer{qos = #{'Max-Requested-Bandwidth-UL' := 9000}}},
+	   Ded1),
+
+    %% Now the OLDER one lands. It must be discarded, not committed -- otherwise
+    %% the bearer reverts to the superseded 7000 kbps.
+    send_pdu(Cntl, GtpC, two_bearer_update_response(
+			   UBR1, GtpCDed, [{DedEBI, request_accepted}])),
+    ct:sleep(200),
+    #{dedicated := Ded2} = smf_context:test_cmd(gtp, CtxKey, info),
+    ?match(#{DedEBI := #ded_bearer{qos = #{'Max-Requested-Bandwidth-UL' := 9000}}},
+	   Ded2),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
 
 %%--------------------------------------------------------------------
 gx_rar_dedicated_bearer_update_message_level_reject() ->
