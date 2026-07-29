@@ -1359,8 +1359,7 @@ ue_delete_filters_proc(EBI, PfIds, PTI, AccessTunnel) ->
 	       smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC1),
 	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),
 	   %% Commit the Gx/PCC results (shared by both outcomes).
-	   async_m:modify_data(
-	     fun(D) -> D#{pcf := PCF2, aaa_session := Session2, pcc := PCC2} end),
+	   async_m:modify_data(_#{pcf := PCF2, aaa_session := Session2, pcc := PCC2}),
 	   %% One PTI-correlated single-bearer outcome.
 	   ue_delete_outcome(
 	     lists:member(EBI, smf_gsn_lib:detect_removed_bearers(PCC0, PCC2, BearerMap)),
@@ -1391,8 +1390,7 @@ ue_add_filters_proc(EBI, FlowInfos, PTI, AccessTunnel) ->
 	   {PCC1, PCCErrors} =
 	       smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC0),
 	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),
-	   async_m:modify_data(
-	     fun(D) -> D#{pcf := PCF2, aaa_session := Session2, pcc := PCC1} end),
+	   async_m:modify_data(_#{pcf := PCF2, aaa_session := Session2, pcc := PCC1}),
 	   ue_update_outcome(EBI, PTI, AccessTunnel, PCC1, BearerMap, PCtx0, Dedicated)
        ]).
 
@@ -1418,8 +1416,7 @@ ue_qos_change_proc(EBI, ReqQoS, PTI, AccessTunnel) ->
 	   {PCC1, PCCErrors} =
 	       smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC0),
 	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),
-	   async_m:modify_data(
-	     fun(D) -> D#{pcf := PCF2, aaa_session := Session2, pcc := PCC1} end),
+	   async_m:modify_data(_#{pcf := PCF2, aaa_session := Session2, pcc := PCC1}),
 	   ue_update_outcome(EBI, PTI, AccessTunnel, PCC1, BearerMap, PCtx0, Dedicated)
        ]).
 
@@ -1454,8 +1451,7 @@ ue_replace_filters_proc(EBI, FlowInfos, PTI, AccessTunnel) ->
 	   {PCC2, PCCErrors} =
 	       smf_pcc_context:gx_events_to_pcc_ctx(Events, install, RuleBase, PCC1),
 	   {PCF2, Session2} = report_pcc_failures(PCCErrors, PCF1, Session1, #{now => Now}),
-	   async_m:modify_data(
-	     fun(D) -> D#{pcf := PCF2, aaa_session := Session2, pcc := PCC2} end),
+	   async_m:modify_data(_#{pcf := PCF2, aaa_session := Session2, pcc := PCC2}),
 	   ue_delete_outcome(
 	     lists:member(EBI, smf_gsn_lib:detect_removed_bearers(PCC0, PCC2, BearerMap)),
 	     EBI, PTI, AccessTunnel, PCC2, BearerMap, PCtx0, Dedicated)
@@ -1464,8 +1460,7 @@ ue_replace_filters_proc(EBI, FlowInfos, PTI, AccessTunnel) ->
 %% Empty: the bearer's last bound rule is gone -> single-bearer deactivation
 %% echoing the PTI (Increment 2 behaviour, unchanged).
 ue_delete_outcome(true, EBI, PTI, AccessTunnel, _PCC2, _BearerMap, _PCtx0, _Dedicated) ->
-    async_m:modify_data(
-      fun(D) -> initiate_ue_delete_dedicated_bearer(PTI, EBI, AccessTunnel, D) end);
+    async_m:modify_data(initiate_ue_delete_dedicated_bearer(PTI, EBI, AccessTunnel, _));
 %% Non-empty: surviving rules -> the shared Update outcome (Increment 3).
 ue_delete_outcome(false, EBI, PTI, AccessTunnel, PCC2, BearerMap, PCtx0, Dedicated) ->
     ue_update_outcome(EBI, PTI, AccessTunnel, PCC2, BearerMap, PCtx0, Dedicated).
@@ -1479,7 +1474,7 @@ ue_update_outcome(EBI, PTI, AccessTunnel, PCC, BearerMap, PCtx0, Dedicated) ->
 		       smf_pfcp_context:modify_session_async(PCC, [], #{}, BearerMap, PCtx0)),
 	   {PCtx1, _, _} <- smf_pfcp_context:await_modify(Issued),
 	   async_m:modify_data(
-	     fun(D) -> emit_ue_update_bearer(EBI, PTI, AccessTunnel, PCC, Dedicated, PCtx1, D) end)
+	     emit_ue_update_bearer(EBI, PTI, AccessTunnel, PCC, Dedicated, PCtx1, _))
        ]).
 
 %% reprovision_proc/1 — re-provision the UPF for a bearer-table change that is
@@ -1985,10 +1980,10 @@ subscribed_qos_change_proc(Cmd, AccessTunnel, Context) ->
 	   %% failure, so this must NOT short-circuit down the error channel.
 	   Reply <- gx_ccr_update_opt(PCF0, S1, SOpts, #{now => Now}),
 	   {PCF1, S2} = qos_change_answer(Reply, PCF0, S1),
-	   async_m:modify_data(fun(D) -> D#{pcf := PCF1, aaa_session := S2} end),
+	   async_m:modify_data(_#{pcf := PCF1, aaa_session := S2}),
 	   AuthQoS = maps:get('Authorized-QoS-Information', S2, #{}),
 	   async_m:modify_data(
-	     fun(D) -> emit_subscribed_qos_update(Cmd, AuthQoS, AccessTunnel, Context, D) end)
+	     emit_subscribed_qos_update(Cmd, AuthQoS, AccessTunnel, Context, _))
        ]).
 
 %% The PCRF's answer only ever *refines* the Update Bearer Request. On any
