@@ -1477,7 +1477,7 @@ ue_update_outcome(EBI, PTI, AccessTunnel, PCC, BearerMap, PCtx0, Dedicated) ->
     do([async_m ||
 	   Issued <- async_m:lift(
 		       smf_pfcp_context:modify_session_async(PCC, [], #{}, BearerMap, PCtx0)),
-	   {PCtx1, _, _} <- await_pfcp_modify(Issued),
+	   {PCtx1, _, _} <- smf_pfcp_context:await_modify(Issued),
 	   async_m:modify_data(
 	     fun(D) -> emit_ue_update_bearer(EBI, PTI, AccessTunnel, PCC, Dedicated, PCtx1, D) end)
        ]).
@@ -1485,42 +1485,19 @@ ue_update_outcome(EBI, PTI, AccessTunnel, PCC, BearerMap, PCtx0, Dedicated) ->
 %% reprovision_proc/1 — re-provision the UPF for a bearer-table change that is
 %% already committed to Data. Every batch-C path treats a failed PFCP
 %% modification as non-fatal (it keeps the control-plane change and drops only
-%% the new PCtx), so this never travels the error channel: await_pfcp_modify_opt/1
+%% the new PCtx), so this never travels the error channel: await_modify_opt/1
 %% yields `undefined` on failure and the commit simply leaves `pfcp` alone.
 reprovision_proc(BearerMap) ->
     do([async_m ||
 	   #{pfcp := PCtx0, pcc := PCC} <- async_m:get_data(),
 	   Issued <- async_m:lift(
 		       smf_pfcp_context:modify_session_async(PCC, [], #{}, BearerMap, PCtx0)),
-	   PCtx <- await_pfcp_modify_opt(Issued),
+	   PCtx <- smf_pfcp_context:await_modify_opt(Issued),
 	   async_m:modify_data(
 	     fun(D) when PCtx =:= undefined -> D;
 		(D)                         -> D#{pfcp := PCtx}
 	     end)
        ]).
-
-%% Tolerant sibling of await_pfcp_modify/1: yields the new PCtx, or `undefined`
-%% when the UPF refused, instead of short-circuiting down the error channel.
-await_pfcp_modify_opt({request, ReqId, PCtx1}) ->
-    do([async_m ||
-	   Reply <- async_m:await(ReqId),
-	   async_m:return(
-	     case smf_pfcp_context:modify_session_result(Reply, PCtx1) of
-		 {ok, {PCtx, _, _}} -> PCtx;
-		 {error, _}         -> undefined
-	     end)
-       ]);
-await_pfcp_modify_opt({no_request, PCtx1}) ->
-    async_m:return(PCtx1).
-
-%% Local mirror of gtp_context:await_modify/1 — await the async PFCP modify reply
-%% (or short-circuit when no PFCP change was needed). A non-accepted reply makes
-%% modify_session_result return {error, #ctx_err{FATAL}}, routed to br_err.
-await_pfcp_modify({request, ReqId, PCtx1}) ->
-    do([async_m || Reply <- async_m:await(ReqId),
-		   async_m:lift(smf_pfcp_context:modify_session_result(Reply, PCtx1))]);
-await_pfcp_modify({no_request, PCtx1}) ->
-    async_m:return({PCtx1, undefined, #{}}).
 
 %% Recompute the target bearer's surviving descriptor and emit the PTI-echoing
 %% Update Bearer Request (reusing the network-initiated send path; PTI rides

@@ -938,7 +938,7 @@ update_credits_proc(CreditEv) ->
 	   {PCC, PCCErrors} = smf_pcc_context:gy_events_to_pcc_ctx(Now, [CreditEv], PCC0),
 	   {PCF1, S1} = report_rule_failures(PCCErrors, PCF0, S0, #{now => Now}),
 	   Issued <- async_m:lift(smf_pfcp_context:modify_session_async(PCC, [], #{}, BearerMap, PCtx0)),
-	   {PCtx, _, _} <- await_modify(Issued),
+	   {PCtx, _, _} <- smf_pfcp_context:await_modify(Issued),
 	   async_m:modify_data(_#{pfcp => PCtx, pcc => PCC, pcf => PCF1, aaa_session => S1})
        ]).
 
@@ -963,7 +963,7 @@ gx_rar_apply_proc(PCC0, PCC1, PCC2) ->
 %%% step 3:
 	   Issued1 <- async_m:lift(
 			smf_pfcp_context:modify_session_async(PCC1, [], #{}, BearerMap, PCtx0)),
-	   {PCtx1, UsageReport, _} <- await_modify(Issued1),
+	   {PCtx1, UsageReport, _} <- smf_pfcp_context:await_modify(Issued1),
 
 %%% step 4:
 	   ChargeEv = {online, 'RAR'},   %% made up value, not use anywhere...
@@ -983,7 +983,7 @@ gx_rar_apply_proc(PCC0, PCC1, PCC2) ->
 %%% step 6:
 	   Issued2 <- async_m:lift(
 			smf_pfcp_context:modify_session_async(PCC4, [], #{}, BearerMap, PCtx1)),
-	   {PCtx, _, _} <- await_modify(Issued2),
+	   {PCtx, _, _} <- smf_pfcp_context:await_modify(Issued2),
 
 %%% step 7:
 	   %% TODO Charging-Rule-Report for successfully installed/removed rules
@@ -1024,12 +1024,6 @@ gx_rar_apply_err(#ctx_err{} = E, State,
 		 #{context := Context, tunnels := #{'Access' := AccessTunnel}} = Data) ->
     handle_ctx_error(E#ctx_err{context = Context, tunnel = AccessTunnel}, [],
 		     State#{rar_apply_pending := false}, Data).
-
-await_modify({request, ReqId, PCtx1}) ->
-    do([async_m || Reply <- async_m:await(ReqId),
-		   async_m:lift(smf_pfcp_context:modify_session_result(Reply, PCtx1))]);
-await_modify({no_request, PCtx1}) ->
-    async_m:return({PCtx1, undefined, #{}}).
 
 %% Return the async_m-threaded State (async_pending now drained) as the next
 %% state so the drain is a state-term change — that's what re-delivers the events

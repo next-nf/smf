@@ -348,7 +348,7 @@ apply_bearer_change_proc(BearerMap, URRActions, SendEM, PCtx0, PCC) ->
 	   Issued <- async_m:lift(
 		       smf_pfcp_context:modify_session_async(
 			 PCC, URRActions, modify_opts(SendEM), BearerMap, PCtx0)),
-	   Result <- await_modify(Issued),
+	   Result <- smf_pfcp_context:await_modify(Issued),
 	   async_m:return(apply_bearer_change_result(Result, URRActions))
        ]).
 
@@ -368,16 +368,6 @@ modify_opts(false) -> #{}.
 apply_bearer_change_result({PCtx, UsageReport, SessionInfo}, URRActions) ->
     gtp_context:usage_report(self(), URRActions, UsageReport),
     {PCtx, SessionInfo}.
-
-%% Local mirror of gtp_context:await_modify/1 — await the async PFCP modify reply,
-%% or short-circuit when the rule diff was empty and nothing went on the wire.
-%% A non-accepted reply makes modify_session_result return {error, #ctx_err{FATAL}},
-%% which travels the procedure's error channel to the caller's ErrFun.
-await_modify({request, ReqId, PCtx1}) ->
-    do([async_m || Reply <- async_m:await(ReqId),
-		   async_m:lift(smf_pfcp_context:modify_session_result(Reply, PCtx1))]);
-await_modify({no_request, PCtx1}) ->
-    async_m:return({PCtx1, undefined, #{}}).
 
 %%====================================================================
 %% Charging API
@@ -421,17 +411,11 @@ close_context_proc(_, {API, TermCause}, Data) ->
 close_context_proc(API, TermCause, #{pfcp := PCtx} = Data)
   when is_atom(TermCause) ->
     do([async_m ||
-	   UsageReport <- await_delete(smf_pfcp_context:delete_session_async(TermCause, PCtx)),
+	   UsageReport <- smf_pfcp_context:await_delete(smf_pfcp_context:delete_session_async(TermCause, PCtx)),
 	   async_m:return(close_context(API, TermCause, UsageReport, Data))
        ]);
 close_context_proc(_API, _TermCause, Data) ->
     async_m:return(Data).
-
-await_delete({request, ReqId}) ->
-    do([async_m || Reply <- async_m:await(ReqId),
-		   async_m:return(smf_pfcp_context:delete_session_result(Reply))]);
-await_delete(no_request) ->
-    async_m:return(undefined).
 
 %% close_context/4
 close_context(API, TermCause, UsageReport,
