@@ -1347,10 +1347,8 @@ ue_delete_filters_proc(EBI, PfIds, PTI, AccessTunnel) ->
 			 ?'DIAMETER_GX_PACKET-FILTER-OPERATION_DELETION',
 		     'Packet-Filter-Information' => PFs},
 	   Now = erlang:monotonic_time(),
-	   {async, ReqId} =
-	       smf_aaa_pcf:invoke(PCF0, Session0, SOpts, {gx, 'CCR-Update'},
-				  #{pipeline_async => true, now => Now}),
-	   {Result, PCF1, Session1, Events} <- await_pipeline(ReqId),
+	   {Result, PCF1, Session1, Events} <-
+	       gx_ccr_update(PCF0, Session0, SOpts, #{now => Now}),
 	   ok <- async_m:lift(ccr_result(Result)),
 	   RuleBase = smf_charging:rulebase(),
 	   %% Fold BOTH passes: a delete may also carry a PCRF-proposed replacement
@@ -1385,10 +1383,8 @@ ue_add_filters_proc(EBI, FlowInfos, PTI, AccessTunnel) ->
 			 ?'DIAMETER_GX_PACKET-FILTER-OPERATION_ADDITION',
 		     'Packet-Filter-Information' => Groups},
 	   Now = erlang:monotonic_time(),
-	   {async, ReqId} =
-	       smf_aaa_pcf:invoke(PCF0, Session0, SOpts, {gx, 'CCR-Update'},
-				  #{pipeline_async => true, now => Now}),
-	   {Result, PCF1, Session1, Events} <- await_pipeline(ReqId),
+	   {Result, PCF1, Session1, Events} <-
+	       gx_ccr_update(PCF0, Session0, SOpts, #{now => Now}),
 	   ok <- async_m:lift(ccr_result(Result)),
 	   RuleBase = smf_charging:rulebase(),
 	   %% An add only installs (nothing to remove).
@@ -1415,10 +1411,8 @@ ue_qos_change_proc(EBI, ReqQoS, PTI, AccessTunnel) ->
 			 ?'DIAMETER_GX_EVENT-TRIGGER_RESOURCE_MODIFICATION_REQUEST',
 		     'QoS-Information' => ReqQoS},
 	   Now = erlang:monotonic_time(),
-	   {async, ReqId} =
-	       smf_aaa_pcf:invoke(PCF0, Session0, SOpts, {gx, 'CCR-Update'},
-				  #{pipeline_async => true, now => Now}),
-	   {Result, PCF1, Session1, Events} <- await_pipeline(ReqId),
+	   {Result, PCF1, Session1, Events} <-
+	       gx_ccr_update(PCF0, Session0, SOpts, #{now => Now}),
 	   ok <- async_m:lift(ccr_result(Result)),
 	   RuleBase = smf_charging:rulebase(),
 	   {PCC1, PCCErrors} =
@@ -1450,10 +1444,8 @@ ue_replace_filters_proc(EBI, FlowInfos, PTI, AccessTunnel) ->
 			 ?'DIAMETER_GX_PACKET-FILTER-OPERATION_MODIFICATION',
 		     'Packet-Filter-Information' => Groups},
 	   Now = erlang:monotonic_time(),
-	   {async, ReqId} =
-	       smf_aaa_pcf:invoke(PCF0, Session0, SOpts, {gx, 'CCR-Update'},
-				  #{pipeline_async => true, now => Now}),
-	   {Result, PCF1, Session1, Events} <- await_pipeline(ReqId),
+	   {Result, PCF1, Session1, Events} <-
+	       gx_ccr_update(PCF0, Session0, SOpts, #{now => Now}),
 	   ok <- async_m:lift(ccr_result(Result)),
 	   RuleBase = smf_charging:rulebase(),
 	   %% A replace can drop the old rule and install the new -> apply both.
@@ -1579,14 +1571,34 @@ report_pcc_failures(PCCErrors, PCF0, Session0, ReqOpts) ->
 	_ -> {PCF0, Session0}
     end.
 
-%% await a whole-pipeline worker (invoke(pipeline_async)). On success the worker
-%% posts the folded {Result, Ctx1, Session1, Events}; on an unexpected crash
-%% async_dispatch delivers {error, {worker_down, _}}. Turn the latter into a
-%% procedure error (routed to br_err -> Bearer Resource Failure Indication)
-%% rather than a badmatch that would crash the context gen_statem.
-await_pipeline(ReqId) ->
-    do([async_m || R <- async_m:await(ReqId),
-                   async_m:lift(pipeline_ok(R))]).
+%% Issue a Gx CCR-Update and yield the pipeline's folded
+%% {Result, PCF1, Session1, Events}, awaiting it without blocking the context.
+%%
+%% smf_aaa_pcf:invoke/5 answers either {async, ReqId} -- a handler suspended, the
+%% common case of a real PCRF round trip -- or the folded result outright, when
+%% nothing in the pipeline needed to wait. Both are normal; only the first has
+%% anything to await. Deciding that here is what lets callers stay linear, and it
+%% removes the bare `{async, ReqId} = invoke(...)` match whose inline-completion
+%% clause was a badmatch that killed the context gen_statem.
+%%
+%% On an unexpected worker crash async_dispatch delivers {error, {worker_down,_}};
+%% pipeline_ok/1 turns that into a procedure error (routed to br_err -> Bearer
+%% Resource Failure Indication) rather than a badmatch.
+gx_ccr_update(PCF, Session, SOpts, Opts) ->
+    do([async_m ||
+	   Reply <- gx_ccr_update_opt(PCF, Session, SOpts, Opts),
+	   async_m:lift(pipeline_ok(Reply))
+       ]).
+
+%% Tolerant sibling of gx_ccr_update/4: yields the pipeline's raw answer --
+%% including a failure -- instead of short-circuiting down the error channel, for
+%% callers that degrade rather than abort on a Gx rejection.
+gx_ccr_update_opt(PCF, Session, SOpts, Opts) ->
+    await_invoke(smf_aaa_pcf:invoke(PCF, Session, SOpts, {gx, 'CCR-Update'},
+				    Opts#{pipeline_async => true})).
+
+await_invoke({async, ReqId}) -> async_m:await(ReqId);
+await_invoke(Folded)         -> async_m:return(Folded).
 
 pipeline_ok({_Result, _Ctx1, _Session1, _Events} = Ok) -> {ok, Ok};
 pipeline_ok({error, _} = Err)                          -> Err.
@@ -1992,10 +2004,9 @@ subscribed_qos_change_proc(Cmd, AccessTunnel, Context) ->
 	       #{'Event-Trigger' =>
 		     ?'DIAMETER_GX_EVENT-TRIGGER_DEFAULT_EPS_BEARER_QOS_CHANGE'},
 	   Now = erlang:monotonic_time(),
-	   {async, ReqId} =
-	       smf_aaa_pcf:invoke(PCF0, S1, SOpts, {gx, 'CCR-Update'},
-				  #{pipeline_async => true, now => Now}),
-	   Reply <- async_m:await(ReqId),
+	   %% Tolerant: qos_change_answer/3 degrades to the command's own QoS on any
+	   %% failure, so this must NOT short-circuit down the error channel.
+	   Reply <- gx_ccr_update_opt(PCF0, S1, SOpts, #{now => Now}),
 	   {PCF1, S2} = qos_change_answer(Reply, PCF0, S1),
 	   async_m:modify_data(fun(D) -> D#{pcf := PCF1, aaa_session := S2} end),
 	   AuthQoS = maps:get('Authorized-QoS-Information', S2, #{}),
