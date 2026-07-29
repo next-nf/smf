@@ -6,6 +6,7 @@
 
 -behaviour(monad).
 -export(['>>='/2, return/1, fail/1]).
+-export([return/3, fail/3]).
 -export([run/3]).
 -export([get_state/0, put_state/1, modify_state/1,
          get_data/0, put_data/1, modify_data/1,
@@ -39,6 +40,27 @@ return(A) ->
 -spec fail(term()) -> async_m().
 fail(E) ->
     fun(S, D) -> {{error, E}, S, D} end.
+
+%% return/3 and fail/3 are NOT monadic values: they are result constructors for
+%% the last expression of a hand-written `fun(State, Data)` step -- the escape
+%% hatch for state surgery the accessor combinators express poorly. Because a
+%% computation is any fun of the right shape, such a step needs no wrapping.
+%%
+%% fail/3 is the one that earns its keep: it fails while KEEPING the state the
+%% step already changed, so ErrFun sees it and can compensate. return/1 + a
+%% separate modify_data cannot express "committed this, then failed".
+%%
+%%     fun(State, #{pfcp := PCtx0} = Data) ->
+%%         case establish(PCtx0) of
+%%             {ok, PCtx}     -> async_m:return(PCtx, State, Data#{pfcp => PCtx});
+%%             {error, R, PCtx} -> async_m:fail(R, State, Data#{pfcp => PCtx})
+%%         end
+%%     end
+-spec return(term(), term(), term()) -> {result(), term(), term()}.
+return(A, S, D) -> {{ok, A}, S, D}.
+
+-spec fail(term(), term(), term()) -> {result(), term(), term()}.
+fail(E, S, D) -> {{error, E}, S, D}.
 
 -spec run(async_m(), term(), term()) -> {result(), term(), term()}.
 run(M, S, D) ->
