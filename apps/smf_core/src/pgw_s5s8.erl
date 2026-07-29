@@ -19,8 +19,8 @@
 
 -export([delete_context/4, close_context_proc/5]).
 -export([init_session/4, init_session_from_gtp_req/5, update_session_from_gtp_req/4]).
--export([handle_dedicated_bearer_changes/3]).
--ignore_xref([handle_dedicated_bearer_changes/3]).	% called via Interface variable
+-export([stage_dedicated_bearers/3, handle_dedicated_bearer_changes/4]).
+-ignore_xref([stage_dedicated_bearers/3, handle_dedicated_bearer_changes/4]).	% called via Interface variable
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("gtplib/include/gtp_packet.hrl").
@@ -428,12 +428,16 @@ handle_request(ReqKey,
 	    PVI = maps:get('Pre-emption-Vulnerability', ARP0, 0),
 	    ARP = {PL, PCI0, PVI},
 	    DefaultEBI = Context#context.default_bearer_id,
-	    Data1 = initiate_create_dedicated_bearer(
-		      PTI, QCI, ARP, QoS, FlowInfo,
-		      DefaultEBI, AccessTunnel, Data),
+	    %% Ack the command first: the Create Bearer Request IS the follow-on
+	    %% procedure (TS 29.274 7.2.14), and activation now suspends on the
+	    %% PFCP round trip that resolves the bearer's F-TEID (#89).
 	    gtp_context:request_finished(ReqKey),
-	    Actions = context_idle_action([], Context),
-	    {keep_state, Data1, Actions};
+	    Proc = create_dedicated_bearers_proc(
+		     PTI, [{QCI, ARP, QoS, FlowInfo}], DefaultEBI, AccessTunnel),
+	    OkFun = fun(_V, S, D) ->
+			    {next_state, S, D, context_idle_action([], Context)}
+		    end,
+	    async_m:run_async(Proc, OkFun, OkFun, State, Data);
        EBI =/= 0, BCM =:= ?'DIAMETER_GX_BEARER-CONTROL-MODE_UE_NW',
        TADOp =:= delete_existing_tft,
        is_map_key({'Access', EBI}, BearerMap) ->
@@ -709,7 +713,7 @@ handle_response({create_bearer, PgwFTEID},
 			    ?'Bearer Contexts' :=
 				#v2_bearer_context{group = BearerCtxGroup}}},
 		_Request, #{session := connected} = State,
-		#{bearers := BearerMap0, pcc := PCC,
+		#{bearers := BearerMap0, pcc := PCC, pfcp := PCtx0,
 		  pending_bearers := Pending0} = Data0)
   when ?CAUSE_OK(Cause) ->
     %% The message-level Cause may be request_accepted_partially, so the
@@ -719,25 +723,33 @@ handle_response({create_bearer, PgwFTEID},
     case ?CAUSE_OK(bearer_context_cause(BearerCtxGroup)) of
 	true ->
 	    case maps:take(PgwFTEID, Pending0) of
-		{{QCI, ARP, AccessBearer0, ChId}, Pending} ->
+		{{QCI, ARP, Key, ChId}, Pending} ->
+		    %% The MME has now named the bearer, so its provisional key
+		    %% becomes the real one. Rename it in the bearer map AND in the
+		    %% PCtx together (#89) -- smf_pfcp:rekey_bearer/3 explains why
+		    %% splitting them re-allocates the F-TEID we already advertised.
 		    #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} = BearerCtxGroup,
-		    AccessBearer = update_bearer_from_response(BearerCtxGroup, AccessBearer0),
+		    AccessBearer = update_bearer_from_response(
+				     BearerCtxGroup, maps:get(Key, BearerMap0)),
 		    PgwBI = <<EBI:8>>,
-		    BearerMap = BearerMap0#{{'Access', EBI} => AccessBearer,
-					    {qci_arp, QCI, ARP} => EBI,
-					    {bearer_id, PgwBI} => EBI},
+		    BearerMap = (maps:remove(Key, BearerMap0))
+			#{{'Access', EBI} => AccessBearer,
+			  {qci_arp, QCI, ARP} => EBI,
+			  {bearer_id, PgwBI} => EBI},
+		    PCtx = smf_pfcp:rekey_bearer(Key, {'Access', EBI}, PCtx0),
 		    Desc = smf_gsn_lib:normalize_bearer(EBI, QCI, ARP, PCC, ChId),
 		    Dedicated = maps:get(dedicated, Data0, #{}),
 		    Data1 = Data0#{bearers := BearerMap,
+				   pfcp := PCtx,
 				   pending_bearers := Pending,
 				   dedicated := Dedicated#{EBI => Desc},
 				   retry_bearers :=
 				       maps:remove(PgwFTEID,
 						   maps:get(retry_bearers, Data0, #{}))},
 		    Data = report_successful_resource_allocation(QCI, ARP, Data1),
-		    %% Re-provision the UPF asynchronously (#65). The bearer is
-		    %% already committed above; a failed modification only costs
-		    %% the new PCtx, as it did when this call blocked.
+		    %% Re-provision: the response carries the SGW's downlink F-TEID,
+		    %% which the FAR could not have before the UE accepted. The
+		    %% uplink PDR already exists from the pre-request provisioning.
 		    async_m:run_async(reprovision_proc(BearerMap),
 				      fun(_V, S, D) -> {next_state, S, D} end,
 				      fun(_R, S, D) -> {next_state, S, D} end,
@@ -1249,26 +1261,44 @@ send_dedicated_bearers_delete(EBIs, Tunnel) ->
     send_request(Tunnel, ?T3, ?N3, delete_bearer_request, RequestIEs,
 		 {delete_dedicated_bearers, EBIs}).
 
-handle_dedicated_bearer_changes(OldPCC, NewPCC,
-				#{bearers := BearerMap,
-				  tunnels := #{'Access' := AccessTunnel},
-				  context := #context{default_bearer_id = DefaultEBI},
-				  aaa_session := Session} = Data) ->
+%% stage_dedicated_bearers/3 — put every bearer this PCC change calls for into the
+%% bearer map BEFORE the policy-install modification runs, so that modification
+%% CREATES their PDRs (with the CHOOSE flag under FTUP) instead of creating them
+%% against the default bearer and updating them afterwards.
+%%
+%% That ordering is what makes the F-TEID round trip work at all (TS 23.214 5.4.3):
+%% a Created PDR carries the UP-allocated F-TEID, an updated one does not. It also
+%% costs nothing -- the install modification had to happen regardless, so the
+%% bearer is provisioned without adding a PFCP exchange (#89).
+stage_dedicated_bearers(OldPCC, NewPCC,
+			#{bearers := BearerMap, pfcp := PCtx,
+			  tunnels := #{'Access' := AccessTunnel},
+			  aaa_session := Session}) ->
     BCM = maps:get('Bearer-Control-Mode', Session,
 		   ?'DIAMETER_GX_BEARER-CONTROL-MODE_UE_ONLY'),
     NewBearers = smf_gsn_lib:detect_new_bearers(OldPCC, NewPCC, BearerMap, BCM),
-    Data1 = lists:foldl(
-	      fun({QCI, ARP, QoS, FlowInfo}, D) ->
-		  initiate_create_dedicated_bearer(undefined, QCI, ARP, QoS, FlowInfo,
-						   DefaultEBI, AccessTunnel, D)
-	      end, Data, NewBearers),
+    stage_new_bearers(NewBearers, AccessTunnel, PCtx, BearerMap).
+
+%% The UP has allocated by now (the caller ran the install modification and folded
+%% the Created PDRs back into the bearer map), so the Create Bearer Requests can
+%% carry a real F-TEID. Modified and removed bearers follow, unchanged.
+handle_dedicated_bearer_changes(OldPCC, NewPCC, Staged,
+				#{bearers := BearerMap, pfcp := PCtx,
+				  tunnels := #{'Access' := AccessTunnel},
+				  context := #context{default_bearer_id = DefaultEBI}} = Data) ->
+    Data1 = emit_create_bearers(undefined, Staged, BearerMap, PCtx,
+				DefaultEBI, AccessTunnel, Data),
+    dedicated_bearer_changes(OldPCC, NewPCC, DefaultEBI, AccessTunnel, Data1).
+
+dedicated_bearer_changes(OldPCC, NewPCC, DefaultEBI, AccessTunnel,
+			 #{bearers := BearerMap} = Data) ->
     Dedicated = maps:get(dedicated, Data, #{}),
     ModifiedBearers = smf_gsn_lib:detect_modified_bearers(NewPCC, Dedicated),
     Contexts = [{EBI, QoS, FlowInfo}
 		|| {EBI, QoS, FlowInfo, _Desc} <- ModifiedBearers],
     Staged = #{EBI => Desc || {EBI, _QoS, _FlowInfo, Desc} <- ModifiedBearers},
     Data2 = send_dedicated_bearers_update(rule_change, Contexts, [], Staged,
-					 AccessTunnel, Data1),
+					 AccessTunnel, Data),
     RemovedEBIs0 = smf_gsn_lib:detect_removed_bearers(OldPCC, NewPCC, BearerMap),
     %% The default bearer's EBI can appear here (its {qci_arp,QCI,ARP} entry
     %% loses its last bound rule just like a dedicated bearer's would). Never
@@ -1284,37 +1314,91 @@ handle_dedicated_bearer_changes(OldPCC, NewPCC,
     send_dedicated_bearers_delete(RemovedEBIs, AccessTunnel),
     Data2.
 
-initiate_create_dedicated_bearer(PTI, QCI, ARP, QoS, FlowInfo, DefaultEBI, AccessTunnel,
-				 #{bearers := BearerMap0, pfcp := PCtx0,
-				   pending_bearers := Pending0} = Data) ->
-    %% Derive PGW GTP-U IP and VRF from the existing default Access bearer
-    DefaultBearer = smf_gsn_lib:get_access_default_bearer(BearerMap0),
-    case DefaultBearer of
-	#bearer{vrf = VRF, local = #fq_teid{ip = PgwUIP}} when PgwUIP /= v4, PgwUIP /= v6 ->
-	    %% Allocate a real TEID from the TEI manager
-	    case smf_tei_mngr:alloc_tei(PCtx0) of
-		{ok, DataTEI} ->
-		    AccessBearer = #bearer{interface = 'Access',
-					   vrf = VRF,
-					   local = #fq_teid{ip = PgwUIP, teid = DataTEI}},
-		    TFTBin = smf_tft:flow_info_to_tft(FlowInfo),
-		    ChId = smf_gtp_c_socket:get_uniq_id(AccessTunnel#tunnel.socket),
-		    create_dedicated_bearer(PTI, DefaultEBI, QoS, TFTBin, ChId, AccessBearer, AccessTunnel),
-		    PgwFTEID = AccessBearer#bearer.local,
-		    Pending = Pending0#{PgwFTEID => {QCI, ARP, AccessBearer, ChId}},
-		    %% Retain the original request params so the Create Bearer
-		    %% Request can be re-issued verbatim if the UE is temporarily
-		    %% unreachable due to power saving (TS 23.401 5.4.1 step 12).
-		    Retry0 = maps:get(retry_bearers, Data, #{}),
-		    Retry = Retry0#{PgwFTEID =>
-					{PTI, DefaultEBI, QoS, TFTBin, AccessBearer, ChId}},
-		    Data#{pending_bearers := Pending, retry_bearers => Retry};
-		_ ->
-		    Data
-	    end;
-	_ ->
-	    Data
-    end.
+%% create_dedicated_bearers_proc/4 — the UE-requested activation path
+%% (Bearer Resource Command). Unlike the Gx-driven path there is no policy-install
+%% modification to fold the staging into, so this issues its own: stage the bearer,
+%% provision it, read back the UP-allocated F-TEID, then send the Create Bearer
+%% Request carrying it (TS 23.214 5.4.3; #89).
+create_dedicated_bearers_proc(_PTI, [], _DefaultEBI, _AccessTunnel) ->
+    async_m:return(ok);
+create_dedicated_bearers_proc(PTI, NewBearers, DefaultEBI, AccessTunnel) ->
+    do([async_m ||
+	   #{bearers := BearerMap0, pfcp := PCtx0, pcc := PCC} <- async_m:get_data(),
+	   {BearerMap1, Staged} =
+	       stage_new_bearers(NewBearers, AccessTunnel, PCtx0, BearerMap0),
+	   create_dedicated_bearers_step(PTI, Staged, BearerMap1, PCtx0, PCC,
+					 DefaultEBI, AccessTunnel)
+       ]).
+
+%% Nothing could be staged (no default bearer to template from, or the CP TEID
+%% pool is exhausted): leave Data untouched rather than issue an empty modify.
+create_dedicated_bearers_step(_PTI, [], _BearerMap, _PCtx0, _PCC, _DefaultEBI, _AccessTunnel) ->
+    async_m:return(ok);
+create_dedicated_bearers_step(PTI, Staged, BearerMap1, PCtx0, PCC, DefaultEBI, AccessTunnel) ->
+    do([async_m ||
+	   Issued <- async_m:lift(
+		       smf_pfcp_context:modify_session_async(
+			 PCC, [], #{}, BearerMap1, PCtx0)),
+	   {PCtx1, BearerMap2, _, _} <- smf_pfcp_context:await_modify(Issued),
+	   async_m:modify_data(
+	     emit_create_bearers(PTI, Staged, BearerMap2, PCtx1, DefaultEBI, AccessTunnel, _))
+       ]).
+
+%% Stage every new bearer under a PROVISIONAL key. The Create Bearer Request
+%% carries EPS Bearer Id 0 -- the MME assigns the real one and returns it in the
+%% response (TS 29.274 7.2.3/7.2.4) -- so there is no EBI to key on yet. The
+%% {qci_arp, ...} index points at the same provisional token, which is what binds
+%% the new PCC rule to this bearer so a PDR is built for it at all.
+stage_new_bearers(NewBearers, AccessTunnel, PCtx0, BearerMap0) ->
+    Default = smf_gsn_lib:get_access_default_bearer(BearerMap0),
+    lists:foldl(stage_new_bearer(Default, AccessTunnel, PCtx0, _, _),
+		{BearerMap0, []}, NewBearers).
+
+stage_new_bearer(#bearer{local = #fq_teid{ip = PgwUIP}} = Default, AccessTunnel, PCtx0,
+		 {QCI, ARP, QoS, FlowInfo}, {BearerMap0, Staged})
+  when PgwUIP /= v4, PgwUIP /= v6 ->
+    Key = {'Access', {pending, erlang:unique_integer([monotonic, positive])}},
+    BearerMap1 = BearerMap0#{Key => #bearer{interface = 'Access'}},
+    case smf_gsn_lib:assign_local_data_teid_like(Key, PCtx0, Default, BearerMap1) of
+	{ok, BearerMap} ->
+	    ChId = smf_gtp_c_socket:get_uniq_id(AccessTunnel#tunnel.socket),
+	    {BearerMap#{{qci_arp, QCI, ARP} => element(2, Key)},
+	     [{Key, QCI, ARP, QoS, FlowInfo, ChId} | Staged]};
+	{error, Reason} ->
+	    ?LOG(warning, "cannot assign a local data F-TEID for a new dedicated "
+		 "bearer at QCI ~p ARP ~p (~p); not activating it", [QCI, ARP, Reason]),
+	    {BearerMap0, Staged}
+    end;
+%% The default bearer's own F-TEID is not resolved yet, so there is no template
+%% for VRF and address family. Previously a guard that silently did nothing.
+stage_new_bearer(_Default, _AccessTunnel, _PCtx0, {QCI, ARP, _QoS, _FlowInfo},
+		 {BearerMap0, Staged}) ->
+    ?LOG(warning, "the default bearer has no resolved F-TEID yet; not activating "
+	 "a dedicated bearer at QCI ~p ARP ~p", [QCI, ARP]),
+    {BearerMap0, Staged}.
+
+%% The UP has allocated: read each staged bearer's F-TEID out of the post-modify
+%% bearer map and put it on the wire. Correlation stays keyed by the PGW F-TEID,
+%% which is what TS 29.274 7.2.4 gives us to match the response with -- the EBI
+%% does not exist yet.
+emit_create_bearers(PTI, Staged, BearerMap, PCtx, DefaultEBI, AccessTunnel, Data) ->
+    lists:foldl(
+      fun({Key, QCI, ARP, QoS, FlowInfo, ChId}, D) ->
+	      AccessBearer = resolved_bearer(Key, BearerMap, PCtx),
+	      TFTBin = smf_tft:flow_info_to_tft(FlowInfo),
+	      create_dedicated_bearer(PTI, DefaultEBI, QoS, TFTBin, ChId,
+				      AccessBearer, AccessTunnel),
+	      PgwFTEID = AccessBearer#bearer.local,
+	      Pending = maps:get(pending_bearers, D, #{}),
+	      %% Retain the request params so the Create Bearer Request can be
+	      %% re-issued verbatim if the UE is temporarily unreachable due to
+	      %% power saving (TS 23.401 5.4.1 step 12).
+	      Retry = maps:get(retry_bearers, D, #{}),
+	      D#{pending_bearers => Pending#{PgwFTEID => {QCI, ARP, Key, ChId}},
+		 retry_bearers =>
+		     Retry#{PgwFTEID =>
+				{PTI, DefaultEBI, QoS, TFTBin, AccessBearer, ChId}}}
+      end, Data#{bearers := BearerMap, pfcp := PCtx}, Staged).
 
 
 %% UE-requested single-bearer deactivation (bearer_resource_command
@@ -2146,18 +2230,28 @@ handle_create_bearer_failure(PgwFTEID, State,
     Data0 = Data00#{retry_bearers =>
 			maps:remove(PgwFTEID, maps:get(retry_bearers, Data00, #{}))},
     case maps:take(PgwFTEID, Pending0) of
-	{{QCI, ARP, _AccessBearer, _ChId}, Pending} ->
+	{{QCI, ARP, Key, _ChId}, Pending} ->
+	    %% The bearer was provisioned in the UPF before the request went out
+	    %% (#89), so a rejection has rules to tear down, not merely state to
+	    %% forget: drop the provisional bearer and its binding index, then
+	    %% re-provision so the PDR actually goes away.
+	    BearerMap1 = maps:remove({qci_arp, QCI, ARP}, maps:remove(Key, BearerMap)),
 	    case affected_pcc_rules(QCI, ARP, PCC) of
 		[] ->
-		    {keep_state, Data0#{pending_bearers := Pending}};
+		    Data1 = Data0#{bearers := BearerMap1, pending_bearers := Pending},
+		    async_m:run_async(reprovision_proc(BearerMap1),
+				      fun(_V, S, D) -> {next_state, S, D} end,
+				      fun(_R, S, D) -> {next_state, S, D} end,
+				      State, Data1);
 		RuleNames ->
 		    PCC1 = PCC#pcc_ctx{
 			     rules = maps:without(RuleNames, PCC#pcc_ctx.rules)},
-		    Data1 = Data0#{pcc := PCC1, pending_bearers := Pending},
+		    Data1 = Data0#{pcc := PCC1, bearers := BearerMap1,
+				   pending_bearers := Pending},
 		    Data = report_bearer_failure(RuleNames, Data1),
 		    %% Re-provision asynchronously (#65); the rule removal above
 		    %% stands whether or not the UPF accepts it.
-		    async_m:run_async(reprovision_proc(BearerMap),
+		    async_m:run_async(reprovision_proc(BearerMap1),
 				      fun(_V, S, D) -> {next_state, S, D} end,
 				      fun(_R, S, D) -> {next_state, S, D} end,
 				      State, Data)
@@ -2193,6 +2287,30 @@ retry_pending_bearers(AccessTunnel, Data) ->
 				      AccessBearer, AccessTunnel)
       end, Retry),
     Data#{retry_bearers => #{}}.
+
+%% A staged bearer whose F-TEID is still the CHOOSE placeholder got no PDR out of
+%% the modification: nothing bound a PCC rule to it, so the UP had nothing to
+%% allocate for. That is the UE-requested branch, which creates a bearer straight
+%% from the Bearer Resource Command's QoS instead of asking the PCRF for a rule as
+%% TS 23.401 5.4.5 requires -- so the bearer carries no user plane at all, a defect
+%% of its own rather than an F-TEID allocation-mode one.
+%%
+%% Fall back to a CP-assigned TEID there, leaving that path's behaviour as it was:
+%% with no PDR on the session for this bearer there is no allocation option for the
+%% UP to disagree with, so it cannot produce the cause-71 mismatch #89 is about.
+resolved_bearer(Key, BearerMap, PCtx) ->
+    case maps:get(Key, BearerMap) of
+	#bearer{local = #fq_teid{teid = {upf, _}}} = Bearer ->
+	    #bearer{local = #fq_teid{ip = IP}} =
+		smf_gsn_lib:get_access_default_bearer(BearerMap),
+	    {ok, TEID} = smf_tei_mngr:alloc_tei(PCtx),
+	    ?LOG(warning, "dedicated bearer ~p got no PDR from the session "
+		 "modification -- no PCC rule is bound to it, so it will carry no "
+		 "user plane; falling back to a CP-assigned F-TEID", [Key]),
+	    Bearer#bearer{local = #fq_teid{ip = IP, teid = TEID}};
+	Bearer ->
+	    Bearer
+    end.
 
 %% Extract the per-bearer Cause from a Bearer Context group. The Cause is
 %% mandatory in a Create Bearer Response (TS 29.274 Table 7.2.4-2); default to

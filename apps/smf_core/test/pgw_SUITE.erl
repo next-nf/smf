@@ -8451,10 +8451,15 @@ gx_dedicated_bearer_create_power_saving_retry(Config) ->
     %% Allow response to be processed
     ct:sleep(200),
 
-    %% The bearer must NOT have been installed (procedure is held, not failed)
+    %% The bearer must NOT have been installed under its EPS Bearer Id (the
+    %% procedure is held, not failed). Its binding index IS present and points at
+    %% the provisional token: since #89 the bearer is provisioned in the UPF
+    %% before the Create Bearer Request goes out, so that the UP can allocate the
+    %% F-TEID the request has to carry. "Held" therefore means provisioned but not
+    %% yet named by the MME, not absent.
     #{bearers := BearerMap0} = smf_context:test_cmd(gtp, CtxKey, info),
-    ?equal(false, maps:is_key({qci_arp, 1, {2, 1, 0}}, BearerMap0)),
     ?equal(false, maps:is_key({'Access', DedEBI}, BearerMap0)),
+    ?match({pending, _}, maps:get({qci_arp, 1, {2, 1, 0}}, BearerMap0)),
 
     %% NO Gx CCR-Update reporting the rule as INACTIVE / RESOURCE_ALLOCATION_FAILURE
     %% must have been sent (contrast with gx_dedicated_bearer_create_failure).

@@ -18,8 +18,8 @@
 	 handle_event/4, terminate/3]).
 
 -export([delete_context/4, close_context_proc/5]).
--export([handle_dedicated_bearer_changes/3]).
--ignore_xref([handle_dedicated_bearer_changes/3]).
+-export([stage_dedicated_bearers/3, handle_dedicated_bearer_changes/4]).
+-ignore_xref([stage_dedicated_bearers/3, handle_dedicated_bearer_changes/4]).
 
 %% PFCP context API's
 %%-export([defered_usage_report/3]).
@@ -535,7 +535,10 @@ teardown_err(Reason, State, Data) ->
     ?LOG(error, "teardown procedure failed with ~p", [Reason]),
     {next_state, State#{session := shutdown}, Data}.
 
-handle_dedicated_bearer_changes(_OldPCC, _NewPCC, Data) ->
+stage_dedicated_bearers(_OldPCC, _NewPCC, #{bearers := BearerMap}) ->
+    {BearerMap, []}.
+
+handle_dedicated_bearer_changes(_OldPCC, _NewPCC, _Staged, Data) ->
     Data.
 
 get_context_from_req(?'Access Point Name', #v2_access_point_name{apn = APN}, Context) ->
