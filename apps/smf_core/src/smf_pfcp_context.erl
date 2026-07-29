@@ -304,46 +304,25 @@ modify_session_result(_Other, _PCtx) ->
 %% exactly what create_session_result/4 does at establishment, and what the
 %% modification path was missing. Without it a bearer added mid-session keeps its
 %% {upf, Key} placeholder and can never be advertised over GTP-C.
+%%
+%% Folding every Created PDR unconditionally is correct, and needs no guard
+%% against clobbering a live bearer:
+%%
+%%  - smf_pfcp:update_pfcp_rules/3 diffs against the previous rule set, so a PDR
+%%    that merely persisted goes out as update_pdr. Only a genuinely new PDR is a
+%%    create_pdr, so only a new PDR can come back in Created PDR.
+%%  - A bearer's several PDRs share ONE allocation: smf_pfcp:get_chid/3 keys the
+%%    CHOOSE ID by bearer (get_id(teid, Key, ...)), so the UP allocates once and
+%%    every Created PDR for that bearer reports the same F-TEID. Folding them all
+%%    writes the same value repeatedly -- idempotent, not conflicting.
 modify_session_result(#pfcp{type = session_modification_response,
 			    ie = #{pfcp_cause := 'Request accepted'} = RespIEs} = Reply,
 		      BearerMap0, PCtx0) ->
     {ok, {PCtx1, UsageReport, SessionInfo}} = modify_session_result(Reply, PCtx0),
-    {BearerMap, PCtx} = resolve_choose_bearers(RespIEs, BearerMap0, PCtx1),
+    {BearerMap, PCtx} = update_bearer(RespIEs, BearerMap0, PCtx1),
     {ok, {PCtx, BearerMap, UsageReport, SessionInfo}};
 modify_session_result(Other, _BearerMap0, PCtx0) ->
     modify_session_result(Other, PCtx0).
-
-%% Resolve ONLY the bearers still holding a CHOOSE placeholder.
-%%
-%% Unlike an establishment response, a modification response routinely carries
-%% Created PDR IEs for bearers that are already up: modification_request_ies/5
-%% re-sends the whole recomputed rule set, so rules that merely persisted come
-%% back as created PDRs too. Folding those in would overwrite a live bearer's
-%% F-TEID mid-session -- the UP allocates a fresh one per Create PDR -- and break
-%% the tunnel the UE is already using. A bearer is awaiting allocation iff its
-%% local F-TEID is still the {upf, _} placeholder assign_local_data_teid_5/5 put
-%% there; every other bearer is left exactly as it is.
-resolve_choose_bearers(RespIEs, BearerMap, PCtx) ->
-    case RespIEs of
-	#{created_pdr := PDR} when is_map(PDR) ->
-	    resolve_choose_bearer_f(PDR, {BearerMap, PCtx});
-	#{created_pdr := PDRs} when is_list(PDRs) ->
-	    lists:foldl(fun resolve_choose_bearer_f/2, {BearerMap, PCtx}, PDRs);
-	_ ->
-	    {BearerMap, PCtx}
-    end.
-
-resolve_choose_bearer_f(#{pdr_id := #pdr_id{id = PdrId}, f_teid := _} = PDR,
-			{BearerMap, PCtx} = Acc) ->
-    Key = smf_pfcp:get_bearer_key_by_pdr(PdrId, PCtx),
-    case BearerMap of
-	#{Key := #bearer{local = #fq_teid{teid = {upf, _}}}} ->
-	    update_bearer_f(PDR, Acc);
-	_ ->
-	    Acc
-    end;
-resolve_choose_bearer_f(_, Acc) ->
-    Acc.
 
 %% await_modify/1 — the async_m step that pairs modify_session_async/5 with
 %% modify_session_result/3: await the reply and decode it, or short-circuit with
