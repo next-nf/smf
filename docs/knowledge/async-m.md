@@ -46,6 +46,8 @@ Primitives:
 - `await/1` — the suspension point. `await(ReqId)` yields `{await, ReqId, []}`; the procedure resumes
   when a reply tagged `ReqId` arrives.
 - `run/3` — run a value once (mostly for tests).
+- `return/3`, `fail/3` — **not** monadic values but result constructors, for the last expression of a
+  hand-written `fun(State, Data)` step (see "The escape hatch" below).
 
 `resume(Conts, Reply)` reconstitutes a suspended computation: it reverses `Conts` (so the **innermost**
 continuation — the step right after the `await` — receives the raw reply first) and folds outward. A
@@ -129,6 +131,61 @@ Rules of the terminal funs:
 - On the empty/no-op path (a procedure that never `await`s) `{next_state, State, Data}` with an
   unchanged `State` is just a no-op transition — fine.
 
+### Conditional awaits: never match the issue helper's shape inline
+
+Most issue helpers here answer one of **two** shapes: "I sent it, here is the request id" or "there was
+nothing to send, here is the answer already". `smf_pfcp_context:modify_session_async/5` yields
+`{request, ReqId, PCtx}` or `{no_request, PCtx}` (an empty rule diff puts nothing on the wire);
+`smf_aaa_pcf:invoke/5` under `pipeline_async` yields `{async, ReqId}` or the folded result outright
+(nothing in the pipeline needed to wait).
+
+**Both shapes are normal.** Decide between them in a named step with one clause per shape — the
+awaiting clause suspends, the other `return`s the answer it already has:
+
+```erlang
+await_modify({request, ReqId, PCtx}) ->
+    do([async_m || Reply <- async_m:await(ReqId),
+                   async_m:lift(modify_session_result(Reply, PCtx))]);
+await_modify({no_request, PCtx}) ->
+    async_m:return({PCtx, undefined, #{}}).
+```
+
+Do **not** write `{async, ReqId} = issue(...)` inside a do-block. The no-request shape then badmatches,
+and a badmatch is an exception, not an `{error, _}` — it escapes the error channel and kills the
+context `gen_statem`. This was a live defect on the Gx path (#106).
+
+Such a step belongs **next to the `_async`/`_result` pair it brackets**, not in the calling module —
+`await_modify/1` was copied verbatim into three handlers before it was moved to `smf_pfcp_context`.
+Give the tolerant variant, if there is one, the `_opt` suffix (`await_modify_opt/1`): it yields a
+sentinel instead of short-circuiting, for callers whose control-plane change is already committed and
+for whom the failure is not fatal.
+
+### The escape hatch: hand-written steps
+
+A computation is *any* `fun(State, Data)` of the right shape, so a step needing state surgery the
+accessors express poorly can be written directly and terminated with the arity-3 constructors:
+
+```erlang
+fun(State, #{pfcp := PCtx0} = Data) ->
+        case establish(PCtx0) of
+            {ok, PCtx}       -> async_m:return(PCtx, State, Data#{pfcp => PCtx});
+            {error, R, PCtx} -> async_m:fail(R, State, Data#{pfcp => PCtx})
+        end
+end
+```
+
+`fail/3` is the one that earns its keep: it fails while **keeping the state the step already changed**,
+so `ErrFun` sees it and can compensate what was committed. `fail/1` plus a separate `modify_data`
+cannot express "committed this, then failed" — the failure short-circuits before the commit runs.
+
+### Sub-procedures compose
+
+A `do([async_m || …])` block is itself a monadic value, so a shared sequence extracts into its own
+procedure and is called from a step position; an `await` at any nesting depth propagates out through
+every enclosing block. Prefer that to repeating a request/await/apply sequence across sibling
+procedures — `pgw_s5s8:ue_gx_ccr_update_proc/2` is the worked example, shared by the four UE
+bearer-resource procedures, each of which keeps only what genuinely differs.
+
 ## Serializing procedures (the gate)
 
 Every procedure that touches shared session state (the PFCP `PCtx`, the Gx session, the bearer table)
@@ -180,7 +237,10 @@ clean up. This is per-procedure, never a blanket rewrite.
 - Never block the FSM once a session is live. If you're writing `gen_statem:call` or a selective
   `receive` for an external reply in a context procedure, use `async_m` instead.
 - A procedure is a single `do([async_m || …])`, split at `await`s; issue requests one at a time.
+  Extract a sequence shared by sibling procedures into its own procedure rather than repeating it.
 - Terminal funs return `{next_state, State, Data}` to thread the drained registry back.
+- Never match an issue helper's result shape inline — a badmatch escapes the error channel. One named
+  step, one clause per shape, living beside the `_async`/`_result` pair it brackets.
 - Keep `async_pending` in `State`, access it with `:=`, never drop it.
 - Every outstanding request must have a reply path (success, decode error, transport timeout, worker
   crash) — an unanswered `await` parks forever.
@@ -189,7 +249,11 @@ clean up. This is per-procedure, never a blanket rewrite.
 
 - `apps/smf_core/src/async_m.erl` — the monad, driver, and `async_apply`.
 - `apps/smf_core/test/async_m_SUITE.erl` — worked examples of every primitive (bind, resume ordering,
-  multi-suspend, worker success/crash).
+  multi-suspend, worker success/crash, hand-written steps via `return/3`/`fail/3`).
 - `apps/smf_core/src/gtp_context.erl` — the `{'$async_reply'}`/`{'$async_down'}` info clauses,
   `async_dispatch/4`, and (in the PFCP work) the gate clauses and the `update_credits` procedure.
+- `apps/smf_core/src/smf_pfcp_context.erl` — the PFCP await steps (`await_modify/1`,
+  `await_modify_opt/1`, `await_delete/1`), each beside the `_async`/`_result` pair it brackets.
+- `apps/smf_core/src/pgw_s5s8.erl` — the Gx await steps (`gx_ccr_update/4` and its `_opt` sibling) and
+  `ue_gx_ccr_update_proc/2`, the sub-procedure shared by the four UE bearer-resource procedures.
 - `apps/smf_core/src/smf_context.erl` — `init_state/0` seeds `async_pending`.
