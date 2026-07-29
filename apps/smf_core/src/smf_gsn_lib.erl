@@ -37,7 +37,8 @@
 -ignore_xref([select_vrf/3]).		% used in tests
 -export([init_tunnel/4,
 	 assign_tunnel_teid/3,
-	 assign_local_data_teid/5
+	 assign_local_data_teid/5,
+	 assign_local_data_teid_like/4
 	]).
 -export([get_access_default_bearer/1, put_access_default_bearer/2, access_default_bearer_key/1]).
 -export([get_sgi_default_bearer/1, put_sgi_default_bearer/2]).
@@ -997,12 +998,19 @@ access_default_bearer_key(#{{'Access', default_ebi} := EBI}) ->
 %% Resolve which Access bearer a PCC rule is bound to.
 %% Looks up by QCI/ARP first, then falls back to Bearer-Identifier,
 %% then to the default Access bearer.
+%%
+%% The index value is the bearer's IDENTITY, not necessarily its EPS Bearer Id: a
+%% network-initiated dedicated bearer is bound (and provisioned in the UPF) before
+%% the MME assigns its EBI, so until the Create Bearer Response names it the index
+%% holds a provisional {pending, _} token instead (TS 29.274 7.2.3/7.2.4). Match on
+%% "does it key a bearer" rather than on the value's shape -- is_map_key/2 already
+%% rejects `undefined`, so an integer test adds nothing but a false constraint.
 resolve_access_bearer(Definition, BearerMap) ->
     case get_rule_qci_arp(Definition) of
 	{QCI, ARP} ->
 	    case maps:get({qci_arp, QCI, ARP}, BearerMap, undefined) of
-		EBI when is_integer(EBI), is_map_key({'Access', EBI}, BearerMap) ->
-		    maps:get({'Access', EBI}, BearerMap);
+		Id when is_map_key({'Access', Id}, BearerMap) ->
+		    maps:get({'Access', Id}, BearerMap);
 		_ ->
 		    resolve_by_bearer_id(Definition, BearerMap)
 	    end;
@@ -1012,8 +1020,8 @@ resolve_access_bearer(Definition, BearerMap) ->
 
 resolve_by_bearer_id(#{'Bearer-Identifier' := [BId]}, BearerMap) ->
     case maps:get({bearer_id, BId}, BearerMap, undefined) of
-	EBI when is_integer(EBI), is_map_key({'Access', EBI}, BearerMap) ->
-	    maps:get({'Access', EBI}, BearerMap);
+	Id when is_map_key({'Access', Id}, BearerMap) ->
+	    maps:get({'Access', Id}, BearerMap);
 	_ ->
 	    get_access_default_bearer(BearerMap)
     end;
@@ -1045,6 +1053,46 @@ assign_local_data_teid_5(_Key, #pfcp_ctx{} = PCtx,
 	   IP <- choose_ip(TunnelIP, IP4, IP6),
 	   DataTEI <- smf_tei_mngr:alloc_tei(PCtx),
 	   FqTEID = #fq_teid{ip = smf_inet:to_ip(IP), teid = DataTEI},
+	   return(Bearer#bearer{vrf = VRF, local = FqTEID})
+       ]).
+
+%% assign_local_data_teid_like/4 — assign Key's local data F-TEID for a bearer
+%% added AFTER session establishment, using an existing bearer of the same session
+%% as the template for VRF and GTP-U address family.
+%%
+%% It makes the same FTUP branch assign_local_data_teid_5/5 makes, and it MUST:
+%% TS 29.244 5.5.1 has the UP reject a PDR "provisioned with an F-TEID allocation
+%% option incompatible with that used for already-created PDRs" with cause 71
+%% "Invalid F-TEID allocation option". On an FTUP UPF the session's existing PDRs
+%% were created with CHOOSE, so CP-assigning here is a protocol error, not a
+%% degraded mode. The allocator is uniform per UPF: non-FTUP UPF -> the CP assigns
+%% every TEID; FTUP UPF -> the UPF assigns every TEID (#89).
+%%
+%% Establishment uses assign_local_data_teid/5 instead, because there NodeCaps and
+%% the access tunnel are still at hand; here neither is, but the template bearer
+%% has already resolved both.
+assign_local_data_teid_like(Key, PCtx, TemplateBearer, BearerMap) ->
+    do([error_m ||
+	   B0 = maps:get(Key, BearerMap),
+	   B1 <- assign_local_data_teid_like_4(Key, PCtx, TemplateBearer, B0),
+	   return(maps:put(Key, B1, BearerMap))
+       ]).
+
+%% FTUP: leave the CHOOSE placeholder; the UP allocates and reports the F-TEID in
+%% the Created PDR of the response (TS 23.214 5.4.3), which
+%% smf_pfcp_context:modify_session_result/3 folds back into the bearer map.
+assign_local_data_teid_like_4(Key, #pfcp_ctx{features = #{'FTUP' := _}},
+			      #bearer{vrf = VRF, local = #fq_teid{ip = IP}}, Bearer) ->
+    FqTEID = #fq_teid{ip = ip_ver(IP), teid = {upf, Key}},
+    {ok, Bearer#bearer{vrf = VRF, local = FqTEID}};
+
+%% Non-FTUP (deprecated but still supported): the CP assigns. Reuse the template
+%% bearer's GTP-U address -- it is the address this session's UPF already serves.
+assign_local_data_teid_like_4(_Key, #pfcp_ctx{} = PCtx,
+			      #bearer{vrf = VRF, local = #fq_teid{ip = IP}}, Bearer) ->
+    do([error_m ||
+	   DataTEI <- smf_tei_mngr:alloc_tei(PCtx),
+	   FqTEID = #fq_teid{ip = IP, teid = DataTEI},
 	   return(Bearer#bearer{vrf = VRF, local = FqTEID})
        ]).
 
