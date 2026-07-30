@@ -252,37 +252,18 @@ handle_request(ReqKey,
     %% PDN connection is provisioned in one exchange.
     StageExtra = stage_additional_bearers(IEs, Context1),
 
-    {Verdict, Cause, SessionOpts, Context, BearerMap, ExtraBearers, PCC4, PCtx,
-     S1, PCF1, C1, A1} =
-       case smf_gtp_gsn_lib:create_session(APN, pdn_alloc(PAA), DAF, UpSelInfo,
-					    S0, PCF0, C0, A0,
-					    SessionOpts1, Context1, AccessTunnel, AccessBearer1,
-					    PCC0, StageExtra) of
-	   {ok, Result} -> Result;
-	   {error, Err} -> throw(Err)
-       end,
-
-    #{dedicated := Dedicated, rejected := Rejected} = ExtraBearers,
-    FinalData1 =
-	Data#{context => Context, pfcp => PCtx, pcc => PCC4,
-	      tunnels => Tunnels#{'Access' => AccessTunnel}, bearers => BearerMap,
-	      dedicated => maps:merge(maps:get(dedicated, Data, #{}), Dedicated),
-	      aaa_session => S1, pcf => PCF1, charging => C1, aaa_auth => A1},
-
-    ResponseIEs = create_session_response(Cause, SessionOpts, IEs,
-					  AccessTunnel,
-					  BearerMap, Rejected,
-					  Context),
-    Response = response(create_session_response, AccessTunnel, ResponseIEs, Request),
-    gtp_context:send_response(ReqKey, Request, Response),
-
-    case Verdict of
-	ok ->
-	    Actions = context_idle_action([], Context),
-	    {next_state, State#{session := connected}, FinalData1, Actions};
-	_ ->
-	    {next_state, State#{session := shutdown}, FinalData1}
-    end;
+    %% The establishment awaits Gx, Gy and the PFCP session establishment without
+    %% blocking the context (#87), so the Create Session Response is built in the
+    %% continuation rather than here.
+    Proc = smf_gtp_gsn_lib:create_session(APN, pdn_alloc(PAA), DAF, UpSelInfo,
+					  S0, PCF0, C0, A0,
+					  SessionOpts1, Context1, AccessTunnel, AccessBearer1,
+					  PCC0, StageExtra),
+    Req = #{req_key => ReqKey, request => Request, ies => IEs,
+	    tunnels => Tunnels, access_tunnel => AccessTunnel},
+    OkFun = fun(V, S, D) -> create_session_ok(V, S, D, Req) end,
+    ErrFun = fun(E, S, D) -> create_session_err(E, S, D, Req) end,
+    async_m:run_async(Proc, OkFun, ErrFun, State, Data);
 
 %% One handler for every Modify Bearer Request shape. TS 29.274 7.2.7 makes
 %% "Bearer Contexts to be modified" Conditional and repeatable -- "Several IEs
@@ -643,6 +624,48 @@ update_bearer_from_req(_AccessTunnel, _Context, BearerContext, Acc) ->
 %% The Modify Bearer Response is built from the PFCP result, so it goes out from
 %% here rather than from the handler. {next_state, ...} (not keep_state) because
 %% the drained async_pending re-delivers what the coarse gate postponed.
+%% Commit the establishment and answer. Everything from the old inline tail of
+%% the Create Session Request handler, moved here because the procedure may have
+%% suspended on Gx, Gy or the PFCP establishment before reaching it (#87).
+create_session_ok({Verdict, Cause, SessionOpts, Context, BearerMap, ExtraBearers,
+		   PCC4, PCtx, S1, PCF1, C1, A1}, State, Data,
+		  #{req_key := ReqKey, request := Request, ies := IEs,
+		    tunnels := Tunnels, access_tunnel := AccessTunnel}) ->
+    #{dedicated := Dedicated, rejected := Rejected} = ExtraBearers,
+    FinalData1 =
+	Data#{context => Context, pfcp => PCtx, pcc => PCC4,
+	      tunnels => Tunnels#{'Access' => AccessTunnel}, bearers => BearerMap,
+	      dedicated => maps:merge(maps:get(dedicated, Data, #{}), Dedicated),
+	      aaa_session => S1, pcf => PCF1, charging => C1, aaa_auth => A1},
+
+    ResponseIEs = create_session_response(Cause, SessionOpts, IEs,
+					  AccessTunnel,
+					  BearerMap, Rejected,
+					  Context),
+    Response = response(create_session_response, AccessTunnel, ResponseIEs, Request),
+    gtp_context:send_response(ReqKey, Request, Response),
+
+    case Verdict of
+	ok ->
+	    Actions = context_idle_action([], Context),
+	    {next_state, State#{session := connected}, FinalData1, Actions};
+	_ ->
+	    {next_state, State#{session := shutdown}, FinalData1}
+    end.
+
+%% A failed establishment answers the peer itself: once the procedure has
+%% suspended, the request handler's #ctx_err{} catch no longer spans it, so
+%% nothing else would. It also compensates the external sessions the procedure
+%% had already opened -- the reason its steps fail through the error channel
+%% instead of throwing (#87).
+create_session_err(#ctx_err{} = Err, State, Data,
+		   #{req_key := ReqKey, request := Request,
+		     access_tunnel := AccessTunnel}) ->
+    Data1 = smf_gtp_gsn_lib:establishment_failed(Err, Data),
+    gtp_context:send_ctx_error_response(
+      Err#ctx_err{tunnel = AccessTunnel}, ReqKey, Request),
+    {next_state, State#{session := shutdown}, Data1}.
+
 modify_bearer_ok({PCtx, _BearerMap, SessionInfo}, State, Data,
 		 #{req_key := ReqKey, request := Request, ies := IEs, modified := Modified,
 		   context := Context, tunnels := Tunnels, access_tunnel := AccessTunnel,
