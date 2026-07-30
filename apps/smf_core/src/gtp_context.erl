@@ -17,6 +17,7 @@
 	 start_link/6,
 	 send_request/8,
 	 send_response/3,
+	 send_ctx_error_response/3,
 	 request_finished/1,
 	 peer_down/3,
 	 terminate_colliding_context/2, terminate_context/1,
@@ -791,8 +792,18 @@ handle_ctx_error(#ctx_err{level = Level, context = Context} = CtxErr, St, State,
 	    {next_state, State, Data}
     end.
 
-handle_ctx_error(#ctx_err{reply = Reply, tunnel = Tunnel} = CtxErr, St, Handler,
-		 Request, #gtp{type = MsgType, seq_no = SeqNo} = Msg, State, Data) ->
+%% send_ctx_error_response/3 — build and send the error response for a #ctx_err{},
+%% exactly as the request-path catch does.
+%%
+%% A procedure that has suspended is no longer covered by that catch, so its
+%% ErrFun has to answer the peer itself; without this it would have to hand-roll
+%% the reply and get the Reply-shape and TEID handling subtly wrong (#87).
+send_ctx_error_response(#ctx_err{} = CtxErr, Request, Msg) ->
+    Handler = gtp_path:get_handler(Request#request.socket, Request#request.version),
+    ctx_error_response(CtxErr, Handler, Request, Msg).
+
+ctx_error_response(#ctx_err{reply = Reply, tunnel = Tunnel},
+		   Handler, Request, #gtp{type = MsgType, seq_no = SeqNo} = Msg) ->
     Response0 = if is_list(Reply) orelse is_atom(Reply) ->
 			Handler:build_response({MsgType, Reply});
 		   true ->
@@ -809,7 +820,11 @@ handle_ctx_error(#ctx_err{reply = Reply, tunnel = Tunnel} = CtxErr, St, Handler,
 			       Response0#gtp{tei = 0}
 		       end
 	       end,
-    send_response(Request, Response#gtp{seq_no = SeqNo}),
+    send_response(Request, Response#gtp{seq_no = SeqNo}).
+
+handle_ctx_error(#ctx_err{} = CtxErr, St, Handler,
+		 Request, #gtp{} = Msg, State, Data) ->
+    ctx_error_response(CtxErr, Handler, Request, Msg),
     handle_ctx_error(CtxErr, St, State, Data).
 
 handle_request(#request{socket = Socket} = Request,
