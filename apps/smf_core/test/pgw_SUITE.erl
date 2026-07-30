@@ -3742,6 +3742,14 @@ sx_establishment_reject(Config) ->
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4contexts(?TIMEOUT),
 
+    %% The establishment had already opened the Gx, Gy and Rf sessions by the time
+    %% the UPF refused -- the rejection lands on the PFCP Session Establishment,
+    %% which is the last of the four. Those sessions must be torn down rather than
+    %% left orphaned at the PCRF, the OCS and the CDF (#87). Before the fix the
+    %% throw unwound past the contexts holding them and nothing ever did.
+    ?equal(true, compensated(smf_aaa_pcf)),
+    ?equal(true, compensated(smf_aaa_charging)),
+
     %% The arming is one-shot, so the next session establishes normally. Proving
     %% that keeps the rejection from leaking into the rest of the group and
     %% exercises reject/3's consume-on-use semantics.
@@ -4397,8 +4405,11 @@ simple_ocs(Config) ->
 	  end, meck:history(smf_aaa_charging)),
     ?match(X when X == 3, length(CCR)),
 
-    {_, {_, gy_ccr_initial, _},
-     {ok, _, Session, _}} = hd(CCR),
+    %% Take the session the CCR-Initial was CALLED with, not the one it returned:
+    %% the establishment now issues it asynchronously (#87), so the return value is
+    %% {async, ReqId} and the folded result arrives at the context instead. The
+    %% argument is what was sent to the OCS, which is what this asserts on.
+    {_, {_, gy_ccr_initial, [_, Session, _, _]}, _} = hd(CCR),
 
     Expected0 =
 	case ?config(client_ip, Config) of
@@ -10725,6 +10736,14 @@ has_session_modification_request(Role) ->
     lists:any(fun(#pfcp{type = session_modification_request}) -> true;
                  (_) -> false
               end, smf_test_sx_up:history(Role)).
+
+%% Did a failed establishment tear this context's external session down? The
+%% compensation calls terminate/3 on each context module, which is the only place
+%% those are called from.
+compensated(Mod) ->
+    lists:any(fun({_, {M, terminate, _}, _}) when M =:= Mod -> true;
+		 (_) -> false
+	      end, meck:history(Mod)).
 
 async_pending_size(CtxKey) ->
     {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),

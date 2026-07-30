@@ -1594,8 +1594,11 @@ simple_ocs(Config) ->
 	  end, meck:history(smf_aaa_charging)),
     ?match(X when X == 3, length(CCR)),
 
-    {_, {_, gy_ccr_initial, _},
-     {ok, _, Session, _}} = hd(CCR),
+    %% Take the session the CCR-Initial was CALLED with, not the one it returned:
+    %% the establishment now issues it asynchronously (#87), so the return value is
+    %% {async, ReqId} and the folded result arrives at the context instead. The
+    %% argument is what was sent to the OCS, which is what this asserts on.
+    {_, {_, gy_ccr_initial, [_, Session, _, _]}, _} = hd(CCR),
 
     Expected0 =
 	case ?config(client_ip, Config) of
