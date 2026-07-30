@@ -13,7 +13,7 @@
 -export([connect_upf_candidates/4, create_session/13, create_session/14]).
 -export([triggered_charging_event/4, usage_report/3,
 	 close_context/4, close_context_proc/3,
-	 compensate_establishment/1, establishment_failed/2]).
+	 compensate_external_sessions/1, establishment_failed/2]).
 -export([update_tunnel_endpoint/2,
 	 apply_bearer_change_proc/5, access_bearer_change_proc/6]).
 
@@ -252,14 +252,16 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
 started(What, Data) ->
     Data#{establishment => [What | maps:get(establishment, Data, [])]}.
 
-%% compensate_establishment/1 — tear down the external sessions a failed
-%% establishment had already opened.
+%% compensate_external_sessions/1 — tear down the external sessions this context
+%% has open, for a stop that is NOT a graceful teardown.
 %%
-%% A create that fails partway leaves the PCRF, the OCS and the CDF each
-%% believing a session exists. Nothing used to undo that: close_context/7 -- which
-%% sends the Gx CCR-T, the Gy CCR-T and the Rf stop -- is reachable only from the
-%% teardown paths, and a failed create ends at the interface's terminate/3, which
-%% deletes the PFCP session and releases the IPs and nothing else (#87).
+%% Two ways in. A create that fails partway (#87), and any FATAL #ctx_err{} on a
+%% live session (#116) -- a refused PFCP modification mid-procedure, say. Both
+%% leave the PCRF, the OCS and the CDF believing a session exists, and neither
+%% reaches close_context/7, which is what sends the Gx CCR-T, the Gy CCR-T and the
+%% Rf stop and is reachable only from the graceful teardown paths. What the stop
+%% does reach is the interface's terminate/3, which deletes the PFCP session and
+%% releases the IPs and nothing else.
 %%
 %% Each context module carries a terminate/3 that runs the `terminate` procedure
 %% across every service the context ever used (smf_aaa_session:get_services/2
@@ -278,13 +280,13 @@ started(What, Data) ->
 %% establishment.
 establishment_failed(#ctx_err{context = Context}, Data)
   when is_record(Context, context) ->
-    ok = compensate_establishment(Data),
+    ok = compensate_external_sessions(Data),
     Data#{context => Context};
 establishment_failed(#ctx_err{}, Data) ->
-    ok = compensate_establishment(Data),
+    ok = compensate_external_sessions(Data),
     Data.
 
-compensate_establishment(#{aaa_session := Session} = Data) ->
+compensate_external_sessions(#{aaa_session := Session} = Data) ->
     Started = maps:get(establishment, Data, []),
     Opts = #{now => erlang:monotonic_time(), async => true},
     _ = [compensate(What, Data, Session, Opts) || What <- Started, What /= pfcp],

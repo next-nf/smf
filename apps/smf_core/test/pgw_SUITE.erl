@@ -10381,6 +10381,13 @@ gy_credit_denied_reject_keeps_gx_report(Config) ->
     %% the report it had already sent.
     ?equal(GxOut, SessionAtTerm),
 
+    %% A FATAL stops the context without going through close_context/7, so nothing
+    %% would otherwise tell the PCRF and the OCS that the session is gone -- the
+    %% same orphaning #87 fixed for a failed establishment, which was still live
+    %% for every other FATAL path (#116).
+    ?equal(true, compensated(smf_aaa_pcf)),
+    ?equal(true, compensated(smf_aaa_charging)),
+
     meck_validate(Config),
     ok.
 
