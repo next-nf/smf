@@ -730,79 +730,47 @@ modify_bearer_err(#ctx_err{} = E, _State, _Data,
 handle_response(ReqInfo, #gtp{version = v1} = Msg, Request, State, Data) ->
     ?GTP_v1_Interface:handle_response(ReqInfo, Msg, Request, State, Data);
 
-handle_response({create_bearer, PgwFTEID},
+%% One Create Bearer Response carries a context per bearer the request asked for
+%% (TS 29.274 7.2.4: "All the bearer contexts included in the corresponding Create
+%% Bearer Request shall be included"), so this folds over them (#91).
+%%
+%% Correlation is per context by the echoed S5/8-U PGW F-TEID -- "This IE shall be
+%% sent on the S5/S8 interfaces. It shall be used to correlate the bearers with
+%% those in the Create Bearer Request" -- not by position and not by EBI, which the
+%% request could not carry. That F-TEID is exactly what pending_bearers is keyed on.
+handle_response({create_bearer, PgwFTEIDs},
 		#gtp{type = create_bearer_response,
-		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause},
-			    ?'Bearer Contexts' :=
-				#v2_bearer_context{group = BearerCtxGroup}}},
-		_Request, #{session := connected} = State,
-		#{bearers := BearerMap0, pcc := PCC, pfcp := PCtx0,
-		  pending_bearers := Pending0} = Data0)
+		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause}} = IEs},
+		_Request, #{session := connected} = State, Data0)
   when ?CAUSE_OK(Cause) ->
-    %% The message-level Cause may be request_accepted_partially, so the
-    %% per-bearer Cause inside the Bearer Context is authoritative for this
-    %% bearer (TS 29.274 7.2.4, TS 29.212 4.5.12). Only install the bearer
-    %% when its own Cause is OK; otherwise treat it as a failed activation.
-    case ?CAUSE_OK(bearer_context_cause(BearerCtxGroup)) of
-	true ->
-	    case maps:take(PgwFTEID, Pending0) of
-		{{QCI, ARP, Key, ChId}, Pending} ->
-		    %% The MME has now named the bearer, so its provisional key
-		    %% becomes the real one. Rename it in the bearer map AND in the
-		    %% PCtx together (#89) -- smf_pfcp:rekey_bearer/3 explains why
-		    %% splitting them re-allocates the F-TEID we already advertised.
-		    #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} = BearerCtxGroup,
-		    AccessBearer = update_bearer_from_response(
-				     BearerCtxGroup, maps:get(Key, BearerMap0)),
-		    PgwBI = <<EBI:8>>,
-		    BearerMap = (maps:remove(Key, BearerMap0))
-			#{{'Access', EBI} => AccessBearer,
-			  {qci_arp, QCI, ARP} => EBI,
-			  {bearer_id, PgwBI} => EBI},
-		    PCtx = smf_pfcp:rekey_bearer(Key, {'Access', EBI}, PCtx0),
-		    Desc = smf_gsn_lib:normalize_bearer(EBI, QCI, ARP, PCC, ChId),
-		    Dedicated = maps:get(dedicated, Data0, #{}),
-		    Data1 = Data0#{bearers := BearerMap,
-				   pfcp := PCtx,
-				   pending_bearers := Pending,
-				   dedicated := Dedicated#{EBI => Desc},
-				   retry_bearers :=
-				       maps:remove(PgwFTEID,
-						   maps:get(retry_bearers, Data0, #{}))},
-		    Data = report_successful_resource_allocation(QCI, ARP, Data1),
-		    %% Re-provision: the response carries the SGW's downlink F-TEID,
-		    %% which the FAR could not have before the UE accepted. The
-		    %% uplink PDR already exists from the pre-request provisioning.
-		    async_m:run_async(reprovision_proc(BearerMap),
-				      fun(_V, S, D) -> {next_state, S, D} end,
-				      fun(_R, S, D) -> {next_state, S, D} end,
-				      State, Data);
-		error ->
-		    keep_state_and_data
-	    end;
-	false ->
-	    handle_create_bearer_failure(PgwFTEID, State, Data0)
-    end;
+    Data = lists:foldl(apply_create_bearer_context(PgwFTEIDs, _, _), Data0,
+		       bearer_contexts(IEs)),
+    %% One re-provisioning for the whole response: the contexts arrive together,
+    %% so the rule set is recomputed once rather than once per bearer.
+    async_m:run_async(reprovision_proc(maps:get(bearers, Data)),
+		      fun(_V, S, D) -> {next_state, S, D} end,
+		      fun(_R, S, D) -> {next_state, S, D} end,
+		      State, Data);
 
-handle_response({create_bearer, PgwFTEID},
+handle_response({create_bearer, PgwFTEIDs},
 		#gtp{type = create_bearer_response,
 		     ie = #{?'Cause' :=
 				#v2_cause{v2_cause =
 					      ue_is_temporarily_not_reachable_due_to_power_saving}}},
 		_Request, _State, Data0) ->
     %% Temporary condition (TS 29.274 8.4, TS 23.401 5.4.1 step 12): the UE is
-    %% not reachable due to power saving. Do NOT remove the PCC rule or report a
-    %% failure to the PCRF; hold the procedure and re-attempt the Create Bearer
-    %% Request once the UE is reachable again (next Modify Bearer Request).
-    handle_create_bearer_power_saving(PgwFTEID, Data0);
+    %% not reachable due to power saving. Do NOT remove the PCC rules or report a
+    %% failure to the PCRF; hold the whole batch and re-attempt it once the UE is
+    %% reachable again (next Modify Bearer Request).
+    handle_create_bearer_power_saving(PgwFTEIDs, Data0);
 
-handle_response({create_bearer, PgwFTEID},
+handle_response({create_bearer, PgwFTEIDs},
 		#gtp{type = create_bearer_response},
 		_Request, State, Data0) ->
-    %% Dedicated bearer could not be activated (message-level Cause not OK).
-    handle_create_bearer_failure(PgwFTEID, State, Data0);
+    %% Message-level Cause not OK: none of the bearers came up.
+    handle_create_bearer_failures(PgwFTEIDs, State, Data0);
 
-handle_response({create_bearer, _PgwFTEID}, timeout,
+handle_response({create_bearer, _PgwFTEIDs}, timeout,
 		#gtp{type = create_bearer_request}, _State, _Data) ->
     ?LOG(error, "Create Bearer Request timed out"),
     keep_state_and_data;
@@ -1255,23 +1223,32 @@ stage_additional_bearer(EBI, BearerGroup, {BearerMap0, Ded0, Keys}) ->
 	    {BearerMap1, Ded0, [Key | Keys]}
     end.
 
-create_dedicated_bearer(PTI, LinkedEBI, QoS, TFTBin, ChId, AccessBearer, Tunnel) ->
-    BearerCtx =
-	[#v2_eps_bearer_id{eps_bearer_id = 0},
-	 encode_bearer_level_qos(QoS),
-	 #v2_eps_bearer_level_traffic_flow_template{value = TFTBin},
-	 s5s8_pgw_gtp_u_tei(1, AccessBearer),
-	 #v2_charging_id{id = <<ChId:32>>}],
-    RequestIEs0 = [#v2_eps_bearer_id{eps_bearer_id = LinkedEBI},
-		   #v2_bearer_context{group = BearerCtx}],
+%% One bearer's context. The EPS Bearer Id is 0: the MME assigns the real one and
+%% returns it in the response (TS 29.274 7.2.3/7.2.4), which is why the response
+%% correlates by the echoed S5/8-U PGW F-TEID instead.
+dedicated_bearer_context(QoS, TFTBin, ChId, AccessBearer) ->
+    #v2_bearer_context{
+       group = [#v2_eps_bearer_id{eps_bearer_id = 0},
+		encode_bearer_level_qos(QoS),
+		#v2_eps_bearer_level_traffic_flow_template{value = TFTBin},
+		s5s8_pgw_gtp_u_tei(1, AccessBearer),
+		#v2_charging_id{id = <<ChId:32>>}]}.
+
+%% Emit ONE network-initiated Create Bearer Request carrying every new bearer
+%% (TS 29.274 7.2.3). The ReqInfo carries the PGW F-TEIDs the request advertised,
+%% so a timeout knows which pending entries it covers; the response correlates per
+%% bearer context by the F-TEID it echoes back, not by this list's order.
+send_dedicated_bearers_create(_PTI, [], _FTEIDs, _LinkedEBI, _Tunnel) ->
+    ok;
+send_dedicated_bearers_create(PTI, Contexts, FTEIDs, LinkedEBI, Tunnel) ->
+    RequestIEs0 = [#v2_eps_bearer_id{eps_bearer_id = LinkedEBI} | Contexts],
     RequestIEs1 = case PTI of
 		      undefined -> RequestIEs0;
 		      _ -> [#v2_procedure_transaction_id{pti = PTI} | RequestIEs0]
 		  end,
     RequestIEs = gtp_v2_c:build_recovery(create_bearer_request, Tunnel, false, RequestIEs1),
-    PgwFTEID = AccessBearer#bearer.local,
     send_request(Tunnel, ?T3, ?N3, create_bearer_request, RequestIEs,
-		 {create_bearer, PgwFTEID}).
+		 {create_bearer, FTEIDs}).
 
 %% Emit one network-initiated Delete Bearer Request (TS 29.274 §7.2.9.2) carrying a
 %% list of dedicated EBIs. Never carries the LBI — that tears down the whole PDN
@@ -1404,24 +1381,33 @@ stage_new_bearer(_Default, _AccessTunnel, _PCtx0, {QCI, ARP, _QoS, _FlowInfo},
 %% bearer map and put it on the wire. Correlation stays keyed by the PGW F-TEID,
 %% which is what TS 29.274 7.2.4 gives us to match the response with -- the EBI
 %% does not exist yet.
+%% One Gx decision is ONE Create Bearer Request, however many bearers it creates
+%% (#91). Accumulate the bearer contexts and the correlation state purely, then
+%% send once -- TS 29.274 7.2.3 makes Bearer Contexts repeatable: "Several IEs
+%% with this type and instance values shall be included as necessary to represent
+%% a list of Bearers."
 emit_create_bearers(PTI, Staged, BearerMap, PCtx, DefaultEBI, AccessTunnel, Data) ->
-    lists:foldl(
-      fun({Key, QCI, ARP, QoS, FlowInfo, ChId}, D) ->
-	      AccessBearer = resolved_bearer(Key, BearerMap, PCtx),
-	      TFTBin = smf_tft:flow_info_to_tft(FlowInfo),
-	      create_dedicated_bearer(PTI, DefaultEBI, QoS, TFTBin, ChId,
-				      AccessBearer, AccessTunnel),
-	      PgwFTEID = AccessBearer#bearer.local,
-	      Pending = maps:get(pending_bearers, D, #{}),
-	      %% Retain the request params so the Create Bearer Request can be
-	      %% re-issued verbatim if the UE is temporarily unreachable due to
-	      %% power saving (TS 23.401 5.4.1 step 12).
-	      Retry = maps:get(retry_bearers, D, #{}),
-	      D#{pending_bearers => Pending#{PgwFTEID => {QCI, ARP, Key, ChId}},
-		 retry_bearers =>
-		     Retry#{PgwFTEID =>
-				{PTI, DefaultEBI, QoS, TFTBin, AccessBearer, ChId}}}
-      end, Data#{bearers := BearerMap, pfcp := PCtx}, Staged).
+    {Contexts, FTEIDs, Data1} =
+	lists:foldl(
+	  fun({Key, QCI, ARP, QoS, FlowInfo, ChId}, {Ctxs, Ids, D}) ->
+		  AccessBearer = resolved_bearer(Key, BearerMap, PCtx),
+		  TFTBin = smf_tft:flow_info_to_tft(FlowInfo),
+		  PgwFTEID = AccessBearer#bearer.local,
+		  Pending = maps:get(pending_bearers, D, #{}),
+		  %% Retain the request params so this bearer's context can be
+		  %% re-issued verbatim if the UE is temporarily unreachable due
+		  %% to power saving (TS 23.401 5.4.1 step 12).
+		  Retry = maps:get(retry_bearers, D, #{}),
+		  {[dedicated_bearer_context(QoS, TFTBin, ChId, AccessBearer) | Ctxs],
+		   [PgwFTEID | Ids],
+		   D#{pending_bearers => Pending#{PgwFTEID => {QCI, ARP, Key, ChId}},
+		      retry_bearers =>
+			  Retry#{PgwFTEID =>
+				     {PTI, DefaultEBI, QoS, TFTBin, AccessBearer, ChId}}}}
+	  end, {[], [], Data#{bearers := BearerMap, pfcp := PCtx}}, Staged),
+    send_dedicated_bearers_create(PTI, lists:reverse(Contexts), lists:reverse(FTEIDs),
+				  DefaultEBI, AccessTunnel),
+    Data1.
 
 
 %% UE-requested single-bearer deactivation (bearer_resource_command
@@ -2246,41 +2232,129 @@ report_rules_inactive(RuleNames,
 %% per-bearer Cause. Per TS 29.212 4.5.6/4.5.12 the PCEF shall remove the
 %% affected PCC rule(s) and report them to the PCRF with PCC-Rule-Status
 %% INACTIVE and Rule-Failure-Code RESOURCE_ALLOCATION_FAILURE.
-handle_create_bearer_failure(PgwFTEID, State,
-			     #{bearers := BearerMap, pcc := PCC,
-			       pending_bearers := Pending0} = Data00) ->
-    %% Terminal failure: drop any retained retry params for this bearer.
+%% The response's Bearer Contexts, always as a list: put_ie stores a single one as
+%% the bare record and several as a list, and a one-bearer response is the common
+%% case rather than a special one.
+bearer_contexts(#{?'Bearer Contexts' := L}) when is_list(L) -> L;
+bearer_contexts(#{?'Bearer Contexts' := C}) -> [C];
+bearer_contexts(_) -> [].
+
+%% Install one accepted bearer, or fold its failure in. The per-bearer Cause is
+%% authoritative even when the message-level one said accepted, because
+%% request_accepted_partially means exactly that some contexts failed
+%% (TS 29.274 7.2.4, TS 29.212 4.5.12).
+apply_create_bearer_context(ReqFTEIDs, #v2_bearer_context{group = Group}, Data) ->
+    case correlate_bearer(Group, ReqFTEIDs) of
+	undefined ->
+	    ?LOG(warning, "Create Bearer Response bearer context carries no S5/8-U "
+		 "PGW F-TEID and the request created more than one bearer, so it "
+		 "cannot be correlated; ignoring it (~p)", [Group]),
+	    Data;
+	PgwFTEID ->
+	    apply_create_bearer_context(?CAUSE_OK(bearer_context_cause(Group)),
+					PgwFTEID, Group, Data)
+    end.
+
+%% TS 29.274 7.2.4 has the S5/8-U PGW F-TEID echoed back precisely so the response
+%% can be correlated with the request, and on S5/S8 it "shall be sent". A peer that
+%% omits it leaves a one-bearer request unambiguous all the same -- there is only
+%% one thing the context can be about -- so fall back to that rather than dropping
+%% a response we can still place. With several bearers there is nothing to fall
+%% back to and guessing would install the wrong one.
+correlate_bearer(Group, ReqFTEIDs) ->
+    case echoed_pgw_fteid(Group) of
+	undefined ->
+	    case ReqFTEIDs of
+		[Single] -> Single;
+		_        -> undefined
+	    end;
+	PgwFTEID ->
+	    PgwFTEID
+    end.
+
+apply_create_bearer_context(false, PgwFTEID, _Group, Data) ->
+    drop_pending_bearer(PgwFTEID, Data);
+apply_create_bearer_context(true, PgwFTEID, Group,
+			    #{bearers := BearerMap0, pcc := PCC, pfcp := PCtx0,
+			      pending_bearers := Pending0} = Data0) ->
+    case maps:take(PgwFTEID, Pending0) of
+	{{QCI, ARP, Key, ChId}, Pending} ->
+	    %% The MME has now named the bearer, so its provisional key becomes the
+	    %% real one. Rename it in the bearer map AND in the PCtx together (#89)
+	    %% -- smf_pfcp:rekey_bearer/3 explains why splitting them re-allocates
+	    %% the F-TEID we already advertised.
+	    #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} = Group,
+	    AccessBearer = update_bearer_from_response(Group, maps:get(Key, BearerMap0)),
+	    PgwBI = <<EBI:8>>,
+	    BearerMap = (maps:remove(Key, BearerMap0))
+		#{{'Access', EBI} => AccessBearer,
+		  {qci_arp, QCI, ARP} => EBI,
+		  {bearer_id, PgwBI} => EBI},
+	    PCtx = smf_pfcp:rekey_bearer(Key, {'Access', EBI}, PCtx0),
+	    Desc = smf_gsn_lib:normalize_bearer(EBI, QCI, ARP, PCC, ChId),
+	    Dedicated = maps:get(dedicated, Data0, #{}),
+	    Data1 = Data0#{bearers := BearerMap,
+			   pfcp := PCtx,
+			   pending_bearers := Pending,
+			   dedicated := Dedicated#{EBI => Desc},
+			   retry_bearers :=
+			       maps:remove(PgwFTEID,
+					   maps:get(retry_bearers, Data0, #{}))},
+	    report_successful_resource_allocation(QCI, ARP, Data1);
+	error ->
+	    Data0
+    end.
+
+%% The S5/8-U PGW F-TEID the response echoes back. Matched on interface_type
+%% rather than instance: the instance of a bearer-context F-TEID differs per
+%% message and per interface, the interface type does not.
+echoed_pgw_fteid(Group) ->
+    maps:fold(
+      fun(_, #v2_fully_qualified_tunnel_endpoint_identifier{
+		 interface_type = ?'S5/S8-U PGW', key = TEI, ipv4 = IP4, ipv6 = IP6},
+	  undefined) ->
+	      #fq_teid{ip = fteid_ip(IP4, IP6), teid = TEI};
+	 (_, _, Acc) ->
+	      Acc
+      end, undefined, Group).
+
+fteid_ip(IP4, _IP6) when is_binary(IP4), byte_size(IP4) =:= 4 -> smf_inet:bin2ip(IP4);
+fteid_ip(_IP4, IP6) when is_binary(IP6), byte_size(IP6) =:= 16 -> smf_inet:bin2ip(IP6);
+fteid_ip(_IP4, _IP6) -> undefined.
+
+%% Every bearer in the batch failed (message-level Cause not OK). Fold them all,
+%% then re-provision once for the whole response rather than once per bearer (#91).
+handle_create_bearer_failures(PgwFTEIDs, State, Data0) ->
+    Data = lists:foldl(fun drop_pending_bearer/2, Data0, PgwFTEIDs),
+    async_m:run_async(reprovision_proc(maps:get(bearers, Data)),
+		      fun(_V, S, D) -> {next_state, S, D} end,
+		      fun(_R, S, D) -> {next_state, S, D} end,
+		      State, Data).
+
+%% Drop one failed bearer: forget its retry params, take it out of the pending set
+%% and the bearer map, and remove the PCC rules that bound to it, reporting them to
+%% the PCRF. Pure, so the caller can fold a whole batch and re-provision once --
+%% the bearer was provisioned in the UPF before the request went out (#89), so a
+%% rejection has rules to tear down and not merely state to forget.
+drop_pending_bearer(PgwFTEID, #{bearers := BearerMap, pcc := PCC,
+				pending_bearers := Pending0} = Data00) ->
     Data0 = Data00#{retry_bearers =>
 			maps:remove(PgwFTEID, maps:get(retry_bearers, Data00, #{}))},
     case maps:take(PgwFTEID, Pending0) of
 	{{QCI, ARP, Key, _ChId}, Pending} ->
-	    %% The bearer was provisioned in the UPF before the request went out
-	    %% (#89), so a rejection has rules to tear down, not merely state to
-	    %% forget: drop the provisional bearer and its binding index, then
-	    %% re-provision so the PDR actually goes away.
 	    BearerMap1 = maps:remove({qci_arp, QCI, ARP}, maps:remove(Key, BearerMap)),
 	    case affected_pcc_rules(QCI, ARP, PCC) of
 		[] ->
-		    Data1 = Data0#{bearers := BearerMap1, pending_bearers := Pending},
-		    async_m:run_async(reprovision_proc(BearerMap1),
-				      fun(_V, S, D) -> {next_state, S, D} end,
-				      fun(_R, S, D) -> {next_state, S, D} end,
-				      State, Data1);
+		    Data0#{bearers := BearerMap1, pending_bearers := Pending};
 		RuleNames ->
 		    PCC1 = PCC#pcc_ctx{
 			     rules = maps:without(RuleNames, PCC#pcc_ctx.rules)},
 		    Data1 = Data0#{pcc := PCC1, bearers := BearerMap1,
 				   pending_bearers := Pending},
-		    Data = report_bearer_failure(RuleNames, Data1),
-		    %% Re-provision asynchronously (#65); the rule removal above
-		    %% stands whether or not the UPF accepts it.
-		    async_m:run_async(reprovision_proc(BearerMap1),
-				      fun(_V, S, D) -> {next_state, S, D} end,
-				      fun(_R, S, D) -> {next_state, S, D} end,
-				      State, Data)
+		    report_bearer_failure(RuleNames, Data1)
 	    end;
 	error ->
-	    {keep_state, Data0}
+	    Data0
     end.
 
 %% Handle a Create Bearer Response rejected with cause
@@ -2291,10 +2365,10 @@ handle_create_bearer_failure(PgwFTEID, State,
 %% and retry_bearers entries are therefore left intact so the retry (fired on the
 %% next Modify Bearer Request) can proceed; no rule is removed and no failure is
 %% reported to the PCRF.
-handle_create_bearer_power_saving(PgwFTEID, Data) ->
+handle_create_bearer_power_saving(PgwFTEIDs, Data) ->
     ?LOG(warning, "Create Bearer rejected: UE temporarily not reachable due to "
-	 "power saving; holding bearer ~p for retry on next Modify Bearer Request",
-	 [PgwFTEID]),
+	 "power saving; holding bearers ~p for retry on next Modify Bearer Request",
+	 [PgwFTEIDs]),
     {keep_state, Data}.
 
 %% A Modify Bearer Request signals the UE is reachable again (TS 23.401 5.4.1
@@ -2304,11 +2378,16 @@ handle_create_bearer_power_saving(PgwFTEID, Data) ->
 %% the bearer as usual.
 retry_pending_bearers(AccessTunnel, Data) ->
     Retry = maps:get(retry_bearers, Data, #{}),
-    maps:foreach(
-      fun(_PgwFTEID, {PTI, DefaultEBI, QoS, TFTBin, AccessBearer, ChId}) ->
-	      create_dedicated_bearer(PTI, DefaultEBI, QoS, TFTBin, ChId,
-				      AccessBearer, AccessTunnel)
-      end, Retry),
+    %% One request for the whole held set, like the original send (#91). All the
+    %% held bearers share a PTI and a linked EBI -- they came from one decision --
+    %% so the first entry's are the batch's.
+    {Contexts, FTEIDs, PTI, DefaultEBI} =
+	maps:fold(
+	  fun(PgwFTEID, {P, EBI, QoS, TFTBin, AccessBearer, ChId}, {Ctxs, Ids, _, _}) ->
+		  {[dedicated_bearer_context(QoS, TFTBin, ChId, AccessBearer) | Ctxs],
+		   [PgwFTEID | Ids], P, EBI}
+	  end, {[], [], undefined, undefined}, Retry),
+    send_dedicated_bearers_create(PTI, Contexts, FTEIDs, DefaultEBI, AccessTunnel),
     Data#{retry_bearers => #{}}.
 
 %% A staged bearer whose F-TEID is still the CHOOSE placeholder got no PDR out of
