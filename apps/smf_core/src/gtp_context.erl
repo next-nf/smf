@@ -370,13 +370,12 @@ handle_event(cast, {handle_message, _Request, #gtp{}, _Resent}, #{async_pending 
 %% mailbox during a synchronous modify). No deadlock: the awaited PFCP reply does
 %% not depend on answering these.
 %%
-%% {gx, 'RAR'} is deliberately NOT postponed: it answers the RAA from pure
-%% validation and emits {gx_rar_apply, ...} for the work it implies, and THAT is
-%% what the gate postpones (architecture section 3 -- the protocol answer goes out
-%% at once, the implied bearer procedure queues). {gy, 'RAR'} still queues whole:
-%% it answers early too, but runs triggered_charging_event/4 inline, which touches
-%% the shared PCtx.
-handle_event(info, #aaa_request{procedure = {gy, 'RAR'}}, #{async_pending := P}, _Data)
+%% Neither RAR is postponed whole: each answers its protocol reply from pure
+%% validation and emits an internal event for the work it implies, and THAT is what
+%% the gate postpones (architecture section 3). {gy, 'RAR'} used to queue whole,
+%% because it ran triggered_charging_event/4 inline and that blocked on the shared
+%% PCtx; now it is a procedure and queues like the Gx apply half (#119).
+handle_event(internal, {gy_charging_event, _, _, _}, #{async_pending := P}, _Data)
   when map_size(P) =/= 0 ->
     {keep_state_and_data, [postpone]};
 %% ...but a Gx RAR IS postponed while a previous RAR's apply is still outstanding.
@@ -627,10 +626,11 @@ handle_event(info, #aaa_request{procedure = {gy, 'RAR'},
 	    _ ->
 		undefined
 	end,
-    {Data1, GyEvs1} = smf_gtp_gsn_lib:triggered_charging_event(interim, Now, ChargingKeys, Data),
-    Session2 = maps:get(aaa_session, Data1),
-    Actions1 = [{next_event, internal, {session, Ev, Session2}} || Ev <- GyEvs1],
-    {keep_state, Data1, Actions1};
+    %% The RAA is already out (above). The charging work it implies is a PFCP
+    %% procedure now, so it queues as its own internal event exactly as the Gx RAR's
+    %% apply half does, instead of the whole RAR being postponed (#119).
+    {keep_state, Data,
+     [{next_event, internal, {gy_charging_event, interim, Now, ChargingKeys}}]};
 
 handle_event(info, #aaa_request{procedure = {_, 'RAR'}} = Request, _State,
 	     #{aaa_session := Session}) ->
@@ -696,20 +696,20 @@ handle_event(internal, {session, {stop, Reason}, _Session}, State, Data) ->
 handle_event(internal, {session, stop, _Session}, State, Data) ->
      delete_context(undefined, error, State, Data);
 
+handle_event(internal, {gy_charging_event, ChargeEv, Now, ChargingKeys}, State, Data) ->
+    run_charging_event(ChargeEv, Now, ChargingKeys, State, Data);
+
 handle_event(internal, {session, Ev, _}, _State, _Data) ->
     ?LOG(error, "unhandled session event: ~p", [Ev]),
     keep_state_and_data;
 
-handle_event(info, {timeout, TRef, pfcp_timer} = Info, _State, #{pfcp := PCtx0} = Data0) ->
+handle_event(info, {timeout, TRef, pfcp_timer} = Info, State, #{pfcp := PCtx0} = Data0) ->
     ?LOG(debug, "handle_info: ~p", [Info]),
     Now = erlang:monotonic_time(),
     {Evs, PCtx} = smf_pfcp:timer_expired(TRef, PCtx0),
     Data = Data0#{pfcp => PCtx},
     #{validity_time := ChargingKeys} = smf_gsn_lib:pfcp_to_context_event(Evs),
-    {Data1, GyEvs1} = smf_gtp_gsn_lib:triggered_charging_event(validity_time, Now, ChargingKeys, Data),
-    Session1 = maps:get(aaa_session, Data1),
-    Actions1 = [{next_event, internal, {session, Ev, Session1}} || Ev <- GyEvs1],
-    {keep_state, Data1, Actions1};
+    run_charging_event(validity_time, Now, ChargingKeys, State, Data);
 
 handle_event({call, From}, {delete_context, Reason},  #{session := SState} = State, Data)
   when SState == connected; SState == connecting ->
@@ -1070,6 +1070,27 @@ gx_rar_apply_err(#ctx_err{} = E, State,
 		 #{context := Context, tunnels := #{'Access' := AccessTunnel}} = Data) ->
     handle_ctx_error(E#ctx_err{context = Context, tunnel = AccessTunnel}, [],
 		     State#{rar_apply_pending := false}, Data).
+
+%% A triggered charging event is a PFCP procedure: query the UPF for a usage
+%% report, fold it into the charging contexts, then raise the Gy events it
+%% produced. Shared by the Gy RAR and the PFCP validity timer (#119).
+run_charging_event(ChargeEv, Now, ChargingKeys, State, Data) ->
+    async_m:run_async(
+      smf_gtp_gsn_lib:triggered_charging_event_proc(ChargeEv, Now, ChargingKeys),
+      fun charging_event_ok/3, fun charging_event_err/3, State, Data).
+
+%% The session events are raised from here because the session they carry has to
+%% be the one the procedure committed, not the pre-await snapshot.
+charging_event_ok(GyEvs, State, Data) ->
+    Session = maps:get(aaa_session, Data),
+    Actions = [{next_event, internal, {session, Ev, Session}} || Ev <- GyEvs],
+    {next_state, State, Data, Actions}.
+
+%% Non-fatal by design, as the blocking version was: a refused usage-report query
+%% costs the report, not the session.
+charging_event_err(Reason, State, Data) ->
+    ?LOG(error, "triggered charging event failed with ~p", [Reason]),
+    {next_state, State, Data}.
 
 %% Return the async_m-threaded State (async_pending now drained) as the next
 %% state so the drain is a state-term change — that's what re-delivers the events

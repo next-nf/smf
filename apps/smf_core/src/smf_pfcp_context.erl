@@ -24,7 +24,8 @@
 	 await_delete/1,
 	 session_liveness_check/1,
 	 usage_report_to_charging_events/3,
-	 query_usage_report/1, query_usage_report/2
+	 query_usage_report/1, query_usage_report/2,
+	 query_usage_report_async/2
 	]).
 -export([select_upf/3, reselect_upf/4]).
 -export([send_g_pdu/3]).
@@ -123,14 +124,31 @@ query_usage_report(PCtx) ->
 query_usage_report(Type, PCtx)
   when is_record(PCtx, pfcp_ctx) andalso
        (Type == offline orelse Type == online) ->
-    IEs = #{query_urr => build_query_usage_report(Type, PCtx)},
-    session_modification_request(PCtx, IEs);
+    session_modification_request(PCtx, query_usage_report_ies(Type, PCtx));
 
 query_usage_report(ChargingKeys, PCtx)
   when is_record(PCtx, pfcp_ctx) ->
-    IEs = #{query_urr => [#{urr_id => #urr_id{id = Id}} ||
-			   Id <- smf_pfcp:get_urr_ids(ChargingKeys, PCtx), is_integer(Id)]},
-    session_modification_request(PCtx, IEs).
+    session_modification_request(PCtx, query_usage_report_ies(ChargingKeys, PCtx)).
+
+%% query_usage_report_async/2 — as query_usage_report/2, issued without blocking.
+%%
+%% The bearer map is empty on purpose: a usage-report query creates no PDR, so
+%% there is nothing for await_modify/1 to resolve a CHOOSE F-TEID into.
+query_usage_report_async(Type, PCtx)
+  when is_record(PCtx, pfcp_ctx) andalso
+       (Type == offline orelse Type == online) ->
+    session_modification_request_async(#{}, PCtx, query_usage_report_ies(Type, PCtx));
+query_usage_report_async(ChargingKeys, PCtx)
+  when is_record(PCtx, pfcp_ctx) ->
+    session_modification_request_async(#{}, PCtx,
+				       query_usage_report_ies(ChargingKeys, PCtx)).
+
+query_usage_report_ies(Type, PCtx)
+  when Type == offline orelse Type == online ->
+    #{query_urr => build_query_usage_report(Type, PCtx)};
+query_usage_report_ies(ChargingKeys, PCtx) ->
+    #{query_urr => [#{urr_id => #urr_id{id = Id}} ||
+		     Id <- smf_pfcp:get_urr_ids(ChargingKeys, PCtx), is_integer(Id)]}.
 
 %%%===================================================================
 %%% Helper functions
