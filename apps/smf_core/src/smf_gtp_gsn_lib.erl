@@ -12,7 +12,8 @@
 
 -export([connect_upf_candidates/4, create_session/13, create_session/14]).
 -export([triggered_charging_event/4, usage_report/3,
-	 close_context/4, close_context_proc/3]).
+	 close_context/4, close_context_proc/3,
+	 compensate_establishment/1, establishment_failed/2]).
 -export([update_tunnel_endpoint/2,
 	 apply_bearer_change_proc/5, access_bearer_change_proc/6]).
 
@@ -54,180 +55,294 @@ create_session(APN, PAA, DAF, UPSelInfo, Session, PCF, Charging, Auth,
 %% the one establishment exchange.
 create_session(APN, PAA, DAF, UPSelInfo, Session, PCF, Charging, Auth,
 	       SessionOpts, Context, AccessTunnel, AccessBearer, PCC, StageExtra) ->
-    try
-	{ok, create_session_fun(APN, PAA, DAF, UPSelInfo, Session, PCF, Charging, Auth,
-				SessionOpts, Context, AccessTunnel, AccessBearer, PCC,
-				StageExtra)}
-    catch
-	throw:Error ->
-	    {error, Error}
-    end.
+    create_session_fun(APN, PAA, DAF, UPSelInfo, Session, PCF, Charging, Auth,
+		       SessionOpts, Context, AccessTunnel, AccessBearer, PCC,
+		       StageExtra).
+
+%% Lift a conventional {ok,_} | {error, #ctx_err{}} return into the procedure's
+%% error channel, decorating the error with the context and tunnel the throw it
+%% replaces used to attach. Every step of the establishment failed by throwing;
+%% they now fail through the channel instead, because a throw unwinds past the
+%% state the procedure has accumulated and the compensation needs it (#87).
+lift_err({ok, V}, _Context, _Tunnel)      -> async_m:return(V);
+lift_err(ok, _Context, _Tunnel)           -> async_m:return(ok);
+lift_err({error, #ctx_err{} = Err}, Context, Tunnel) ->
+    async_m:fail(Err#ctx_err{context = Context, tunnel = Tunnel}).
+
+%% Await a Diameter pipeline that may or may not have suspended. As on the Gx
+%% update path, smf_aaa_* answers either {async, ReqId} or the folded result
+%% outright; both are normal and only the first has anything to await.
+await_invoke({async, ReqId}) -> async_m:await(ReqId);
+await_invoke(Folded)         -> async_m:return(Folded).
+
+%% The CCR-Initial legs. The worker posts {Result, Ctx, Session, Events}; a dead
+%% worker surfaces as {error, _} and travels the channel like any other failure.
+await_ccr_initial(Issued, Context, Tunnel) ->
+    do([async_m ||
+	   Reply <- await_invoke(Issued),
+	   lift_err(ccr_initial_ok(Reply), Context, Tunnel)
+       ]).
+
+ccr_initial_ok({ok, Ctx, Session, Events}) -> {ok, {Session, Events, Ctx}};
+ccr_initial_ok({_Fail, _, _, _})           -> {error, ?CTX_ERR(?FATAL, system_failure)};
+ccr_initial_ok({error, _})                 -> {error, ?CTX_ERR(?FATAL, system_failure)}.
+
+await_establish({request, ReqId, PCtx}, Handler, BearerMap, Context, Tunnel) ->
+    do([async_m ||
+	   Reply <- async_m:await(ReqId),
+	   lift_err(smf_pfcp_context:create_session_result(Reply, Handler, BearerMap, PCtx),
+		    Context, Tunnel)
+       ]).
 
 create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Charging0, Auth0,
 		   SessionOpts0, Context0, AccessTunnel, AccessBearer, PCC0, StageExtra) ->
+    do([async_m ||
+	   %% Still synchronous: the association wait, the AAA authentication and
+	   %% the UPF (re)selection have no async transport yet. They are also the
+	   %% three that establish nothing at a peer, so a failure in them has
+	   %% nothing to compensate.
+	   _ = smf_sx_node:wait_connect(SxConnectId),
 
-    smf_sx_node:wait_connect(SxConnectId),
+	   APNOpts <- lift_err(smf_apn:get(APN), Context0, AccessTunnel),
 
-    APNOpts =
-	case smf_apn:get(APN) of
-	    {ok, Result2} -> Result2;
-	    {error, Err2} -> throw(Err2#ctx_err{context = Context0, tunnel = AccessTunnel})
-	end,
+	   {UPinfo, SessionOpts1} <-
+	       lift_err(smf_pfcp_context:select_upf(Candidates, SessionOpts0, APNOpts),
+			Context0, AccessTunnel),
 
-    {UPinfo, SessionOpts1} =
-	case smf_pfcp_context:select_upf(Candidates, SessionOpts0, APNOpts) of
-	    {ok, Result3} -> Result3;
-	    {error, Err3} -> throw(Err3#ctx_err{context = Context0, tunnel = AccessTunnel})
-	end,
+	   {Session1, AuthSEvs, Auth1} <-
+	       lift_err(smf_gtp_gsn_session:authenticate(Auth0, Session0, SessionOpts1),
+			Context0, AccessTunnel),
 
-    {Session1, AuthSEvs, Auth1} =
-	case smf_gtp_gsn_session:authenticate(Auth0, Session0, SessionOpts1) of
-	    {ok, Result4} -> Result4;
-	    {error, Err4} -> throw(Err4#ctx_err{context = Context0, tunnel = AccessTunnel})
-	end,
+	   {PCtx0, NodeCaps, SGiBearer0} <-
+	       lift_err(smf_pfcp_context:reselect_upf(Candidates, Session1, APNOpts, UPinfo),
+			Context0, AccessTunnel),
 
-    {PCtx0, NodeCaps, SGiBearer0} =
-	case smf_pfcp_context:reselect_upf(Candidates, Session1, APNOpts, UPinfo) of
-	    {ok, Result5} -> Result5;
-	    {error, Err5} -> throw(Err5#ctx_err{context = Context0, tunnel = AccessTunnel})
-	end,
+	   {Result6, {Cause, SessionOpts3, SGiBearer, Context1}} =
+	       smf_gsn_lib:allocate_ips(PAA, APNOpts, Session1, DAF, AccessTunnel,
+					SGiBearer0, Context0),
+	   lift_err(Result6, Context1, AccessTunnel),
 
-    {Result6, {Cause, SessionOpts3, SGiBearer, Context1}} =
-	smf_gsn_lib:allocate_ips(PAA, APNOpts, Session1, DAF, AccessTunnel, SGiBearer0, Context0),
-    case Result6 of
-	ok -> ok;
-	{error, Err6} -> throw(Err6#ctx_err{context = Context1, tunnel = AccessTunnel})
-    end,
+	   Context = add_apn_timeout(APNOpts, SessionOpts3, Context1),
 
-    Context = add_apn_timeout(APNOpts, SessionOpts3, Context1),
+	   EBI = Context#context.default_bearer_id,
+	   BearerMap0a = #{{'Access', default_ebi} => EBI,
+			   {'Access', EBI} => AccessBearer,
+			   {'SGi-LAN', default_lan_id} => 1,
+			   {'SGi-LAN', 1} => SGiBearer},
+	   %% Register the default bearer under its {QCI, ARP} so a PCC rule at the
+	   %% default's QoS binds to it (via detect_new_bearers) instead of spawning
+	   %% a dedicated bearer. Kept in sync on a later default-ARP
+	   %% re-authorization by fan_out_subscribed_arp_change/6.
+	   BearerMap0 =
+	       case smf_gsn_lib:get_qci_arp(maps:get('QoS-Information', SessionOpts3, #{})) of
+		   {QCI, ARP} -> BearerMap0a#{{qci_arp, QCI, ARP} => EBI};
+		   undefined  -> BearerMap0a
+	       end,
+	   BearerMap1 <-
+	       lift_err(smf_gsn_lib:assign_local_data_teid(
+			  {'Access', EBI}, PCtx0, NodeCaps, AccessTunnel, BearerMap0),
+			Context, AccessTunnel),
 
-    EBI = Context#context.default_bearer_id,
-    BearerMap0a = #{{'Access', default_ebi} => EBI,
-		    {'Access', EBI} => AccessBearer,
-		    {'SGi-LAN', default_lan_id} => 1,
-		    {'SGi-LAN', 1} => SGiBearer},
-    %% Register the default bearer under its {QCI, ARP} so a PCC rule at the
-    %% default's QoS binds to it (via detect_new_bearers) instead of spawning a
-    %% dedicated bearer. Kept in sync on a later default-ARP re-authorization by
-    %% fan_out_subscribed_arp_change/6 (rekey_default_qci_arp/3).
-    BearerMap0 =
-	case smf_gsn_lib:get_qci_arp(maps:get('QoS-Information', SessionOpts3, #{})) of
-	    {QCI, ARP} -> BearerMap0a#{{qci_arp, QCI, ARP} => EBI};
-	    undefined  -> BearerMap0a
-	end,
-    BearerMap1 =
-	case smf_gsn_lib:assign_local_data_teid({'Access', EBI}, PCtx0, NodeCaps, AccessTunnel, BearerMap0) of
-	    {ok, Result7} -> Result7;
-	    {error, Err7} -> throw(Err7#ctx_err{context = Context, tunnel = AccessTunnel})
-	end,
+	   Session2 = maps:merge(Session1, SessionOpts3),
 
-    Session2 = maps:merge(Session1, SessionOpts3),
+	   Now = erlang:monotonic_time(),
+	   SOpts = #{now => Now},
 
-    Now = erlang:monotonic_time(),
-    SOpts = #{now => Now},
+	   GxOpts = #{'Event-Trigger' => ?'DIAMETER_GX_EVENT-TRIGGER_UE_IP_ADDRESS_ALLOCATE',
+		      'Bearer-Operation' => ?'DIAMETER_GX_BEARER-OPERATION_ESTABLISHMENT',
+		      'Network-Request-Support' =>
+			  ?'DIAMETER_GX_NETWORK-REQUEST-SUPPORT_NETWORK_REQUEST_SUPPORTED'},
 
-    GxOpts = #{'Event-Trigger' => ?'DIAMETER_GX_EVENT-TRIGGER_UE_IP_ADDRESS_ALLOCATE',
-	       'Bearer-Operation' => ?'DIAMETER_GX_BEARER-OPERATION_ESTABLISHMENT',
-	       'Network-Request-Support' =>
-		   ?'DIAMETER_GX_NETWORK-REQUEST-SUPPORT_NETWORK_REQUEST_SUPPORTED'},
+	   %% From here on a failure has something to undo: the PCRF now believes an
+	   %% IP-CAN session exists. Each context is committed to Data as it advances
+	   %% so create_session_err/4 can find it -- the error channel hands ErrFun
+	   %% the live Data, which is the whole reason these steps stopped throwing.
+	   {GxSession, GxEvents, PCF1} <-
+	       await_ccr_initial(
+		 smf_aaa_pcf:ccr_initial(PCF0, Session2, GxOpts,
+					 SOpts#{pipeline_async => true}),
+		 Context, AccessTunnel),
+	   async_m:modify_data(
+	     fun(D) -> started(gx, D#{pcf => PCF1, aaa_session => GxSession}) end),
 
-    {GxSession, GxEvents, PCF1} =
-	case smf_gtp_gsn_session:ccr_initial_gx(PCF0, Session2, GxOpts, SOpts) of
-	    {ok, Result8} -> Result8;
-	    {error, Err8} -> throw(Err8#ctx_err{context = Context, tunnel = AccessTunnel})
-	end,
+	   %% TS 29.212 4.5.5 / B.3.3.1: the CCA-I may carry an authorized
+	   %% Default-EPS-Bearer-QoS (QCI + ARP) and -- for EPS, unconditionally --
+	   %% an authorized APN-AMBR, either of which may override the subscribed
+	   %% values. Enforce them from here on, before the bearer map is handed to
+	   %% PFCP and before the Create Session Response is built (#73).
+	   {SessionOpts4, BearerMap2} =
+	       apply_authorized_qos(GxSession, SessionOpts3, EBI, BearerMap1),
 
-    %% TS 29.212 4.5.5 / B.3.3.1: the CCA-I may carry an authorized
-    %% Default-EPS-Bearer-QoS (QCI + ARP) and — for EPS, unconditionally — an
-    %% authorized APN-AMBR, either of which may override the subscribed values.
-    %% Enforce them from here on, before the bearer map is handed to PFCP and
-    %% before the Create Session Response is built (#73).
-    {SessionOpts4, BearerMap2} =
-	apply_authorized_qos(GxSession, SessionOpts3, EBI, BearerMap1),
+	   %% Fold in the request's further bearer contexts before anything reaches
+	   %% the UPF. A multi-bearer establishment is ONE PFCP exchange: staging
+	   %% these afterwards would establish the session without them and then
+	   %% modify it to add them, exposing an intermediate rule set the UE never
+	   %% asked for.
+	   {BearerMap2a, Dedicated, ExtraKeys} = StageExtra(BearerMap2, Context),
+	   BearerMap <-
+	       lift_err(assign_extra_teids(ExtraKeys, PCtx0, NodeCaps, AccessTunnel,
+					   BearerMap2a),
+			Context, AccessTunnel),
 
-    %% Fold in the request's further bearer contexts before anything reaches the
-    %% UPF. A multi-bearer establishment is ONE PFCP exchange: staging these
-    %% afterwards would establish the session without them and then modify it to
-    %% add them, exposing an intermediate rule set the UE never asked for.
-    {BearerMap2a, Dedicated, ExtraKeys} = StageExtra(BearerMap2, Context),
-    BearerMap =
-	lists:foldl(
-	  fun(Key, BM0) ->
-		  case smf_gsn_lib:assign_local_data_teid(
-			 Key, PCtx0, NodeCaps, AccessTunnel, BM0) of
-		      {ok, BM} -> BM;
-		      {error, ErrX} ->
-			  throw(ErrX#ctx_err{context = Context, tunnel = AccessTunnel})
-		  end
-	  end, BearerMap2a, ExtraKeys),
+	   RuleBase = smf_charging:rulebase(),
+	   {PCC1, PCCErrors1} =
+	       smf_pcc_context:gx_events_to_pcc_ctx(GxEvents, '_', RuleBase, PCC0),
+	   lift_err(pcc_has_rules(PCC1), Context, AccessTunnel),
 
-    RuleBase = smf_charging:rulebase(),
-    {PCC1, PCCErrors1} = smf_pcc_context:gx_events_to_pcc_ctx(GxEvents, '_', RuleBase, PCC0),
-    case smf_pcc_context:pcc_ctx_has_rules(PCC1) of
-	true ->
-	    ok;
-	_ ->
-	    throw(#ctx_err{level = ?FATAL, reply = user_authentication_failed,
-			   tunnel = AccessTunnel, where = {?FILE, ?LINE}})
-    end,
+	   CreditsAdd = smf_pcc_context:pcc_ctx_to_credit_request(PCC1),
+	   GyReqServices = #{credits => CreditsAdd},
 
-    %% TBD............
-    CreditsAdd = smf_pcc_context:pcc_ctx_to_credit_request(PCC1),
-    GyReqServices = #{credits => CreditsAdd},
+	   {GySession, GyEvs, Charging1} <-
+	       await_ccr_initial(
+		 smf_aaa_charging:gy_ccr_initial(Charging0, GxSession, GyReqServices,
+						 SOpts#{pipeline_async => true}),
+		 Context, AccessTunnel),
+	   async_m:modify_data(
+	     fun(D) -> started(gy, D#{charging => Charging1, aaa_session => GySession}) end),
 
-    {GySession, GyEvs, Charging1} =
-	case smf_gtp_gsn_session:ccr_initial_gy(Charging0, GxSession, GyReqServices, SOpts) of
-	    {ok, Result9} -> Result9;
-	    {error, Err9} -> throw(Err9#ctx_err{context = Context, tunnel = AccessTunnel})
-	end,
+	   {ok, Charging2, Session3, RfSEvs} =
+	       smf_aaa_charging:rf_initial(Charging1, GySession, #{}, SOpts),
+	   async_m:modify_data(
+	     fun(D) -> started(rf, D#{charging => Charging2, aaa_session => Session3}) end),
 
-    ?LOG(debug, "Initial GyEvs: ~p", [GyEvs]),
+	   {PCC2, PCCErrors2} = smf_pcc_context:gy_events_to_pcc_ctx(Now, GyEvs, PCC1),
+	   PCC3 = smf_pcc_context:session_events_to_pcc_ctx(AuthSEvs, PCC2),
+	   PCC4 = smf_pcc_context:session_events_to_pcc_ctx(RfSEvs, PCC3),
 
-    {ok, Charging2, Session3, RfSEvs} =
-	smf_aaa_charging:rf_initial(Charging1, GySession, #{}, SOpts),
+	   %% A bearer the request asked for is established only if policy AND
+	   %% charging authorized it: some PCC rule must still bind to it. Rules that
+	   %% got no charging decision were already dropped from the PCC context by
+	   %% gy_events_to_pcc_ctx/3, so "a rule still binds" is exactly that
+	   %% condition. An unauthorized bearer gets no PDR, so it must not reach the
+	   %% UPF at all -- it is dropped here, before the establishment, and reported
+	   %% back for the response to reject (TS 29.274 7.2.2).
+	   {BearerMapF, Rejected} = drop_unauthorized_bearers(ExtraKeys, PCC4, BearerMap),
 
-    {PCC2, PCCErrors2} = smf_pcc_context:gy_events_to_pcc_ctx(Now, GyEvs, PCC1),
-    PCC3 = smf_pcc_context:session_events_to_pcc_ctx(AuthSEvs, PCC2),
-    PCC4 = smf_pcc_context:session_events_to_pcc_ctx(RfSEvs, PCC3),
+	   Issued <- lift_err(smf_pfcp_context:create_session_async(
+				gtp_context, PCC4, PCtx0, BearerMapF, Context),
+			      Context, AccessTunnel),
+	   {PCtx, BearerMap3, SessionInfo} <-
+	       await_establish(Issued, gtp_context, BearerMapF, Context, AccessTunnel),
+	   async_m:modify_data(fun(D) -> started(pfcp, D#{pfcp => PCtx}) end),
 
-    %% A bearer the request asked for is established only if policy AND charging
-    %% authorized it: some PCC rule must still bind to it. Rules that got no
-    %% charging decision were already dropped from the PCC context by
-    %% gy_events_to_pcc_ctx/3, so "a rule still binds" is exactly that condition.
-    %% An unauthorized bearer gets no PDR, so it must not reach the UPF at all --
-    %% it is dropped here, before the establishment, and reported back for the
-    %% response to reject (TS 29.274 7.2.2: per-bearer Cause is mandatory).
-    {BearerMapF, Rejected} = drop_unauthorized_bearers(ExtraKeys, PCC4, BearerMap),
+	   SessionOpts = maps:merge(SessionOpts4, SessionInfo),
+	   Session4 = maps:merge(Session3, SessionOpts),
+	   {_, Auth2, Session5, _} =
+	       smf_aaa_auth:start(Auth1, Session4, SessionOpts, SOpts#{async => true}),
 
-    {PCtx, BearerMap3, SessionInfo} =
-	case smf_pfcp_context:create_session(gtp_context, PCC4, PCtx0, BearerMapF, Context) of
-	       {ok, Result10} -> Result10;
-	       {error, Err10} -> throw(Err10#ctx_err{context = Context, tunnel = AccessTunnel})
-	   end,
+	   GxReport = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors1 ++ PCCErrors2),
+	   {PCF2, Session6} = report_establishment_failures(GxReport, PCF1, Session5, SOpts),
+	   %% `=>` throughout, not `:=`: this is the creation path, so Data does not
+	   %% yet carry every key -- `pfcp` in particular is absent until now.
+	   async_m:modify_data(_#{pcf => PCF2, aaa_session => Session6, aaa_auth => Auth2}),
 
-    SessionOpts = maps:merge(SessionOpts4, SessionInfo),
-    Session4 = maps:merge(Session3, SessionOpts),
-    {_, Auth2, Session5, _} = smf_aaa_auth:start(Auth1, Session4, SessionOpts, SOpts#{async => true}),
+	   %% A failed registration replaces the Cause as well as the verdict: the
+	   %% response must say system_failure, not the cause the allocation produced.
+	   {Verdict, Cause1} =
+	       register_new_context(AccessTunnel, BearerMap3, Context, Cause),
+	   async_m:return(
+	     {Verdict, Cause1, SessionOpts, Context, BearerMap3,
+	      extra(Dedicated, Rejected), PCC4, PCtx, Session6, PCF2, Charging2, Auth2})
+       ]).
 
-    GxReport = smf_gsn_lib:pcc_events_to_charging_rule_report(PCCErrors1 ++ PCCErrors2),
-    {PCF2, Session6} =
-	if map_size(GxReport) /= 0 ->
-	       {ok, PCF1a, Session5a, _} =
-		   smf_aaa_pcf:ccr_update(PCF1, Session5, GxReport, SOpts#{async => true}),
-	       {PCF1a, Session5a};
-	   true ->
-	       {PCF1, Session5}
-	end,
+%% Record that an external session is now open at a peer, so a later failure
+%% knows what there is to undo. Only what is listed here is compensated: calling
+%% terminate/3 on a context whose session was never started would report the
+%% teardown of something the peer never had.
+started(What, Data) ->
+    Data#{establishment => [What | maps:get(establishment, Data, [])]}.
 
-    case gtp_context:remote_context_register_new(AccessTunnel, BearerMap3, Context) of
+%% compensate_establishment/1 — tear down the external sessions a failed
+%% establishment had already opened.
+%%
+%% A create that fails partway leaves the PCRF, the OCS and the CDF each
+%% believing a session exists. Nothing used to undo that: close_context/7 -- which
+%% sends the Gx CCR-T, the Gy CCR-T and the Rf stop -- is reachable only from the
+%% teardown paths, and a failed create ends at the interface's terminate/3, which
+%% deletes the PFCP session and releases the IPs and nothing else (#87).
+%%
+%% Each context module carries a terminate/3 that runs the `terminate` procedure
+%% across every service the context ever used (smf_aaa_session:get_services/2
+%% special-cases `terminate` to fan out that way), so one call per context covers
+%% whatever it actually started. They were written for this and had no caller.
+%%
+%% Failures here are logged and swallowed on purpose: this runs on an error path
+%% that is already answering the peer, and a compensation that cannot complete
+%% must not turn a rejected session into a crashed context.
+%% establishment_failed/2 — compensate, and hand back the Data the teardown needs.
+%%
+%% The #ctx_err{} carries the context holding the allocated UE IPs, and the
+%% interface's terminate/3 releases them from Data -- so it has to be put there.
+%% handle_ctx_error/4 did exactly this for the throw path this replaces
+%% ({stop, normal, Data#{context => Context}}); losing it leaks an IP per failed
+%% establishment.
+establishment_failed(#ctx_err{context = Context}, Data)
+  when is_record(Context, context) ->
+    ok = compensate_establishment(Data),
+    Data#{context => Context};
+establishment_failed(#ctx_err{}, Data) ->
+    ok = compensate_establishment(Data),
+    Data.
+
+compensate_establishment(#{aaa_session := Session} = Data) ->
+    Started = maps:get(establishment, Data, []),
+    Opts = #{now => erlang:monotonic_time(), async => true},
+    _ = [compensate(What, Data, Session, Opts) || What <- Started, What /= pfcp],
+    ok.
+
+compensate(gx, #{pcf := PCF}, Session, Opts) ->
+    compensate_call(fun() -> smf_aaa_pcf:terminate(PCF, Session, Opts) end, gx);
+compensate(gy, #{charging := Charging}, Session, Opts) ->
+    compensate_call(fun() -> smf_aaa_charging:terminate(Charging, Session, Opts) end, gy);
+compensate(rf, _Data, _Session, _Opts) ->
+    %% Gy and Rf share the charging context, and terminate/3 fans out across every
+    %% service that context used, so the gy entry already covered this one.
+    ok;
+compensate(auth, #{aaa_auth := Auth}, Session, Opts) ->
+    compensate_call(fun() -> smf_aaa_auth:terminate(Auth, Session, Opts) end, auth).
+
+compensate_call(Fun, What) ->
+    try Fun() of
+	_ -> ok
+    catch
+	Class:Reason:St ->
+	    ?LOG(error, "could not compensate the ~p session of a failed "
+		 "establishment: ~p:~p~n~p", [What, Class, Reason, St]),
+	    ok
+    end.
+
+%% Assign the local data F-TEID for each staged extra bearer, stopping at the
+%% first failure. Was a lists:foldl with a throw inside; the throw would have
+%% unwound past the Gx session opened just above it.
+assign_extra_teids(Keys, PCtx, NodeCaps, Tunnel, BearerMap) ->
+    lists:foldl(
+      fun(_Key, {error, _} = Err) -> Err;
+	 (Key, {ok, BM}) ->
+	      smf_gsn_lib:assign_local_data_teid(Key, PCtx, NodeCaps, Tunnel, BM)
+      end, {ok, BearerMap}, Keys).
+
+pcc_has_rules(PCC) ->
+    case smf_pcc_context:pcc_ctx_has_rules(PCC) of
+	true -> ok;
+	_    -> {error, ?CTX_ERR(?FATAL, user_authentication_failed)}
+    end.
+
+report_establishment_failures(GxReport, PCF, Session, SOpts)
+  when map_size(GxReport) /= 0 ->
+    {ok, PCF1, Session1, _} =
+	smf_aaa_pcf:ccr_update(PCF, Session, GxReport, SOpts#{async => true}),
+    {PCF1, Session1};
+report_establishment_failures(_GxReport, PCF, Session, _SOpts) ->
+    {PCF, Session}.
+
+register_new_context(AccessTunnel, BearerMap, Context, Cause) ->
+    case gtp_context:remote_context_register_new(AccessTunnel, BearerMap, Context) of
 	ok ->
-	    {ok, Cause, SessionOpts, Context, BearerMap3, extra(Dedicated, Rejected), PCC4, PCtx,
-	     Session6, PCF2, Charging2, Auth2};
+	    {ok, Cause};
 	{error, #ctx_err{level = Level, where = {File, Line}}} ->
 	    ?LOG(debug, #{type => ctx_err, level => Level, file => File,
 			  line => Line, reply => system_failure}),
-	    {error, system_failure, SessionOpts, Context, BearerMap3, extra(Dedicated, Rejected),
-	     PCC4, PCtx, Session6, PCF2, Charging2, Auth2}
+	    {error, system_failure}
     end.
 
 extra(Dedicated, Rejected) ->
