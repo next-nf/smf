@@ -783,8 +783,14 @@ handle_ctx_error(#ctx_err{level = Level, context = Context} = CtxErr, St, State,
     log_ctx_error(CtxErr, St),
     case Level of
 	?FATAL when is_record(Context, context) ->
+	    ok = smf_gtp_gsn_lib:compensate_external_sessions(Data),
 	    {stop, normal, Data#{context => Context}};
 	?FATAL ->
+	    %% A FATAL stops the context without going through close_context/7, so
+	    %% nothing else tells the PCRF, the OCS and the CDF that the session is
+	    %% gone -- terminate/3 only deletes the PFCP session and releases the
+	    %% IPs. Compensate here, as the failed-establishment path does (#116).
+	    ok = smf_gtp_gsn_lib:compensate_external_sessions(Data),
 	    {stop, normal, Data};
 	_ when is_record(Context, context) ->
 	    {next_state, State, Data#{context => Context}};
