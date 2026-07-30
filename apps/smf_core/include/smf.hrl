@@ -69,7 +69,13 @@
 				   'CP-function' | 'LI Function' | undefined,
 	  vrf			:: term(),
 	  local			:: 'undefined' | #fq_teid{} | #ue_ip{},
-	  remote		:: 'undefined' | 'default' | #fq_teid{} | #ue_ip{}
+	  remote		:: 'undefined' | 'default' | #fq_teid{} | #ue_ip{},
+	  %% Stable PFCP identity, minted once and never changed. The PCtx keys the
+	  %% CHOOSE id and the PdrId -> bearer reverse map on THIS, not on the
+	  %% bearer map key -- so re-keying a bearer in the map (a dedicated bearer
+	  %% is staged before the MME names it, TS 29.274 7.2.3) cannot desynchronise
+	  %% the two and make the UP allocate an F-TEID we have already advertised.
+	  handle		:: 'undefined' | integer()
 	 }).
 
 -record(ded_bearer, {

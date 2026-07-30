@@ -165,13 +165,28 @@ update_bearer(_, Bearer) ->
     Bearer.
 
 update_bearer_f(#{pdr_id := #pdr_id{id = PdrId}, f_teid := FqTEID},
-		{BearerMap, PCtx0}) ->
-    Key = smf_pfcp:get_bearer_key_by_pdr(PdrId, PCtx0),
-    Bearer = maps:update_with(Key, update_bearer(FqTEID, _), BearerMap),
+		{BearerMap0, PCtx0}) ->
+    Handle = smf_pfcp:get_bearer_handle_by_pdr(PdrId, PCtx0),
+    BearerMap = update_bearer_by_handle(Handle, FqTEID, BearerMap0),
     PCtx = smf_pfcp:update_teids(PdrId, FqTEID, PCtx0),
-    {Bearer, PCtx};
+    {BearerMap, PCtx};
 update_bearer_f(_, Acc) ->
     Acc.
+
+%% Place a Created PDR's F-TEID on the bearer that asked for it. Found by handle
+%% rather than by map key (#125): the key of a dedicated bearer changes when the
+%% MME names it, the handle does not. A linear scan is right here -- a session has
+%% a handful of bearers, and the alternative is a second index to keep in step,
+%% which is the class of bug this change removes.
+update_bearer_by_handle(undefined, _FqTEID, BearerMap) ->
+    BearerMap;
+update_bearer_by_handle(Handle, FqTEID, BearerMap) ->
+    maps:map(
+      fun(_Key, #bearer{handle = H} = Bearer) when H =:= Handle ->
+	      update_bearer(FqTEID, Bearer);
+	 (_Key, Value) ->
+	      Value
+      end, BearerMap).
 
 %% update_bearer/3
 update_bearer(#{created_pdr := PDR}, BearerMap, PCtx) when is_map(PDR) ->

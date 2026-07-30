@@ -2280,9 +2280,10 @@ apply_create_bearer_context(true, PgwFTEID, Group,
     case maps:take(PgwFTEID, Pending0) of
 	{{QCI, ARP, Key, ChId}, Pending} ->
 	    %% The MME has now named the bearer, so its provisional key becomes the
-	    %% real one. Rename it in the bearer map AND in the PCtx together (#89)
-	    %% -- smf_pfcp:rekey_bearer/3 explains why splitting them re-allocates
-	    %% the F-TEID we already advertised.
+	    %% real one. Only the bearer map moves: the PCtx keys the bearer's CHOOSE
+	    %% id and its PdrId reverse map on the bearer's stable handle, which this
+	    %% does not touch (#125). Before that, both had to be renamed together or
+	    %% the UP would re-allocate the F-TEID already advertised.
 	    #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} = Group,
 	    AccessBearer = update_bearer_from_response(Group, maps:get(Key, BearerMap0)),
 	    PgwBI = <<EBI:8>>,
@@ -2290,7 +2291,7 @@ apply_create_bearer_context(true, PgwFTEID, Group,
 		#{{'Access', EBI} => AccessBearer,
 		  {qci_arp, QCI, ARP} => EBI,
 		  {bearer_id, PgwBI} => EBI},
-	    PCtx = smf_pfcp:rekey_bearer(Key, {'Access', EBI}, PCtx0),
+	    PCtx = PCtx0,
 	    Desc = smf_gsn_lib:normalize_bearer(EBI, QCI, ARP, PCC, ChId),
 	    Dedicated = maps:get(dedicated, Data0, #{}),
 	    Data1 = Data0#{bearers := BearerMap,

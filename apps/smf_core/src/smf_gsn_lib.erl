@@ -1041,20 +1041,32 @@ assign_local_data_teid_5(Key, PCtx, {VRFs, _} = _NodeCaps,
   when is_map_key(Name, VRFs) ->
     assign_local_data_teid_5(Key, PCtx, maps:get(Name, VRFs), TunnelIP, Bearer);
 
-assign_local_data_teid_5(Key, #pfcp_ctx{features = #{'FTUP' := _}},
-		       #vrf{name = VRF}, TunnelIP, Bearer) ->
+assign_local_data_teid_5(_Key, #pfcp_ctx{features = #{'FTUP' := _}},
+		       #vrf{name = VRF}, TunnelIP, Bearer0) ->
+    %% The CHOOSE placeholder carries the bearer's stable handle, not its map key:
+    %% make_request_bearer/3 turns it into the PCtx's CHOOSE id, and keying that on
+    %% the map key is what forced the rekey #125 removes.
+    #bearer{handle = Handle} = Bearer = with_handle(Bearer0),
     IPver = ip_ver(TunnelIP),
-    FqTEID = #fq_teid{ip = IPver, teid = {upf, Key}},
+    FqTEID = #fq_teid{ip = IPver, teid = {upf, Handle}},
     {ok, Bearer#bearer{vrf = VRF, local = FqTEID}};
 
 assign_local_data_teid_5(_Key, #pfcp_ctx{} = PCtx,
-		       #vrf{name = VRF, ipv4 = IP4, ipv6 = IP6}, TunnelIP, Bearer) ->
+		       #vrf{name = VRF, ipv4 = IP4, ipv6 = IP6}, TunnelIP, Bearer0) ->
+    Bearer = with_handle(Bearer0),
     do([error_m ||
 	   IP <- choose_ip(TunnelIP, IP4, IP6),
 	   DataTEI <- smf_tei_mngr:alloc_tei(PCtx),
 	   FqTEID = #fq_teid{ip = smf_inet:to_ip(IP), teid = DataTEI},
 	   return(Bearer#bearer{vrf = VRF, local = FqTEID})
        ]).
+
+%% Mint the bearer's handle if it has none. Idempotent on purpose: a bearer that
+%% is re-assigned must keep the identity its PDRs are already registered under.
+with_handle(#bearer{handle = undefined} = Bearer) ->
+    Bearer#bearer{handle = erlang:unique_integer([monotonic, positive])};
+with_handle(#bearer{} = Bearer) ->
+    Bearer.
 
 %% assign_local_data_teid_like/4 — assign Key's local data F-TEID for a bearer
 %% added AFTER session establishment, using an existing bearer of the same session
@@ -1081,15 +1093,17 @@ assign_local_data_teid_like(Key, PCtx, TemplateBearer, BearerMap) ->
 %% FTUP: leave the CHOOSE placeholder; the UP allocates and reports the F-TEID in
 %% the Created PDR of the response (TS 23.214 5.4.3), which
 %% smf_pfcp_context:modify_session_result/3 folds back into the bearer map.
-assign_local_data_teid_like_4(Key, #pfcp_ctx{features = #{'FTUP' := _}},
-			      #bearer{vrf = VRF, local = #fq_teid{ip = IP}}, Bearer) ->
-    FqTEID = #fq_teid{ip = ip_ver(IP), teid = {upf, Key}},
+assign_local_data_teid_like_4(_Key, #pfcp_ctx{features = #{'FTUP' := _}},
+			      #bearer{vrf = VRF, local = #fq_teid{ip = IP}}, Bearer0) ->
+    #bearer{handle = Handle} = Bearer = with_handle(Bearer0),
+    FqTEID = #fq_teid{ip = ip_ver(IP), teid = {upf, Handle}},
     {ok, Bearer#bearer{vrf = VRF, local = FqTEID}};
 
 %% Non-FTUP (deprecated but still supported): the CP assigns. Reuse the template
 %% bearer's GTP-U address -- it is the address this session's UPF already serves.
 assign_local_data_teid_like_4(_Key, #pfcp_ctx{} = PCtx,
-			      #bearer{vrf = VRF, local = #fq_teid{ip = IP}}, Bearer) ->
+			      #bearer{vrf = VRF, local = #fq_teid{ip = IP}}, Bearer0) ->
+    Bearer = with_handle(Bearer0),
     do([error_m ||
 	   DataTEI <- smf_tei_mngr:alloc_tei(PCtx),
 	   FqTEID = #fq_teid{ip = IP, teid = DataTEI},
