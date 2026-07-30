@@ -947,6 +947,7 @@ common() ->
      gx_rar_reject_keeps_committed_state,
      gx_rar_reject_keeps_charging_round,
      gx_rar_dedicated_bearer_create,
+     gx_rar_two_dedicated_bearers_batched_create,
      gx_rar_dedicated_bearer_create_unarmed,
      default_bearer_qci_arp_binding_entry,
      default_qci_arp_rule_binds_to_default,
@@ -1276,7 +1277,9 @@ init_per_testcase(modify_bearer_multi_bearer, Config) ->
     %% BCM UE_NW so a pushed PCC rule spawns a dedicated bearer to modify.
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
-init_per_testcase(gx_rar_dedicated_bearer_create, Config) ->
+init_per_testcase(TestCase, Config)
+  when TestCase == gx_rar_dedicated_bearer_create;
+       TestCase == gx_rar_two_dedicated_bearers_batched_create ->
     setup_per_testcase(Config),
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Initial'}, 'Initial-Gx-BCM-UE-NW'}]),
     Config;
@@ -6456,6 +6459,119 @@ up_inactivity_timer(Config) ->
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4contexts(?TIMEOUT),
 
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gx_rar_two_dedicated_bearers_batched_create() ->
+    [{doc, "One Gx decision spawning two dedicated bearers emits ONE Create "
+      "Bearer Request carrying both contexts, not one request each"}].
+gx_rar_two_dedicated_bearers_batched_create(Config) ->
+    Cntl = whereis(gtpc_client_server),
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    Self = self(),
+    ResponseFun =
+	fun(Request, Result, Avps, SOpts) ->
+		Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SessionOpts, events = []},
+
+    %% Two rules at DISTINCT {QCI, ARP}, so bearer binding spawns two bearers
+    %% rather than binding both to one. Every other create-bearer case in this
+    %% suite installs a single rule, or two sharing a {QCI, ARP} (#91).
+    DedRule =
+	fun(Name, QCI, PL) ->
+		#{'Charging-Rule-Definition' =>
+		      [#{'Charging-Rule-Name' => Name,
+			 'Flow-Information' =>
+			     [#{'Flow-Description' =>
+				    [<<"permit out ip from any to assigned">>],
+				'Flow-Direction' => [2]}],
+			 'QoS-Information' =>
+			     [#{'QoS-Class-Identifier' => QCI,
+				'Allocation-Retention-Priority' =>
+				    #{'Priority-Level' => PL,
+				      'Pre-emption-Capability' => 1,
+				      'Pre-emption-Vulnerability' => 0}}],
+			 'Metering-Method' => [1],
+			 'Precedence' => [100],
+			 'Online' => [0],
+			 'Offline' => [0]}],
+		  'Resource-Allocation-Notification' => [0]}
+	end,
+    InstCR = [{pcc, install, [DedRule(<<"ded-rule-1">>, 1, 2),
+			      DedRule(<<"ded-rule-2">>, 2, 3)]}],
+    Server ! AAAReq#aaa_request{events = InstCR},
+
+    {_, Resp0, _, _} =
+	receive {'$response', _, _, _, _} = R0 -> erlang:delete_element(1, R0)
+	after 5000 -> ct:fail(rar_timeout)
+	end,
+    ?equal(ok, Resp0),
+
+    %% The discriminating assertion (#91). TS 29.274 7.2.3 makes Bearer Contexts
+    %% repeatable -- "Several IEs with this type and instance values shall be
+    %% included as necessary to represent a list of Bearers" -- so two bearers are
+    %% one request with two contexts. Before the fix this was two requests, and
+    %% the second recv_pdu below returned the second one instead of timing out.
+    CBReq = recv_pdu(Cntl, 5000),
+    ?match(#gtp{type = create_bearer_request}, CBReq),
+    #gtp{ie = #{{v2_bearer_context, 0} := BearerCtxs}} = CBReq,
+    ?match(L when is_list(L) andalso length(L) == 2, BearerCtxs),
+
+    %% ...and nothing else follows it.
+    ?equal(timeout, recv_pdu(Cntl, undefined, 500, fun(Why) -> Why end)),
+
+    #gtp{seq_no = CBSeqNo} = CBReq,
+    GtpCDed = gtp_context_new_teids(GtpC),
+    #gtpc{local_ip = LocalIP, local_data_tei = SgwUTEI,
+	  remote_control_tei = RemoteCntlTEI} = GtpCDed,
+
+    %% Answer both contexts, each echoing its own S5/8-U PGW F-TEID -- that is
+    %% what the response is correlated by (TS 29.274 7.2.4), and with two bearers
+    %% there is nothing to fall back on if it is missing.
+    RespCtxs =
+	[begin
+	     #{{v2_fully_qualified_tunnel_endpoint_identifier, 1} :=
+		   #v2_fully_qualified_tunnel_endpoint_identifier{
+		      key = PgwUTEI, ipv4 = PgwUIP4}} = G,
+	     #v2_bearer_context{
+		group = [#v2_cause{v2_cause = request_accepted},
+			 #v2_eps_bearer_id{eps_bearer_id = EBI},
+			 #v2_fully_qualified_tunnel_endpoint_identifier{
+			    instance = 2, interface_type = ?'S5/S8-U PGW',
+			    key = PgwUTEI, ipv4 = PgwUIP4},
+			 #v2_fully_qualified_tunnel_endpoint_identifier{
+			    instance = 3, interface_type = ?'S5/S8-U SGW',
+			    key = SgwUTEI + EBI,
+			    ipv4 = smf_inet:ip2bin(LocalIP)}]}
+	 end || {#v2_bearer_context{group = G}, EBI}
+		    <- lists:zip(BearerCtxs, [6, 7])],
+
+    CBResp = #gtp{version = v2, type = create_bearer_response,
+		  tei = RemoteCntlTEI, seq_no = CBSeqNo,
+		  ie = [#v2_cause{v2_cause = request_accepted} | RespCtxs]},
+    send_pdu(Cntl, GtpC, CBResp),
+    ct:sleep(200),
+
+    %% Both bearers installed from the one response, each placed by its own
+    %% echoed F-TEID rather than by position.
+    #{bearers := BearerMap, dedicated := Ded} =
+	smf_context:test_cmd(gtp, CtxKey, info),
+    %% Which bearer got EBI 6 and which got 7 follows the order the contexts were
+    %% staged in; the point is that each is placed by its OWN echoed F-TEID, so
+    %% assert the pairing rather than the order.
+    #{{qci_arp, 1, {2, 1, 0}} := EbiA, {qci_arp, 2, {3, 1, 0}} := EbiB} = BearerMap,
+    ?equal([6, 7], lists:sort([EbiA, EbiB])),
+    ?match(#{{'Access', 6} := #bearer{}, {'Access', 7} := #bearer{}}, BearerMap),
+    ?match(#{EbiA := #ded_bearer{qci = 1}, EbiB := #ded_bearer{qci = 2}}, Ded),
+
+    delete_session(GtpC),
     meck_validate(Config),
     ok.
 
