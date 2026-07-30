@@ -990,6 +990,7 @@ common() ->
      up_inactivity_timer,
      pfcp_async_update_credits,
      gy_credit_denied_reports_rule_inactive,
+     gy_credit_denied_reject_keeps_gx_report,
      gx_rar_apply_is_async,
      gx_rar_answers_raa_while_parked,
      teardown_queues_behind_procedure,
@@ -1386,7 +1387,9 @@ init_per_testcase(gtp_idle_timeout_pfcp_session_loss, Config) ->
     smf_test_lib:set_apn_key(inactivity_timeout, 300),
     setup_per_testcase(Config),
     Config;
-init_per_testcase(gy_credit_denied_reports_rule_inactive, Config) ->
+init_per_testcase(TestCase, Config)
+  when TestCase == gy_credit_denied_reports_rule_inactive;
+       TestCase == gy_credit_denied_reject_keeps_gx_report ->
     setup_per_testcase(Config),
     smf_test_lib:set_online_charging(true),
     smf_test_lib:load_aaa_answer_config([{{gy, 'CCR-Initial'}, 'Initial-OCS'},
@@ -1549,7 +1552,8 @@ end_per_testcase(TestCase, Config)
     end_per_testcase(Config);
 end_per_testcase(TestCase, Config)
   when TestCase == sx_establishment_reject;
-       TestCase == gx_rar_reject_keeps_committed_state ->
+       TestCase == gx_rar_reject_keeps_committed_state;
+       TestCase == gy_credit_denied_reject_keeps_gx_report ->
     %% failure-safe teardown: drop the armed rejection even if the case body
     %% failed before the establishment consumed it. setup_per_testcase/2's
     %% smf_test_sx_up:reset/1 would clear it before the next case too, but that
@@ -10306,6 +10310,65 @@ pfcp_async_update_credits(Config) ->
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4tunnels(?TIMEOUT),
     wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gy_credit_denied_reject_keeps_gx_report() ->
+    [{doc, "A rejected session modification must not discard the record of the "
+      "Gx CCR-Update that already went out"}].
+gy_credit_denied_reject_keeps_gx_report(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {_GtpC, _, _} = create_session(Config),
+    {ok, PCtx} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
+
+    %% update_credits_proc/1 issues exactly one modification, so a plain one-shot
+    %% arming lands on it -- no skip needed, unlike gx_rar_apply_proc.
+    ok = smf_test_sx_up:reject('pgw-u01', session_modification_request,
+			       'No resources available'),
+
+    %% Same trigger as gy_credit_denied_reports_rule_inactive: the OCS denies
+    %% credit for rating group 3000, the bound rule is dropped, and
+    %% report_rule_failures/4 sends a Gx CCR-Update naming it INACTIVE. That CCR-U
+    %% goes out BEFORE the modification, which is the whole point.
+    trigger_gy_credit_update(PCtx, #{'VOLTH' => []}),
+
+    Reports =
+	fun() ->
+		[Rep || {_, {smf_aaa_pcf, ccr_update, [_, _, R, _]}, _}
+			    <- meck:history(smf_aaa_pcf),
+			Rep <- maps:get('Charging-Rule-Report', R, [])]
+	end,
+    ok = wait_until(fun() -> Reports() =/= [] end, 50, 100),
+
+    %% A refused modification is a FATAL #ctx_err{}, so the context stops; the
+    %% Data it terminates with is where the committed state stays observable.
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    [{_Pid, {_M, terminate, [_Reason, _State, TermData]}, _Res} | _] =
+	lists:reverse([H || {_, {M, F, _}, _} = H <- meck:history(?HUT),
+			    M =:= ?HUT, F =:= terminate]),
+    #{aaa_session := SessionAtTerm} = TermData,
+
+    %% Take the CCR-Update's own before and after from the call itself. A snapshot
+    %% taken in the test cannot discriminate: the Gy trigger updates the session
+    %% for its own reasons, and the CCR-Update is fire-and-forget so it leaves the
+    %% `pcf` context value-identical. Only the session the call was given versus
+    %% the session it returned isolates this one interaction.
+    [{_, {_, ccr_update, [_, GxIn, _, _]}, {ok, _, GxOut, _}} | _] =
+	lists:reverse([H || {_, {M, F, _}, _} = H <- meck:history(smf_aaa_pcf),
+			    M =:= smf_aaa_pcf, F =:= ccr_update]),
+    ?equal(false, GxIn =:= GxOut),
+
+    %% The discriminating assertion (#111). The PCRF has been told the rule is
+    %% INACTIVE and has acted on it, so the context must carry the session the
+    %% report produced. Before the fix the error channel short-circuited past the
+    %% single terminal commit and the context kept GxIn -- the state from before
+    %% the report it had already sent.
+    ?equal(GxOut, SessionAtTerm),
 
     meck_validate(Config),
     ok.
