@@ -964,6 +964,11 @@ gx_rar_apply_proc(PCC0, PCC1, PCC2) ->
 	   Issued1 <- async_m:lift(
 			smf_pfcp_context:modify_session_async(PCC1, [], #{}, BearerMap, PCtx0)),
 	   {PCtx1, _BearerMap, UsageReport, _} <- smf_pfcp_context:await_modify(Issued1),
+	   %% The UPF has applied the remove pass. Commit the PCtx it produced before
+	   %% issuing anything else that can fail: reverting to PCtx0 would leave our
+	   %% rule set still claiming rules the UPF has already dropped, so the next
+	   %% modification would re-send removes it has already made (#111).
+	   async_m:modify_data(_#{pfcp := PCtx1}),
 
 %%% step 4:
 	   ChargeEv = {online, 'RAR'},   %% made up value, not use anywhere...
@@ -976,6 +981,16 @@ gx_rar_apply_proc(PCC0, PCC1, PCC2) ->
 			       ChargeEv, GyReqServices, C0, S1, ReqOps),
 	   {C2, S3} = smf_gsn_lib:process_offline_charging_events(
 			ChargeEv, Offline, Now, C1, S2),
+	   %% The charging round is done and its peers have acted: the Gy CCR-Update
+	   %% has been answered, the Rf update sent, the accounting monitors applied.
+	   %% Commit that before step 6, which can fail -- the OCS has debited the
+	   %% reported usage and granted new quota, and short-circuiting past this
+	   %% commit would drop the grant on our side while the OCS keeps it (#111).
+	   %%
+	   %% Deliberately NOT committed here: `pcc` belongs to the caller, which
+	   %% already set it to PCC2 before dispatching (see the {gx, 'RAR'} clause),
+	   %% and `bearers`/`pfcp` are not settled until step 6 succeeds.
+	   async_m:modify_data(_#{charging := C2, aaa_session := S3, aaa_auth := A1}),
 
 %%% step 5:
 	   {PCC4, PCCErrors4} = smf_pcc_context:gy_events_to_pcc_ctx(Now, GyEvs, PCC2),
