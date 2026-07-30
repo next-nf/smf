@@ -12,7 +12,7 @@
 	 reset/1, history/1, history/2,
 	 sessions/1, accounting/2,
 	 enable/1, disable/1,
-	 reject/3, reject/4, reject_clear/1,
+	 reject/3, reject/4, reject_after/4, reject_after/5, reject_clear/1,
 	 feature/3, ue_ip_pools/2,
 	 nat_port_blocks/3]).
 
@@ -121,7 +121,20 @@ reject(Role, Type, Cause) ->
     reject(Role, Type, Cause, 1).
 
 reject(Role, Type, Cause, Count) when is_integer(Count), Count > 0 ->
-    gen_server:call(server_name(Role), {reject, Type, Cause, Count}).
+    reject_after(Role, Type, Cause, 0, Count).
+
+%% Let Skip requests of Type through untouched, then reject the next Count.
+%%
+%% Needed whenever a procedure issues more than one request of the same type and
+%% only a later one is the interesting failure -- gx_rar_apply_proc, for instance,
+%% modifies the session twice with a charging round in between, and rejecting the
+%% first would abort before that round ever runs.
+reject_after(Role, Type, Cause, Skip) ->
+    reject_after(Role, Type, Cause, Skip, 1).
+
+reject_after(Role, Type, Cause, Skip, Count)
+  when is_integer(Skip), Skip >= 0, is_integer(Count), Count > 0 ->
+    gen_server:call(server_name(Role), {reject, Type, Cause, Skip, Count}).
 
 reject_clear(Role) ->
     gen_server:call(server_name(Role), {reject, clear}).
@@ -187,8 +200,8 @@ handle_call({enabled, Bool}, _From, State) ->
 handle_call({reject, clear}, _From, State) ->
     {reply, ok, State#state{reject = #{}}};
 
-handle_call({reject, Type, Cause, Count}, _From, #state{reject = Reject} = State) ->
-    {reply, ok, State#state{reject = Reject#{Type => {Count, Cause}}}};
+handle_call({reject, Type, Cause, Skip, Count}, _From, #state{reject = Reject} = State) ->
+    {reply, ok, State#state{reject = Reject#{Type => {Skip, Count, Cause}}}};
 
 handle_call({feature, Feature, V}, _From, #state{features = UpFF0} = State) ->
     Key = list_to_atom(string:uppercase(atom_to_list(Feature))),
@@ -285,7 +298,11 @@ handle_info({udp, SxSocket, IP, InPortNo, Packet},
     try
 	Msg = pfcp_packet:decode(Packet),
 	?match(ok, (catch pfcp_packet:validate('Sxb', Msg))),
-	{Reply, State} = handle_message(Msg, record(Msg, State0)),
+	{Reply, State} =
+	    case take_rejection(Msg, record(Msg, State0)) of
+		{reject, Cause, State1} -> reject_reply(Msg, Cause, State1);
+		{pass, State1}          -> handle_message(Msg, State1)
+	    end,
 	case Reply of
 	    #pfcp{} ->
 		BinReply = pfcp_packet:encode(Reply#pfcp{seq_no = Msg#pfcp.seq_no}),
@@ -452,17 +469,6 @@ when Type =:= pfd_management_request;
 	  pfcp_cause => 'No established Sx Association'},
      sx_reply(pfcp_response(Type), RespIEs, State);
 
-%% An armed rejection short-circuits the request: answer with the injected cause
-%% and change nothing else, so an establishment leaves no session behind and a
-%% modification leaves the existing rules alone. Placed after the "no association"
-%% clause above so arming a rejection cannot mask a genuinely unassociated node,
-%% and before the processing clauses so nothing is applied on the way out.
-handle_message(#pfcp{type = Type} = Request, #state{reject = Reject} = State0)
-  when is_map_key(Type, Reject) ->
-    {Cause, State} = take_rejection(Type, State0),
-    sx_reply(pfcp_response(Type), reject_seid(Request, State),
-	     #{pfcp_cause => Cause}, State);
-
 handle_message(#pfcp{type = session_establishment_request, seid = 0,
 		     ie = #{f_seid := #f_seid{seid = ControlPlaneSEID,
 					      ipv4 = ControlPlaneIP4,
@@ -535,15 +541,38 @@ handle_message(#pfcp{type = ReqType}, State)
     {noreply, State}.
 
 
-%% Consume one arming. The entry disappears at zero so the next request of that
-%% type is processed normally -- see reject/3.
-take_rejection(Type, #state{reject = Reject} = State) ->
-    {Count, Cause} = maps:get(Type, Reject),
-    R = case Count of
-	    1 -> maps:remove(Type, Reject);
-	    _ -> Reject#{Type => {Count - 1, Cause}}
-	end,
-    {Cause, State#state{reject = R}}.
+%% Decide an armed rejection before dispatch rather than as a handle_message
+%% clause: skipping has to let the request through to the normal processing, and
+%% Erlang clauses do not fall through.
+%%
+%% A skip is consumed by the request it lets past; a rejection is consumed by the
+%% request it refuses. Both entries disappear at zero, so once an arming is spent
+%% the next request of that type is processed normally -- see reject/3.
+%% An unassociated node answers "No established Sx Association" regardless, so an
+%% armed rejection cannot mask one -- the property the old clause got from sitting
+%% after that clause in handle_message/2.
+take_rejection(_Request, #state{cp_recovery_ts = undefined} = State) ->
+    {pass, State};
+take_rejection(#pfcp{type = Type}, #state{reject = Reject} = State) ->
+    case Reject of
+	#{Type := {0, Count, Cause}} ->
+	    R = case Count of
+		    1 -> maps:remove(Type, Reject);
+		    _ -> Reject#{Type => {0, Count - 1, Cause}}
+		end,
+	    {reject, Cause, State#state{reject = R}};
+	#{Type := {Skip, Count, Cause}} ->
+	    {pass, State#state{reject = Reject#{Type => {Skip - 1, Count, Cause}}}};
+	_ ->
+	    {pass, State}
+    end.
+
+%% Answer with the injected cause and change nothing else, so a rejected
+%% establishment leaves no session behind and a rejected modification leaves the
+%% existing rules alone.
+reject_reply(#pfcp{type = Type} = Request, Cause, State) ->
+    sx_reply(pfcp_response(Type), reject_seid(Request, State),
+	     #{pfcp_cause => Cause}, State).
 
 %% The CP SEID to answer on. An establishment carries it in the request's F-SEID
 %% (there is no session yet); everything else is looked up by the UP SEID, and
