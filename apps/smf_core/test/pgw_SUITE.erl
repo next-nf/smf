@@ -944,6 +944,7 @@ common() ->
      redirect_info,
      gx_asr,
      gx_rar,
+     gx_rar_reject_keeps_committed_state,
      gx_rar_dedicated_bearer_create,
      gx_rar_dedicated_bearer_create_unarmed,
      default_bearer_qci_arp_binding_entry,
@@ -1170,6 +1171,14 @@ init_per_testcase(gy_async_stop, Config) ->
     smf_test_lib:set_online_charging(true),
     smf_test_lib:load_aaa_answer_config([{{gy, 'CCR-Initial'}, 'Initial-OCS-VT'},
 			    {{gy, 'CCR-Update'},  'Update-OCS-Fail'}]),
+    Config;
+init_per_testcase(gx_rar_reject_keeps_committed_state, Config) ->
+    setup_per_testcase(Config),
+    %% Online charging must be on, else the RAR's charging round has nothing to
+    %% ask the OCS for and there is no Gy result to lose.
+    smf_test_lib:set_online_charging(true),
+    smf_test_lib:load_aaa_answer_config([{{gy, 'CCR-Initial'}, 'Initial-OCS'},
+			    {{gy, 'CCR-Update'},  'Update-OCS-GxGy'}]),
     Config;
 init_per_testcase(TestCase, Config)
   when TestCase == simple_ocs;
@@ -1538,7 +1547,9 @@ end_per_testcase(TestCase, Config)
     catch restore_sx_retransmit(),
     catch meck:delete(smf_pfcp_context, modify_session_result, 3),
     end_per_testcase(Config);
-end_per_testcase(sx_establishment_reject, Config) ->
+end_per_testcase(TestCase, Config)
+  when TestCase == sx_establishment_reject;
+       TestCase == gx_rar_reject_keeps_committed_state ->
     %% failure-safe teardown: drop the armed rejection even if the case body
     %% failed before the establishment consumed it. setup_per_testcase/2's
     %% smf_test_sx_up:reset/1 would clear it before the next case too, but that
@@ -5805,6 +5816,78 @@ gx_asr(Config) ->
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4tunnels(?TIMEOUT),
     wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gx_rar_reject_keeps_committed_state() ->
+    [{doc, "A rejected install-pass modification must not discard the charging "
+      "round that already completed"}].
+gx_rar_reject_keeps_committed_state(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {_GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    {ok, SessionOpts} = smf_context:test_cmd(gtp, CtxKey, session),
+
+    Self = self(),
+    ResponseFun =
+	fun(Request, Result, Avps, SOpts) ->
+		Self ! {'$response', Request, Result, Avps, SOpts} end,
+    AAAReq = #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SessionOpts, events = []},
+
+    %% Install a rule first, so the RAR that follows has something to remove --
+    %% a remove is what makes step 3 put a modification on the wire and come back
+    %% with a usage report, which is in turn what makes step 4's charging round
+    %% do anything. An install-only RAR leaves both steps empty.
+    InstCR = [{pcc, install, [#{'Charging-Rule-Name' => [<<"r-0002">>]}]}],
+    Server ! AAAReq#aaa_request{events = InstCR},
+    {_, Resp1, _, _} =
+	receive {'$response', _, _, _, _} = R1 -> erlang:delete_element(1, R1) end,
+    ?equal(ok, Resp1),
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 0 end, 100, 100),
+
+    {ok, SOpts1} = smf_context:test_cmd(gtp, CtxKey, session),
+    {ok, PCtx0} = smf_context:test_cmd(gtp, CtxKey, pfcp_ctx),
+
+    %% Let the remove pass (step 3) through and reject the install pass (step 6),
+    %% so the failure lands after step 4's Gy CCR-Update has been answered.
+    ok = smf_test_sx_up:reject_after('pgw-u01', session_modification_request,
+				     'No resources available', 1),
+
+    %% Both halves in one RAR so both modifications go on the wire: the remove
+    %% drives step 3, the install drives step 6.
+    BothCR = [{pcc, remove,  [#{'Charging-Rule-Name' => [<<"r-0002">>]}]},
+	      {pcc, install, [#{'Charging-Rule-Name' => [<<"r-0001-split">>]}]}],
+    Server ! AAAReq#aaa_request{session = SOpts1, events = BothCR},
+    %% The RAA acknowledges validation, not resource allocation (TS 29.212
+    %% 4.5.12), so it says nothing about the outcome.
+    {_, Resp2, _, _} =
+	receive {'$response', _, _, _, _} = R2 -> erlang:delete_element(1, R2) end,
+    ?equal(ok, Resp2),
+
+    %% A refused modification is a FATAL #ctx_err{}, so the context stops. The
+    %% Data it terminates with is where the committed state is still observable,
+    %% and it is what any compensation would have to work from.
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    [{_Pid, {_M, terminate, [_Reason, _State, TermData]}, _Res} | _] =
+	lists:reverse([H || {_, {M, F, _}, _} = H <- meck:history(?HUT),
+			    M =:= ?HUT, F =:= terminate]),
+    #{pfcp := PCtx1} = TermData,
+
+    %% The discriminating assertion (#111). Step 3's modification succeeded and
+    %% the UPF applied the removal, so the PCtx it produced is the one that
+    %% matches the UPF. That must survive the step-6 failure. Before the fix the
+    %% error channel short-circuited past the single terminal commit and the
+    %% context reverted to the pre-RAR PCtx, still claiming rules the UPF had
+    %% already dropped.
+    ?equal(false, PCtx0 =:= PCtx1),
 
     meck_validate(Config),
     ok.
