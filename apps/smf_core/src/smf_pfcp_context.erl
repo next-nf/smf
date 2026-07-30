@@ -10,8 +10,7 @@
 -compile({parse_transform, do}).
 -compile({parse_transform, cut}).
 
--export([create_session/5,
-	 create_session_async/5,
+-export([create_session_async/5,
 	 create_session_result/4,
 	 modify_session_async/5,
 	 modify_session_result/2,
@@ -52,11 +51,6 @@
 %%%===================================================================
 %%% PFCP Sx/N6 API
 %%%===================================================================
-
-%% create_session/5
-create_session(Handler, PCC, PCtx, Bearer, Ctx)
-  when is_record(PCC, pcc_ctx) ->
-    session_establishment_request(Handler, PCC, PCtx, Bearer, Ctx).
 
 %% delete_session/2
 delete_session(Reason, PCtx)
@@ -194,8 +188,7 @@ session_info(RespIEs) ->
     maps:fold(fun session_info/3, #{}, RespIEs).
 
 %% establishment_request_ies/5 — build the session establishment request IEs (rules,
-%% F-SEID, user id). Shared by the blocking session_establishment_request/5 and the
-%% async create_session_async/5; returns the updated PCtx and the IEs to send.
+%% F-SEID, user id); returns the updated PCtx and the IEs to send.
 establishment_request_ies(Handler, PCC, PCtx0, BearerMap0, Ctx) ->
     register_ctx_ids(Handler, BearerMap0, PCtx0),
     {ok, CntlNode, _, _} = smf_sx_socket:id(),
@@ -212,14 +205,10 @@ establishment_request_ies(Handler, PCC, PCtx0, BearerMap0, Ctx) ->
     ?LOG(debug, "IEs: ~p~n", [IEs]),
     {PCtx2, IEs}.
 
-%% session_establishment_request/5
-session_establishment_request(Handler, PCC, PCtx0, BearerMap0, Ctx) ->
-    {PCtx2, IEs} = establishment_request_ies(Handler, PCC, PCtx0, BearerMap0, Ctx),
-    Req = #pfcp{version = v1, type = session_establishment_request, seq_no = 0, ie = IEs},
-    create_session_result(smf_sx_node:call(PCtx2, Req), Handler, BearerMap0, PCtx2).
-
-%% create_session_async/5 — same rule build as create_session/5, but issues the request
-%% asynchronously and returns a request id instead of blocking.
+%% create_session_async/5 — build the establishment rules and issue the request,
+%% returning a request id. The only way a session is established: the blocking
+%% sibling this replaced is gone (#118), so there is one rule build and one issue
+%% path, and they cannot drift.
 create_session_async(Handler, PCC, PCtx0, BearerMap0, Ctx)
   when is_record(PCC, pcc_ctx) ->
     {PCtx2, IEs} = establishment_request_ies(Handler, PCC, PCtx0, BearerMap0, Ctx),
@@ -230,8 +219,8 @@ session_establishment_request_async(PCtx, IEs) ->
     ReqId = smf_sx_node:send_request(PCtx, Req),
     {ok, {request, ReqId, PCtx}}.
 
-%% create_session_result/4 — decode a session establishment response (the blocking call's
-%% or the async reply's) into the same shape create_session/5 returns. Unlike modify, accept
+%% create_session_result/4 — decode a session establishment response into
+%% {PCtx, BearerMap, SessionInfo}. Unlike modify, accept
 %% must thread BearerMap and re-register ctx ids using the response's F-TEIDs.
 create_session_result(#pfcp{version = v1, type = session_establishment_response,
 			     ie = #{pfcp_cause := 'Request accepted',
