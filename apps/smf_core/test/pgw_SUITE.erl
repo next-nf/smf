@@ -1538,6 +1538,13 @@ end_per_testcase(TestCase, Config)
     catch restore_sx_retransmit(),
     catch meck:delete(smf_pfcp_context, modify_session_result, 3),
     end_per_testcase(Config);
+end_per_testcase(sx_establishment_reject, Config) ->
+    %% failure-safe teardown: drop the armed rejection even if the case body
+    %% failed before the establishment consumed it. setup_per_testcase/2's
+    %% smf_test_sx_up:reset/1 would clear it before the next case too, but that
+    %% is the next test cleaning up after this one; do it here where it belongs.
+    catch smf_test_sx_up:reject_clear('pgw-u01'),
+    end_per_testcase(Config);
 end_per_testcase(_, Config) ->
     end_per_testcase(Config).
 
@@ -3714,7 +3721,6 @@ sx_establishment_reject(Config) ->
     %% already succeeded, and it had no coverage at all.
     ok = smf_test_sx_up:reject('pgw-u01', session_establishment_request,
 			       'No resources available'),
-
     create_session(system_failure, Config),
 
     ?equal([], outstanding_requests()),
