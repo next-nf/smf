@@ -945,6 +945,7 @@ common() ->
      gx_asr,
      gx_rar,
      gx_rar_reject_keeps_committed_state,
+     gx_rar_reject_keeps_charging_round,
      gx_rar_dedicated_bearer_create,
      gx_rar_dedicated_bearer_create_unarmed,
      default_bearer_qci_arp_binding_entry,
@@ -1174,7 +1175,9 @@ init_per_testcase(gy_async_stop, Config) ->
     smf_test_lib:load_aaa_answer_config([{{gy, 'CCR-Initial'}, 'Initial-OCS-VT'},
 			    {{gy, 'CCR-Update'},  'Update-OCS-Fail'}]),
     Config;
-init_per_testcase(gx_rar_reject_keeps_committed_state, Config) ->
+init_per_testcase(TestCase, Config)
+  when TestCase == gx_rar_reject_keeps_committed_state;
+       TestCase == gx_rar_reject_keeps_charging_round ->
     setup_per_testcase(Config),
     %% Online charging must be on, else the RAR's charging round has nothing to
     %% ask the OCS for and there is no Gy result to lose.
@@ -1555,6 +1558,7 @@ end_per_testcase(TestCase, Config)
 end_per_testcase(TestCase, Config)
   when TestCase == sx_establishment_reject;
        TestCase == gx_rar_reject_keeps_committed_state;
+       TestCase == gx_rar_reject_keeps_charging_round;
        TestCase == gy_credit_denied_reject_keeps_gx_report ->
     %% failure-safe teardown: drop the armed rejection even if the case body
     %% failed before the establishment consumed it. setup_per_testcase/2's
@@ -5833,6 +5837,70 @@ gx_asr(Config) ->
     ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     wait4tunnels(?TIMEOUT),
     wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gx_rar_reject_keeps_charging_round() ->
+    [{doc, "A rejected install pass must not discard the Gy charging round that "
+      "already completed"}].
+gx_rar_reject_keeps_charging_round(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {_GtpC, _, _} = create_session(Config),
+
+    ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    {ok, SessionOpts} = smf_context:test_cmd(gtp, CtxKey, session),
+
+    Self = self(),
+    ResponseFun =
+	fun(Request, Result, Avps, SOpts) ->
+		Self ! {'$response', Request, Result, Avps, SOpts} end,
+
+    %% Reject the install-pass modification (step 6). An install-only RAR leaves
+    %% the remove pass (step 3) with nothing to send, so a plain one-shot arming
+    %% lands on step 6 -- after step 4's charging round.
+    ok = smf_test_sx_up:reject('pgw-u01', session_modification_request,
+			       'No resources available'),
+
+    %% r-0002 is on rating group 4000, which this session has no credit for --
+    %% set_online_charging/1 makes every rule online-charged, so installing it
+    %% puts a new rating group in the PCC context. That is what makes
+    %% gy_credit_request/3 return a non-empty `credits` and step 4 actually send
+    %% a Gy CCR-Update; with an already-granted group it sends nothing and there
+    %% is no charging round to lose (#115).
+    InstCR = [{pcc, install, [#{'Charging-Rule-Name' => [<<"r-0002">>]}]}],
+    Server ! #aaa_request{from = ResponseFun, procedure = {gx, 'RAR'},
+			  session = SessionOpts, events = InstCR},
+    {_, Resp, _, _} =
+	receive {'$response', _, _, _, _} = R -> erlang:delete_element(1, R) end,
+    ?equal(ok, Resp),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    [{_Pid, {_M, terminate, [_Reason, _State, TermData]}, _Res} | _] =
+	lists:reverse([H || {_, {M, F, _}, _} = H <- meck:history(?HUT),
+			    M =:= ?HUT, F =:= terminate]),
+    #{aaa_session := SessionAtTerm} = TermData,
+
+    %% Take the CCR-Update's own before and after from the call itself. The
+    %% charging CONTEXT is not an observable -- the static handler keeps its state
+    %% at `undefined`, so #charging_ctx{} comes back value-identical however much
+    %% the OCS did. Only the session the call was given versus the one it returned
+    %% isolates this interaction.
+    [{_, {_, gy_ccr_update, [_, GyIn, _, _]}, {_, _, GyOut, _}} | _] =
+	lists:reverse([H || {_, {M, F, _}, _} = H <- meck:history(smf_aaa_charging),
+			    M =:= smf_aaa_charging, F =:= gy_ccr_update]),
+    ?equal(false, GyIn =:= GyOut),
+
+    %% The discriminating assertion (#115). The OCS answered the CCR-Update in
+    %% step 4 and has granted quota for the new rating group; that must survive
+    %% the step-6 failure. Before #113's commit the error channel short-circuited
+    %% past the terminal commit and the context kept GyIn.
+    ?equal(GyOut, SessionAtTerm),
 
     meck_validate(Config),
     ok.
