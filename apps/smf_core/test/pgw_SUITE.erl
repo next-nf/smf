@@ -992,6 +992,7 @@ common() ->
      gy_credit_denied_reports_rule_inactive,
      gy_credit_denied_reject_keeps_gx_report,
      gx_rar_apply_is_async,
+     gy_rar_charging_is_async,
      gx_rar_answers_raa_while_parked,
      teardown_queues_behind_procedure,
      async_error_drains_gate,
@@ -1539,6 +1540,7 @@ end_per_testcase(TestCase, Config)
        TestCase == pfcp_reentrant_during_await;
        TestCase == teardown_queues_behind_procedure;
        TestCase == gx_rar_apply_is_async;
+       TestCase == gy_rar_charging_is_async;
        TestCase == gx_rar_answers_raa_while_parked;
        TestCase == async_error_drains_gate ->
     %% failure-safe teardown: re-enable the UPF, restore sx retransmit and drop
@@ -10431,6 +10433,59 @@ gy_credit_denied_reports_rule_inactive(Config) ->
     wait4contexts(?TIMEOUT),
 
     meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+gy_rar_charging_is_async() ->
+    [{doc, "A Gy RAR's triggered charging event parks on the PFCP query instead "
+      "of blocking the context"}].
+gy_rar_charging_is_async(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+
+    {GtpC, _, _} = create_session(Config),
+
+    {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
+    #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
+
+    %% Hold the UPF so the usage-report query cannot complete. Nothing else is
+    %% parked here -- the charging event must be what parks.
+    ok = slow_down_sx_retransmit(),
+    smf_test_sx_up:disable('pgw-u01'),
+
+    Self = self(),
+    ResponseFun =
+	fun(Request, Result, Avps, SOpts) ->
+		Self ! {'$response', Request, Result, Avps, SOpts} end,
+    Server ! #aaa_request{from = ResponseFun, procedure = {gy, 'RAR'},
+			  session = SessionOpts, events = []},
+
+    %% The RAA is answered from validation, before the charging work runs. That
+    %% already held; what changes is that the RAR is no longer postponed whole
+    %% while a procedure is in flight (#119).
+    receive
+	{'$response', _, RAAResult, _, _} ->
+	    ?equal(ok, RAAResult)
+    after 2000 ->
+	    ct:fail(raa_not_answered)
+    end,
+
+    %% The discriminating assertion: the charging event registered an await.
+    %% Before the conversion triggered_charging_event/4 blocked inside
+    %% smf_sx_node:call/2 and the registry stayed empty for the whole PFCP
+    %% retransmit window.
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 1 end, 50, 100),
+
+    smf_test_sx_up:enable('pgw-u01'),
+    ok = wait_until(fun() -> async_pending_size(CtxKey) =:= 0 end, 100, 100),
+
+    delete_session(GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4tunnels(?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    meck_validate(Config),
+    ok = restore_sx_retransmit(),
     ok.
 
 %%--------------------------------------------------------------------
