@@ -922,6 +922,7 @@ common() ->
      sx_up_to_cp_forward,
      sx_upf_restart,
      sx_timeout,
+     sx_establishment_reject,
      sx_ondemand,
      pfcp_session_deleted_by_the_up_function,
      gy_validity_timer_cp,
@@ -1536,6 +1537,13 @@ end_per_testcase(TestCase, Config)
     catch smf_test_sx_up:enable('pgw-u01'),
     catch restore_sx_retransmit(),
     catch meck:delete(smf_pfcp_context, modify_session_result, 3),
+    end_per_testcase(Config);
+end_per_testcase(sx_establishment_reject, Config) ->
+    %% failure-safe teardown: drop the armed rejection even if the case body
+    %% failed before the establishment consumed it. setup_per_testcase/2's
+    %% smf_test_sx_up:reset/1 would clear it before the next case too, but that
+    %% is the next test cleaning up after this one; do it here where it belongs.
+    catch smf_test_sx_up:reject_clear('pgw-u01'),
     end_per_testcase(Config);
 end_per_testcase(_, Config) ->
     end_per_testcase(Config).
@@ -3700,6 +3708,32 @@ sx_timeout(Config) ->
     meck_validate(Config),
 
     ok = meck:delete(smf_sx_socket, call, 5),
+    ok.
+
+%%--------------------------------------------------------------------
+sx_establishment_reject() ->
+    [{doc, "Check that a UPF which rejects the Session Establishment leads to a "
+      "proper error response"}].
+sx_establishment_reject(Config) ->
+    %% Distinct from sx_timeout above, and the distinction is the point: there the
+    %% UPF is unreachable and the CP times out; here it answers, and answers no.
+    %% That is the branch a real establishment failure takes once Gx and Gy have
+    %% already succeeded, and it had no coverage at all.
+    ok = smf_test_sx_up:reject('pgw-u01', session_establishment_request,
+			       'No resources available'),
+    create_session(system_failure, Config),
+
+    ?equal([], outstanding_requests()),
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
+    wait4contexts(?TIMEOUT),
+
+    %% The arming is one-shot, so the next session establishes normally. Proving
+    %% that keeps the rejection from leaking into the rest of the group and
+    %% exercises reject/3's consume-on-use semantics.
+    {GtpC, _, _} = create_session(Config),
+    delete_session(GtpC),
+
+    meck_validate(Config),
     ok.
 
 %%--------------------------------------------------------------------

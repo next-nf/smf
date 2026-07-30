@@ -12,6 +12,7 @@
 	 reset/1, history/1, history/2,
 	 sessions/1, accounting/2,
 	 enable/1, disable/1,
+	 reject/3, reject/4, reject_clear/1,
 	 feature/3, ue_ip_pools/2,
 	 nat_port_blocks/3]).
 
@@ -27,6 +28,7 @@
 -define(SERVER, ?MODULE).
 
 -record(state, {sx, gtp, accounting, enabled,
+		reject = #{},
 		record, features,
 		node_id,
 		ue_ip_pools,
@@ -105,6 +107,25 @@ enable(Role) ->
 disable(Role) ->
     gen_server:call(server_name(Role), {enabled, false}).
 
+%% Answer the next request of Type with Cause instead of processing it.
+%%
+%% This is the only way to make the UP *refuse* something: disable/1 makes the
+%% node unreachable, which the CP sees as a timeout, not a rejection, and the two
+%% take different paths through the context. Arming a rejection is what lets a
+%% test drive the error branch of an establishment or a mid-procedure
+%% modification -- neither of which had any coverage.
+%%
+%% One-shot by default: the arming is consumed by the request it rejects, so a
+%% procedure that retries sees the retry succeed. reject/4 arms Count of them.
+reject(Role, Type, Cause) ->
+    reject(Role, Type, Cause, 1).
+
+reject(Role, Type, Cause, Count) when is_integer(Count), Count > 0 ->
+    gen_server:call(server_name(Role), {reject, Type, Cause, Count}).
+
+reject_clear(Role) ->
+    gen_server:call(server_name(Role), {reject, clear}).
+
 feature(Role, Feature, V) ->
     gen_server:call(server_name(Role), {feature, Feature, V}).
 
@@ -152,6 +173,7 @@ handle_call(reset, _From, State0) ->
 	      accounting = on,
 	      enabled = true,
 	      cp_ip = undefined,
+	      reject = #{},
 	      urrs = #{},
 	      last_cp_seid = 0,
 	      sessions = #{},
@@ -161,6 +183,12 @@ handle_call(reset, _From, State0) ->
 
 handle_call({enabled, Bool}, _From, State) ->
     {reply, ok, State#state{enabled = Bool}};
+
+handle_call({reject, clear}, _From, State) ->
+    {reply, ok, State#state{reject = #{}}};
+
+handle_call({reject, Type, Cause, Count}, _From, #state{reject = Reject} = State) ->
+    {reply, ok, State#state{reject = Reject#{Type => {Count, Cause}}}};
 
 handle_call({feature, Feature, V}, _From, #state{features = UpFF0} = State) ->
     Key = list_to_atom(string:uppercase(atom_to_list(Feature))),
@@ -424,6 +452,17 @@ when Type =:= pfd_management_request;
 	  pfcp_cause => 'No established Sx Association'},
      sx_reply(pfcp_response(Type), RespIEs, State);
 
+%% An armed rejection short-circuits the request: answer with the injected cause
+%% and change nothing else, so an establishment leaves no session behind and a
+%% modification leaves the existing rules alone. Placed after the "no association"
+%% clause above so arming a rejection cannot mask a genuinely unassociated node,
+%% and before the processing clauses so nothing is applied on the way out.
+handle_message(#pfcp{type = Type} = Request, #state{reject = Reject} = State0)
+  when is_map_key(Type, Reject) ->
+    {Cause, State} = take_rejection(Type, State0),
+    sx_reply(pfcp_response(Type), reject_seid(Request, State),
+	     #{pfcp_cause => Cause}, State);
+
 handle_message(#pfcp{type = session_establishment_request, seid = 0,
 		     ie = #{f_seid := #f_seid{seid = ControlPlaneSEID,
 					      ipv4 = ControlPlaneIP4,
@@ -495,6 +534,27 @@ handle_message(#pfcp{type = ReqType}, State)
       ReqType == session_report_response ->
     {noreply, State}.
 
+
+%% Consume one arming. The entry disappears at zero so the next request of that
+%% type is processed normally -- see reject/3.
+take_rejection(Type, #state{reject = Reject} = State) ->
+    {Count, Cause} = maps:get(Type, Reject),
+    R = case Count of
+	    1 -> maps:remove(Type, Reject);
+	    _ -> Reject#{Type => {Count - 1, Cause}}
+	end,
+    {Cause, State#state{reject = R}}.
+
+%% The CP SEID to answer on. An establishment carries it in the request's F-SEID
+%% (there is no session yet); everything else is looked up by the UP SEID, and
+%% falls back to 0 for a request against a session the UP does not have.
+reject_seid(#pfcp{ie = #{f_seid := #f_seid{seid = ControlPlaneSEID}}}, _State) ->
+    ControlPlaneSEID;
+reject_seid(#pfcp{seid = UserPlaneSEID}, #state{sessions = Sessions}) ->
+    case Sessions of
+	#{UserPlaneSEID := #session{cp_seid = ControlPlaneSEID}} -> ControlPlaneSEID;
+	_ -> 0
+    end.
 
 pfcp_response(heartbeat_request) -> heartbeat_response;
 pfcp_response(pfd_management_request) -> pfd_management_response;
