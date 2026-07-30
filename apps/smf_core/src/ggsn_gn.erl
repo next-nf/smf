@@ -186,31 +186,17 @@ handle_request(ReqKey,
     SessionOpts2 = init_session_qos(IEs, SessionOpts1),
 
 
-    {Verdict, Cause, SessionOpts, Context, BearerMap, _Dedicated, PCC4, PCtx,
-     S1, PCF1, C1, A1} =
-	case smf_gtp_gsn_lib:create_session(APN, pdp_alloc(EUA), DAF, UpSelInfo,
-					     S0, PCF0, C0, A0,
-					     SessionOpts2, Context1, AccessTunnel, AccessBearer1, PCC0) of
-	   {ok, Result} -> Result;
-	   {error, Err} -> throw(Err)
-       end,
-
-    FinalData =
-	Data#{context => Context, pfcp => PCtx, pcc => PCC4,
-	      aaa_session => S1, pcf => PCF1, charging => C1, aaa_auth => A1,
-	      tunnels => Tunnels#{'Access' => AccessTunnel}, bearers => BearerMap},
-
-    ResponseIEs = create_pdp_context_response(Cause, SessionOpts, Request, AccessTunnel, BearerMap, Context),
-    Response = response(create_pdp_context_response, AccessTunnel, ResponseIEs, Request),
-    gtp_context:send_response(ReqKey, Request, Response),
-
-    case Verdict of
-	ok ->
-	    Actions = context_idle_action([], Context),
-	    {next_state, State#{session := connected}, FinalData, Actions};
-	_ ->
-	    {next_state, State#{session := shutdown}, FinalData}
-    end;
+    %% Awaits Gx, Gy and the PFCP establishment without blocking the context, so
+    %% the Create PDP Context Response is built in the continuation (#87).
+    Proc = smf_gtp_gsn_lib:create_session(APN, pdp_alloc(EUA), DAF, UpSelInfo,
+					  S0, PCF0, C0, A0,
+					  SessionOpts2, Context1, AccessTunnel,
+					  AccessBearer1, PCC0),
+    Req = #{req_key => ReqKey, request => Request,
+	    tunnels => Tunnels, access_tunnel => AccessTunnel},
+    OkFun = fun(V, S, D) -> create_pdp_context_ok(V, S, D, Req) end,
+    ErrFun = fun(E, S, D) -> create_pdp_context_err(E, S, D, Req) end,
+    async_m:run_async(Proc, OkFun, ErrFun, State, Data);
 
 handle_request(ReqKey,
 	       #gtp{type = update_pdp_context_request,
@@ -350,6 +336,40 @@ secondary_pdp_ctx_err(_Reason, State, Data,
 %% The Update PDP Context Response is built from the PFCP result, so it goes out
 %% from here rather than from the handler. {next_state, ...} (not keep_state)
 %% because the drained async_pending re-delivers what the coarse gate postponed.
+%% Commit the establishment and answer, from the continuation: the procedure may
+%% have suspended on Gx, Gy or the PFCP establishment before reaching here (#87).
+create_pdp_context_ok({Verdict, Cause, SessionOpts, Context, BearerMap, _Dedicated,
+		       PCC4, PCtx, S1, PCF1, C1, A1}, State, Data,
+		      #{req_key := ReqKey, request := Request,
+			tunnels := Tunnels, access_tunnel := AccessTunnel}) ->
+    FinalData =
+	Data#{context => Context, pfcp => PCtx, pcc => PCC4,
+	      aaa_session => S1, pcf => PCF1, charging => C1, aaa_auth => A1,
+	      tunnels => Tunnels#{'Access' => AccessTunnel}, bearers => BearerMap},
+
+    ResponseIEs = create_pdp_context_response(Cause, SessionOpts, Request, AccessTunnel,
+					      BearerMap, Context),
+    Response = response(create_pdp_context_response, AccessTunnel, ResponseIEs, Request),
+    gtp_context:send_response(ReqKey, Request, Response),
+
+    case Verdict of
+	ok ->
+	    Actions = context_idle_action([], Context),
+	    {next_state, State#{session := connected}, FinalData, Actions};
+	_ ->
+	    {next_state, State#{session := shutdown}, FinalData}
+    end.
+
+%% Answers the peer itself and compensates the external sessions the failed
+%% establishment had already opened -- see pgw_s5s8:create_session_err/4.
+create_pdp_context_err(#ctx_err{} = Err, State, Data,
+		       #{req_key := ReqKey, request := Request,
+			 access_tunnel := AccessTunnel}) ->
+    Data1 = smf_gtp_gsn_lib:establishment_failed(Err, Data),
+    gtp_context:send_ctx_error_response(
+      Err#ctx_err{tunnel = AccessTunnel}, ReqKey, Request),
+    {next_state, State#{session := shutdown}, Data1}.
+
 update_pdp_context_ok({PCtx, _BearerMap, SessionInfo}, State, Data,
 		      #{req_key := ReqKey, request := Request, qos_profile := ReqQoSProfile,
 			context := Context, tunnels := Tunnels, access_tunnel := AccessTunnel,
