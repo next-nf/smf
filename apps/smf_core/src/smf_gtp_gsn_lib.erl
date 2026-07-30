@@ -11,7 +11,7 @@
 	  {parse_transform, cut}]).
 
 -export([connect_upf_candidates/4, create_session/13, create_session/14]).
--export([triggered_charging_event/4, usage_report/3,
+-export([triggered_charging_event_proc/3, usage_report/3,
 	 close_context/4, close_context_proc/3,
 	 compensate_external_sessions/1, establishment_failed/2]).
 -export([update_tunnel_endpoint/2,
@@ -492,19 +492,58 @@ apply_bearer_change_result({PCtx, BearerMap, UsageReport, SessionInfo}, URRActio
 %% Charging API
 %%====================================================================
 
-triggered_charging_event(ChargeEv, Now, Request,
-			 #{pfcp := PCtx, aaa_session := S0, pcf := _PCF,
-			   charging := C0, aaa_auth := A0, pcc := PCC} = Data) ->
-    case query_usage_report(Request, PCtx) of
-	{ok, {_, UsageReport, _}} ->
-	    {S1, C1, A1, GyEvs} = smf_gtp_gsn_session:usage_report_request(
-				     ChargeEv, Now, UsageReport, PCtx, PCC,
-				     S0, C0, A0),
-	    {Data#{aaa_session := S1, charging := C1, aaa_auth := A1}, GyEvs};
-	{error, CtxErr} ->
-	    ?LOG(error, "Triggered Charging Event failed with ~p", [CtxErr]),
-	    {Data, []}
-    end.
+%% triggered_charging_event_proc/3 — query the UPF for a usage report and turn it
+%% into charging events, without blocking the context (#119). Yields the Gy events
+%% for the caller to raise; the session, charging and auth contexts are committed
+%% here, since the caller has no other way to see them after a suspension.
+%%
+%% Failure stays non-fatal, as it was: a usage-report query that the UPF refuses
+%% costs the report and nothing else, so it must not travel the error channel and
+%% take the context down with it.
+triggered_charging_event_proc(ChargeEv, Now, Request) ->
+    do([async_m ||
+	   #{pfcp := PCtx} <- async_m:get_data(),
+	   %% `undefined` means "everything", which query_usage_report_async/2 spells
+	   %% as the online report; a list names specific charging keys.
+	   Issued <- async_m:lift(
+		       smf_pfcp_context:query_usage_report_async(
+			 usage_report_request(Request), PCtx)),
+	   Result <- await_usage_report(Issued),
+	   apply_usage_report(ChargeEv, Now, Result)
+       ]).
+
+usage_report_request(ChargingKeys) when is_list(ChargingKeys) -> ChargingKeys;
+usage_report_request(_) -> online.
+
+await_usage_report({request, ReqId, BearerMap, PCtx}) ->
+    do([async_m ||
+	   Reply <- async_m:await(ReqId),
+	   async_m:return(
+	     usage_report_result(
+	       smf_pfcp_context:modify_session_result(Reply, BearerMap, PCtx)))
+       ]);
+await_usage_report({no_request, _BearerMap, _PCtx}) ->
+    %% Nothing to query: there were no URRs to ask about. That is not a failure --
+    %% the blocking path fed the same `undefined` report through.
+    async_m:return({ok, undefined}).
+
+usage_report_result({ok, {_, _, UsageReport, _}}) ->
+    {ok, UsageReport};
+usage_report_result({error, CtxErr}) ->
+    ?LOG(error, "Triggered Charging Event failed with ~p", [CtxErr]),
+    error.
+
+apply_usage_report(_ChargeEv, _Now, error) ->
+    async_m:return([]);
+apply_usage_report(ChargeEv, Now, {ok, UsageReport}) ->
+    do([async_m ||
+	   #{pfcp := PCtx, aaa_session := S0, charging := C0, aaa_auth := A0,
+	     pcc := PCC} <- async_m:get_data(),
+	   {S1, C1, A1, GyEvs} = smf_gtp_gsn_session:usage_report_request(
+				   ChargeEv, Now, UsageReport, PCtx, PCC, S0, C0, A0),
+	   async_m:modify_data(_#{aaa_session := S1, charging := C1, aaa_auth := A1}),
+	   async_m:return(GyEvs)
+       ]).
 
 usage_report(URRActions, UsageReport, #{pfcp := PCtx, aaa_session := S0, charging := C0} = Data) ->
     {S1, C1} = smf_gtp_gsn_session:usage_report(URRActions, UsageReport, PCtx, {S0, C0}),
@@ -550,11 +589,5 @@ close_context(API, TermCause, UsageReport,
 %%====================================================================
 %% Helper
 %%====================================================================
-
-query_usage_report(ChargingKeys, PCtx)
-  when is_list(ChargingKeys) ->
-    smf_pfcp_context:query_usage_report(ChargingKeys, PCtx);
-query_usage_report(_, PCtx) ->
-    smf_pfcp_context:query_usage_report(PCtx).
 
 %% -*- mode: Erlang; whitespace-line-column: 120; -*-
