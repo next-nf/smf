@@ -981,19 +981,27 @@ gx_rar_apply_proc(PCC0, PCC1, PCC2) ->
 	   {PCC4, PCCErrors4} = smf_pcc_context:gy_events_to_pcc_ctx(Now, GyEvs, PCC2),
 
 %%% step 6:
+	   %% Stage any bearer this PCC change calls for BEFORE the install
+	   %% modification, so that modification creates its PDRs with the CHOOSE
+	   %% flag and the response carries the UP-allocated F-TEID (#89). Doing it
+	   %% afterwards would only ever produce an update_pdr, which carries none.
+	   #{interface := Interface} <- async_m:get_data(),
+	   Data6 <- async_m:get_data(),
+	   {BearerMap6, Staged} = Interface:stage_dedicated_bearers(PCC0, PCC4, Data6),
 	   Issued2 <- async_m:lift(
-			smf_pfcp_context:modify_session_async(PCC4, [], #{}, BearerMap, PCtx1)),
-	   {PCtx, _, _, _} <- smf_pfcp_context:await_modify(Issued2),
+			smf_pfcp_context:modify_session_async(PCC4, [], #{}, BearerMap6, PCtx1)),
+	   {PCtx, BearerMap7, _, _} <- smf_pfcp_context:await_modify(Issued2),
 
 %%% step 7:
 	   %% TODO Charging-Rule-Report for successfully installed/removed rules
 	   {PCF1, S4} = report_rule_failures(PCCErrors4, PCF0, S3, ReqOps),
 
 	   async_m:modify_data(
-	     fun(#{interface := Interface} = D) ->
-		     D1 = D#{pfcp := PCtx, pcc := PCC4, pcf := PCF1,
-			     aaa_session := S4, charging := C2, aaa_auth := A1},
-		     Interface:handle_dedicated_bearer_changes(PCC0, PCC4, D1)
+	     fun(D) ->
+		     D1 = D#{pfcp := PCtx, bearers := BearerMap7, pcc := PCC4,
+			     pcf := PCF1, aaa_session := S4, charging := C2,
+			     aaa_auth := A1},
+		     Interface:handle_dedicated_bearer_changes(PCC0, PCC4, Staged, D1)
 	     end)
        ]).
 

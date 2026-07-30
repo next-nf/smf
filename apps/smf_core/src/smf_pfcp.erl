@@ -22,7 +22,7 @@
 	 up_inactivity_timer/1]).
 -ignore_xref([f_teid/1, outer_header_removal/1]).
 -export([init_ctx/1, reset_ctx/1,
-	 get_id/3, get_chid/3, get_bearer_key_by_pdr/2,
+	 get_id/3, get_chid/3, get_bearer_key_by_pdr/2, rekey_bearer/3,
 	 update_pfcp_rules/3,
 	 update_teids/3]).
 -export([get_urr_id/4, get_urr_group/2,
@@ -251,6 +251,30 @@ get_chid(PdrId, Key, #pfcp_ctx{chid_by_pdr = M} = PCtx0) ->
 
 get_bearer_key_by_pdr(PdrId, #pfcp_ctx{chid_by_pdr = M}) ->
     maps:get(PdrId, M, undefined).
+
+%% rekey_bearer/3 — move a bearer's PFCP identity from OldKey to NewKey.
+%%
+%% A network-initiated dedicated bearer is provisioned in the UPF BEFORE the MME
+%% assigns its EPS Bearer Id -- the Create Bearer Request carries EBI 0 and the
+%% real value arrives in the response (TS 29.274 7.2.3/7.2.4) -- so it is created
+%% under a provisional key and renamed once the response names it.
+%%
+%% Exactly two things in the PCtx are keyed by the bearer key, and BOTH must move
+%% together: the {teid, Key} entry in idmap that pins the CHOOSE id, and the
+%% chid_by_pdr PdrId -> Key reverse map that routes a Created PDR back to its
+%% bearer. Move only one and the next rule build mints a second CHOOSE id, so the
+%% UP allocates a different F-TEID than the one already advertised over GTP-C.
+rekey_bearer(Key, Key, PCtx) ->
+    PCtx;
+rekey_bearer(OldKey, NewKey, #pfcp_ctx{idmap = IdMap0, chid_by_pdr = M0} = PCtx) ->
+    IdMap = case maps:take({teid, OldKey}, IdMap0) of
+		{Id, Rest} -> Rest#{{teid, NewKey} => Id};
+		error      -> IdMap0
+	    end,
+    ChidByPdr = maps:map(fun(_, K) when K =:= OldKey -> NewKey;
+			    (_, K) -> K
+			 end, M0),
+    PCtx#pfcp_ctx{idmap = IdMap, chid_by_pdr = ChidByPdr}.
 
 get_urr_id(Key, Groups, Info, #pfcp_ctx{urr_by_id = M, urr_by_grp = Grp0} = PCtx0) ->
     {Id, PCtx1} = smf_pfcp:get_id(urr, Key, PCtx0),

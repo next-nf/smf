@@ -18,8 +18,8 @@
 	 handle_event/4, terminate/3]).
 
 -export([delete_context/4, close_context_proc/5]).
--export([handle_dedicated_bearer_changes/3]).
--ignore_xref([handle_dedicated_bearer_changes/3]).
+-export([stage_dedicated_bearers/3, handle_dedicated_bearer_changes/4]).
+-ignore_xref([stage_dedicated_bearers/3, handle_dedicated_bearer_changes/4]).
 
 %% PFCP context API's
 %%-export([defered_usage_report/3]).
@@ -524,7 +524,15 @@ encode_eua(Org, Number, IPv4, IPv6) ->
 close_context_proc(_Side, Reason, _Notify, _State, Data) ->
     smf_gtp_gsn_lib:close_context_proc(?API, Reason, Data).
 
-handle_dedicated_bearer_changes(OldPCC, NewPCC,
+%% GTPv1 asks the MS to activate the context itself, so the GGSN provisions
+%% nothing here and has nothing to stage.
+stage_dedicated_bearers(_OldPCC, _NewPCC, #{bearers := BearerMap}) ->
+    {BearerMap, []}.
+
+handle_dedicated_bearer_changes(OldPCC, NewPCC, _Staged, Data) ->
+    initiate_pdp_ctx_activations(OldPCC, NewPCC, Data).
+
+initiate_pdp_ctx_activations(OldPCC, NewPCC,
 				#{bearers := BearerMap,
 				  tunnels := #{'Access' := AccessTunnel},
 				  context := #context{default_bearer_id = DefaultNSAPI},
