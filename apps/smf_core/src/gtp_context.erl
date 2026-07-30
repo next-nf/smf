@@ -937,6 +937,14 @@ update_credits_proc(CreditEv) ->
 	   Now = erlang:monotonic_time(),
 	   {PCC, PCCErrors} = smf_pcc_context:gy_events_to_pcc_ctx(Now, [CreditEv], PCC0),
 	   {PCF1, S1} = report_rule_failures(PCCErrors, PCF0, S0, #{now => Now}),
+	   %% The Gx CCR-Update reporting the rules as INACTIVE has gone out. Commit
+	   %% its result before the modification below, which can fail: the PCRF has
+	   %% acted on the report, and short-circuiting past the terminal commit would
+	   %% leave us with no record that we ever sent it (#111).
+	   %%
+	   %% `pcc` and `pfcp` stay on the terminal commit -- neither is settled until
+	   %% the UPF has accepted the new rule set.
+	   async_m:modify_data(_#{pcf => PCF1, aaa_session => S1}),
 	   Issued <- async_m:lift(smf_pfcp_context:modify_session_async(PCC, [], #{}, BearerMap, PCtx0)),
 	   {PCtx, _, _, _} <- smf_pfcp_context:await_modify(Issued),
 	   async_m:modify_data(_#{pfcp => PCtx, pcc => PCC, pcf => PCF1, aaa_session => S1})
