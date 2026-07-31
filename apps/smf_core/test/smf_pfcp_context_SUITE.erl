@@ -5,7 +5,31 @@
 -include("../include/smf.hrl").
 
 all() -> [result_accept, result_wrong_cause, result_timeout, result_unreachable, result_dead,
-	  create_result_accept, create_result_wrong_cause, create_result_timeout].
+	  create_result_accept, create_result_wrong_cause, create_result_timeout,
+	  choose_id_is_recycled].
+
+%% The PFCP CHOOSE ID is one octet (TS 29.244 8.2.3), and smf_pfcp:get_id/3 only
+%% ever counted up. Before #125 that was survivable by accident: the teid id was
+%% keyed on {'Access', EBI}, an EBI is 0..15, so a bearer torn down and rebuilt at
+%% the same EBI reused its entry. Keying on a per-bearer handle removes that
+%% accident, so the reuse has to be deliberate -- this is what checks it is.
+choose_id_is_recycled(_Config) ->
+    PCtx0 = #pfcp_ctx{},
+    {1, PCtx1} = smf_pfcp:get_id(teid, handle_a, PCtx0),
+    {2, PCtx2} = smf_pfcp:get_id(teid, handle_b, PCtx1),
+
+    %% An id already handed out is stable, not re-minted.
+    {1, PCtx2} = smf_pfcp:get_id(teid, handle_a, PCtx2),
+
+    %% handle_a's bearer goes away; the next new bearer gets its id back rather
+    %% than a third one. Without this the pool climbs with bearer churn until the
+    %% F-TEID no longer encodes.
+    PCtx3 = smf_pfcp:release_bearer(handle_a, PCtx2),
+    {1, PCtx4} = smf_pfcp:get_id(teid, handle_c, PCtx3),
+
+    %% ...and the survivor is untouched by the recycling.
+    {2, _} = smf_pfcp:get_id(teid, handle_b, PCtx4),
+    ok.
 
 create_result_accept(_Config) ->
     meck:new(gtp_context_reg, [passthrough, no_link]),

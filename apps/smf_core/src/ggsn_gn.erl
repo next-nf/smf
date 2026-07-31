@@ -165,7 +165,7 @@ handle_request(ReqKey,
     Context1 = update_context_from_gtp_req(Request, Context0),
 
     {AccessTunnel1, AccessBearer1} =
-	case update_tunnel_from_gtp_req(Request, AccessTunnel0, #bearer{interface = 'Access'}) of
+	case update_tunnel_from_gtp_req(Request, AccessTunnel0, smf_gsn_lib:new_bearer('Access')) of
 	    {ok, Result1} -> Result1;
 	    {error, Err1} -> throw(Err1#ctx_err{context = Context1, tunnel = AccessTunnel0})
 	end,
@@ -270,7 +270,7 @@ handle_request(ReqKey,
 		 aaa_session := _Session} = Data) ->
     {AccessTunnel, AccessBearer0} =
 	case update_tunnel_from_gtp_req(
-	       Request, AccessTunnel0#tunnel{version = v1}, #bearer{interface = 'Access'}) of
+	       Request, AccessTunnel0#tunnel{version = v1}, smf_gsn_lib:new_bearer('Access')) of
 	    {ok, Result1} -> Result1;
 	    {error, Err1} -> throw(Err1#ctx_err{context = Context, tunnel = AccessTunnel0})
 	end,

@@ -1179,7 +1179,7 @@ reselect_upf(_Candidates, Session, _APNOpts, {api, {_, Pid, NodeCaps, NodePools}
 		       return(VRF0)
 	       end,
 	   {PCtx, _} <- smf_sx_node:attach(Pid),
-	   return({PCtx, NodeCaps, #bearer{interface = 'SGi-LAN', vrf = VRF}})
+	   return({PCtx, NodeCaps, smf_gsn_lib:new_bearer('SGi-LAN', VRF)})
        ]);
 reselect_upf(Candidates, Session, _APNOpts, {tgpp, {NodeName, _, _, _} = Node0, VRF0, PoolV4, NATBlock, PoolV6}) ->
     NAT = maps:get('NAT-Pool-Id', Session, undefined),
@@ -1200,7 +1200,7 @@ reselect_upf(Candidates, Session, _APNOpts, {tgpp, {NodeName, _, _, _} = Node0, 
 		       return({Node0, VRF0})
 	       end,
 	   {PCtx, _} <- smf_sx_node:attach(Pid),
-	   return({PCtx, NodeCaps, #bearer{interface = 'SGi-LAN', vrf = VRF}})
+	   return({PCtx, NodeCaps, smf_gsn_lib:new_bearer('SGi-LAN', VRF)})
        ]).
 
 common_caps_f_pred(Has, Want)

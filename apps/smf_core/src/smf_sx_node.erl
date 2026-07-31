@@ -385,7 +385,7 @@ init([Parent, Node, NodeSelect, IP4, IP6, NotifyUp]) ->
 		  retries = 0,
 		  recovery_ts = undefined,
 		  pfcp_ctx = PCtx,
-		  bearer = #{dp => #bearer{interface = 'CP-function'}},
+		  bearer = #{dp => smf_gsn_lib:new_bearer('CP-function')},
 		  cp_socket = Socket,
 		  cp_info = SockInfo,
 		  cp = CP,
@@ -937,7 +937,7 @@ update_m_rec(Record, Map) when is_tuple(Record) ->
 
 make_cp_bearer(TEI,  #gtp_socket_info{vrf = VRF, ip = IP}) ->
     FqTEID = #fq_teid{ip = IP, teid = TEI},
-    #bearer{interface = 'CP-function', vrf = VRF, remote = FqTEID}.
+    (smf_gsn_lib:new_bearer('CP-function', VRF))#bearer{remote = FqTEID}.
 
 assign_local_data_teid(Key, PCtx, #node{ip = NodeIP}, VRFs, Bearer) ->
     [VRF|_] =
