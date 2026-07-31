@@ -221,9 +221,17 @@ create_session_fun(APN, PAA, DAF, {Candidates, SxConnectId}, Session0, PCF0, Cha
 	   Issued <- lift_err(smf_pfcp_context:create_session_async(
 				gtp_context, PCC4, PCtx0, BearerMapF, Context),
 			      Context, AccessTunnel),
-	   {PCtx, BearerMap3, SessionInfo} <-
+	   {PCtx, BearerMap3a, SessionInfo} <-
 	       await_establish(Issued, gtp_context, BearerMapF, Context, AccessTunnel),
 	   async_m:modify_data(fun(D) -> started(pfcp, D#{pfcp => PCtx}) end),
+
+	   %% The default bearer gets a policy descriptor too (#90). It is NOT
+	   %% signalled like a dedicated one -- every emit path filters on role --
+	   %% but recording it is what lets those paths say "not the default"
+	   %% explicitly, instead of relying on it being absent from a map that only
+	   %% ever held dedicated bearers. Added after the establishment: it is
+	   %% policy state, and the PFCP layer has no business seeing it.
+	   BearerMap3 = put_default_bearer_desc(EBI, SessionOpts4, PCC4, BearerMap3a),
 
 	   SessionOpts = maps:merge(SessionOpts4, SessionInfo),
 	   Session4 = maps:merge(Session3, SessionOpts),
@@ -345,6 +353,21 @@ register_new_context(AccessTunnel, BearerMap, Context, Cause) ->
 	    ?LOG(debug, #{type => ctx_err, level => Level, file => File,
 			  line => Line, reply => system_failure}),
 	    {error, system_failure}
+    end.
+
+%% normalize_bearer/5 builds the same descriptor for any {QCI, ARP}; the default's
+%% differs only in its role. No charging id: that is a dedicated-bearer artefact of
+%% the Create Bearer Request, and the default's rides the Create Session Response.
+put_default_bearer_desc(EBI, SessionOpts, PCC, BearerMap) ->
+    case smf_gsn_lib:get_qci_arp(maps:get('QoS-Information', SessionOpts, #{})) of
+	{QCI, ARP} ->
+	    Desc = smf_gsn_lib:normalize_bearer(EBI, QCI, ARP, PCC, undefined),
+	    smf_gsn_lib:put_bearer_desc(EBI, Desc#bearer_desc{role = default},
+					BearerMap);
+	undefined ->
+	    %% Bearer Level QoS is mandatory in a Create Session Request
+	    %% (TS 29.274 Table 7.2.1-2), so this is defensive rather than reachable.
+	    BearerMap
     end.
 
 extra(Dedicated, Rejected) ->

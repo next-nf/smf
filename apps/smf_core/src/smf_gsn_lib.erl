@@ -46,6 +46,9 @@
 -export([get_access_default_bearer/1, put_access_default_bearer/2, access_default_bearer_key/1]).
 -export([get_sgi_default_bearer/1, put_sgi_default_bearer/2]).
 -export([resolve_access_bearer/2]).
+-export([bearer_descs/1, dedicated_bearer_descs/1,
+	 get_bearer_desc/2, find_bearer_desc/2,
+	 put_bearer_desc/3, remove_bearer_descs/2]).
 -export([detect_new_bearers/4, detect_removed_bearers/3,
 	 detect_modified_bearers/2, normalize_bearer/5,
 	 remove_bearer_metadata_for_ebi/2, get_rule_qci_arp/1, get_qci_arp/1,
@@ -1110,6 +1113,40 @@ assign_local_data_teid_like_4(_Key, #pfcp_ctx{} = PCtx,
        ]).
 
 %%%===================================================================
+%%% Bearer policy descriptors
+%%%===================================================================
+
+%% Descriptors live in the bearer map under {policy, EBI}, beside the transport
+%% bearers rather than in a parallel map (#90). The map is already polymorphic and
+%% its whole-map consumers match on the VALUE shape with a catch-all
+%% (smf_pfcp_context:make_pctx_bearer_key/4, gtp_context:bsf_keys/4), so another
+%% value shape flows through them untouched.
+
+%% Every descriptor, as the plain EBI => #bearer_desc{} map its consumers want.
+%% Includes the default bearer -- callers that only want dedicated ones say so.
+bearer_descs(BearerMap) ->
+    #{EBI => Desc || {policy, EBI} := #bearer_desc{} = Desc <- BearerMap}.
+
+%% The dedicated ones. An explicit role test, not "whatever happens to be in the
+%% map": before #90 the default was absent by construction, which made every
+%% consumer silently dedicated-only and left no way to signal the default at all.
+dedicated_bearer_descs(BearerMap) ->
+    #{EBI => Desc ||
+	  {policy, EBI} := #bearer_desc{role = dedicated} = Desc <- BearerMap}.
+
+get_bearer_desc(EBI, BearerMap) ->
+    maps:get({policy, EBI}, BearerMap).
+
+find_bearer_desc(EBI, BearerMap) ->
+    maps:find({policy, EBI}, BearerMap).
+
+put_bearer_desc(EBI, Desc, BearerMap) ->
+    BearerMap#{{policy, EBI} => Desc}.
+
+remove_bearer_descs(EBIs, BearerMap) ->
+    maps:without([{policy, EBI} || EBI <- EBIs], BearerMap).
+
+%%%===================================================================
 %%% Dedicated bearer detection helpers
 %%%===================================================================
 
@@ -1212,7 +1249,7 @@ detect_removed_bearers(#pcc_ctx{rules = OldRules},
 %% handled by detect_removed_bearers). TS 23.401 §5.4.2.1/§5.4.3, TS 29.274 §7.2.15.
 detect_modified_bearers(#pcc_ctx{rules = NewRules} = NewPCC, Dedicated) ->
     maps:fold(
-      fun(EBI, #ded_bearer{qci = QCI, bind_arp = BindARP, charging_id = ChId} = Old, Acc) ->
+      fun(EBI, #bearer_desc{qci = QCI, bind_arp = BindARP, charging_id = ChId} = Old, Acc) ->
 	      case bound_rules(QCI, BindARP, NewRules) of		% bind on the immutable ARP,
 		  [] ->
 		      Acc;
@@ -1222,15 +1259,15 @@ detect_modified_bearers(#pcc_ctx{rules = NewRules} = NewPCC, Dedicated) ->
 			  false -> Acc;
 			  true  ->
 			      FlowInfo = merge_bound_flow_info(BoundRules),
-			      [{EBI, New#ded_bearer.qos, FlowInfo, New} | Acc]
+			      [{EBI, New#bearer_desc.qos, FlowInfo, New} | Acc]
 		      end
 	      end
       end, [], Dedicated).
 
 %% A dedicated bearer’s wire-visible state changed if its bound rule set,
 %% aggregate QoS or TFT filters differ. sdf_to_pf/charging_id are not wire state.
-descriptor_changed(#ded_bearer{rules = R1, qos = Q1, tft = T1},
-		   #ded_bearer{rules = R2, qos = Q2, tft = T2}) ->
+descriptor_changed(#bearer_desc{rules = R1, qos = Q1, tft = T1},
+		   #bearer_desc{rules = R2, qos = Q2, tft = T2}) ->
     {R1, Q1, T1} =/= {R2, Q2, T2}.
 
 %% Build the canonical per-dedicated-bearer descriptor from the PCC rules bound
@@ -1244,7 +1281,7 @@ normalize_bearer(EBI, QCI, ARP, #pcc_ctx{rules = Rules}, ChId) ->
     QoS = aggregate_bearer_qos(QCI, BoundRules),
     FlowInfo = merge_bound_flow_info(BoundRules),
     {_TFTBin, Filters, SdfToPf} = smf_tft:flow_info_to_tft_map(FlowInfo),
-    #ded_bearer{ebi = EBI, qci = QCI, arp = ARP, bind_arp = ARP, qos = QoS,
+    #bearer_desc{ebi = EBI, qci = QCI, arp = ARP, bind_arp = ARP, qos = QoS,
                 rules = RuleNames, tft = Filters,
                 sdf_to_pf = SdfToPf, charging_id = ChId}.
 

@@ -486,7 +486,7 @@
 		      %% CCR-U install answer for the UE add_packet_filters Update
 		      %% outcome: installs a SECOND rule (ded-rule-2) sharing the
 		      %% established dedicated bearer's {QCI, ARP} (QCI 1 / PL 2, PCI 1,
-		      %% PVI 0, cf. establish_ded_bearer_with_pf/3), so
+		      %% PVI 0, cf. establish_bearer_desc_with_pf/3), so
 		      %% detect_modified_bearers sees the bearer's descriptor grow
 		      %% rather than detect_new_bearers creating a Create Bearer
 		      %% (#22 Increment 4).
@@ -585,7 +585,7 @@
 				 }},
 		      %% CCR-U install answer for the UE QoS-change path: re-installs
 		      %% the dedicated bearer's rule (ded-rule-1, same filter) with a
-		      %% new GBR in QoS-Information. establish_ded_bearer_with_pf/3
+		      %% new GBR in QoS-Information. establish_bearer_desc_with_pf/3
 		      %% installs ded-rule-1 with NO GBR, so this is a GBR 0 -> 3000000
 		      %% delta -> detect_modified_bearers sees the bearer QoS change ->
 		      %% Update Bearer with the new Bearer QoS (#22 Increment 6). The
@@ -979,6 +979,7 @@ common() ->
      gx_rar_same_bearer_update_out_of_order,
      gx_rar_two_dedicated_bearers_batched_update,
      gx_rar_two_dedicated_bearers_batched_delete,
+     default_bearer_has_a_descriptor,
      gx_rar_removed_rule_on_default_bearer_no_delete,
      gx_rar_bearer_binding_reeval,
      gy_asr,
@@ -2228,8 +2229,8 @@ modify_bearer_command_arp_fanout_ruleless_bearer(Config) ->
     %% stores qos = undefined.
     DedEBI = 6,
     _GtpCDed = complete_create_bearer(Cntl, GtpC, DedEBI, CBReq),
-    #{dedicated := Ded0} = smf_context:test_cmd(gtp, CtxKey, info),
-    ?match(#{DedEBI := #ded_bearer{qos = undefined, arp = {10, 1, 0}}}, Ded0),
+    Ded0 = dedicated_bearers(CtxKey),
+    ?match(#{DedEBI := #bearer_desc{qos = undefined, arp = {10, 1, 0}}}, Ded0),
 
     %% Now change the subscribed ARP. The fan-out must leave that bearer alone:
     %% the request carries the default bearer's context and nothing else.
@@ -2244,8 +2245,8 @@ modify_bearer_command_arp_fanout_ruleless_bearer(Config) ->
     ?equal({ok, timeout}, recv_pdu(GtpC2, Cmd#gtp.seq_no, ?TIMEOUT, ok)),
 
     %% ...and its stored ARP is left at the old value, not silently rewritten.
-    #{dedicated := Ded} = smf_context:test_cmd(gtp, CtxKey, info),
-    ?match(#{DedEBI := #ded_bearer{qos = undefined, arp = {10, 1, 0}}}, Ded),
+    Ded = dedicated_bearers(CtxKey),
+    ?match(#{DedEBI := #bearer_desc{qos = undefined, arp = {10, 1, 0}}}, Ded),
 
     delete_session(GtpC2),
 
@@ -2377,8 +2378,9 @@ create_session_multi_bearer(Config) ->
 	   Accepted5),
 
     CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
-    #{dedicated := Dedicated, bearers := BearerMap} =
+    #{bearers := BearerMap} =
 	smf_context:test_cmd(gtp, CtxKey, info),
+	Dedicated = smf_gsn_lib:dedicated_bearer_descs(BearerMap),
 
     %% A rejected bearer leaves no trace in the context: no bearer map entry, no
     %% {qci_arp, _, _} key that a later PCC rule could bind to, no descriptor.
@@ -6561,15 +6563,16 @@ gx_rar_two_dedicated_bearers_batched_create(Config) ->
 
     %% Both bearers installed from the one response, each placed by its own
     %% echoed F-TEID rather than by position.
-    #{bearers := BearerMap, dedicated := Ded} =
+    #{bearers := BearerMap} =
 	smf_context:test_cmd(gtp, CtxKey, info),
+	Ded = smf_gsn_lib:dedicated_bearer_descs(BearerMap),
     %% Which bearer got EBI 6 and which got 7 follows the order the contexts were
     %% staged in; the point is that each is placed by its OWN echoed F-TEID, so
     %% assert the pairing rather than the order.
     #{{qci_arp, 1, {2, 1, 0}} := EbiA, {qci_arp, 2, {3, 1, 0}} := EbiB} = BearerMap,
     ?equal([6, 7], lists:sort([EbiA, EbiB])),
     ?match(#{{'Access', 6} := #bearer{}, {'Access', 7} := #bearer{}}, BearerMap),
-    ?match(#{EbiA := #ded_bearer{qci = 1}, EbiB := #ded_bearer{qci = 2}}, Ded),
+    ?match(#{EbiA := #bearer_desc{qci = 1}, EbiB := #bearer_desc{qci = 2}}, Ded),
 
     delete_session(GtpC),
     meck_validate(Config),
@@ -6691,8 +6694,8 @@ gx_rar_dedicated_bearer_create(Config) ->
     ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap),
 
     %% Verify the dedicated bearer descriptor was stored
-    #{dedicated := Dedicated} = smf_context:test_cmd(gtp, CtxKey, info),
-    ?match(#{DedEBI := #ded_bearer{ebi = DedEBI, qci = 1, arp = {2, 1, 0}}}, Dedicated),
+    Dedicated = dedicated_bearers(CtxKey),
+    ?match(#{DedEBI := #bearer_desc{ebi = DedEBI, qci = 1, arp = {2, 1, 0}}}, Dedicated),
 
     %% Verify that a Gx CCR-Update was sent to confirm the successful resource
     %% allocation via a Charging-Rule-Report naming the bound rule ACTIVE with
@@ -6846,8 +6849,8 @@ gx_rar_dedicated_bearer_create_unarmed(Config) ->
     ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap),
 
     %% Verify the dedicated bearer descriptor was stored
-    #{dedicated := Dedicated} = smf_context:test_cmd(gtp, CtxKey, info),
-    ?match(#{DedEBI := #ded_bearer{ebi = DedEBI, qci = 1, arp = {2, 1, 0}}}, Dedicated),
+    Dedicated = dedicated_bearers(CtxKey),
+    ?match(#{DedEBI := #bearer_desc{ebi = DedEBI, qci = 1, arp = {2, 1, 0}}}, Dedicated),
 
     %% Verify that NO Gx CCR-Update confirming SUCCESSFUL_RESOURCE_ALLOCATION
     %% was sent -- the PCRF did not arm Resource-Allocation-Notification on
@@ -6953,7 +6956,7 @@ default_qci_arp_rule_binds_to_default(Config) ->
     #{bearers := BearerMap, context := #context{default_bearer_id = DefaultEBI}} =
 	smf_context:test_cmd(gtp, CtxKey, info),
     ?match(#{{qci_arp, 8, {10, 1, 0}} := DefaultEBI}, BearerMap),
-    #{dedicated := Dedicated} = smf_context:test_cmd(gtp, CtxKey, info),
+    Dedicated = dedicated_bearers(CtxKey),
     ?equal(0, map_size(Dedicated)),
 
     delete_session(GtpC),
@@ -7109,8 +7112,8 @@ modify_bearer_command_arp_fanout(Config) ->
 
     %% The staged descriptor for the dedicated bearer must have committed with
     %% the new ARP once its Update Bearer Response was processed.
-    #{dedicated := DedicatedA} = smf_context:test_cmd(gtp, CtxKey, info),
-    ?match(#{DedEBI := #ded_bearer{arp = {5, _, _}}}, DedicatedA),
+    DedicatedA = dedicated_bearers(CtxKey),
+    ?match(#{DedEBI := #bearer_desc{arp = {5, _, _}}}, DedicatedA),
 
     delete_session(GtpC2),
 
@@ -7209,7 +7212,7 @@ modify_bearer_command_arp_fanout_delete_on_fail(Config) ->
     send_pdu(Cntl, GtpC, make_response(Del, simple, GtpCDed)),
     ct:sleep(200),
 
-    #{dedicated := DedicatedA} = smf_context:test_cmd(gtp, CtxKey, info),
+    DedicatedA = dedicated_bearers(CtxKey),
     ?equal(false, maps:is_key(DedEBI, DedicatedA)),
 
     %% FIX regression: the rule bound to the deleted bearer must also come
@@ -7312,8 +7315,8 @@ modify_bearer_command_arp_fanout_temporary_hold(Config) ->
     %% No Delete Bearer Request must follow a temporary Cause; the bearer keeps
     %% its previously confirmed descriptor, still at the OLD ARP.
     ?equal(timeout, recv_pdu(Cntl, undefined, 500, fun(Why) -> Why end)),
-    #{dedicated := Ded} = smf_context:test_cmd(gtp, CtxKey, info),
-    ?match(#{DedEBI := #ded_bearer{arp = {10, 1, 0}}}, Ded),
+    Ded = dedicated_bearers(CtxKey),
+    ?match(#{DedEBI := #bearer_desc{arp = {10, 1, 0}}}, Ded),
 
     %% TS 23.401 5.4.1 step 12: a Modify Bearer Request signals the UE is
     %% reachable again, so the held Update Bearer Request is re-emitted -- as the
@@ -7336,8 +7339,8 @@ modify_bearer_command_arp_fanout_temporary_hold(Config) ->
     send_pdu(Cntl, GtpC, two_bearer_update_response(
 			   Retry, GtpCDed, [{DedEBI, request_accepted}])),
     ct:sleep(200),
-    #{dedicated := DedAfter} = smf_context:test_cmd(gtp, CtxKey, info),
-    ?match(#{DedEBI := #ded_bearer{arp = {5, _, _}}}, DedAfter),
+    DedAfter = dedicated_bearers(CtxKey),
+    ?match(#{DedEBI := #bearer_desc{arp = {5, _, _}}}, DedAfter),
 
     %% The hold is cleared -- a further reachability signal re-sends nothing.
     {GtpC4, _, _} = modify_bearer(tei_update, GtpC3),
@@ -7709,8 +7712,8 @@ gx_rar_dedicated_bearer_modify(Config) ->
     %% The staged descriptor must have been committed into `dedicated` on the
     %% Update Bearer Response success, reflecting the aggregated QoS of both
     %% bound rules (ded-rule-1 6000/8000 + ded-rule-2 4000/5000).
-    #{dedicated := DedicatedM} = smf_context:test_cmd(gtp, CtxKey, info),
-    #{DedEBI := #ded_bearer{qos = NewQoSMap}} = DedicatedM,
+    DedicatedM = dedicated_bearers(CtxKey),
+    #{DedEBI := #bearer_desc{qos = NewQoSMap}} = DedicatedM,
     ?equal(10000, maps:get('Max-Requested-Bandwidth-UL', NewQoSMap)),
     ?equal(13000, maps:get('Max-Requested-Bandwidth-DL', NewQoSMap)),
     ?equal(10000, maps:get('Guaranteed-Bitrate-UL', NewQoSMap)),
@@ -7903,8 +7906,8 @@ gx_rar_same_bearer_update_out_of_order(Config) ->
     send_pdu(Cntl, GtpC, two_bearer_update_response(
 			   UBR2, GtpCDed, [{DedEBI, request_accepted}])),
     ct:sleep(200),
-    #{dedicated := Ded1} = smf_context:test_cmd(gtp, CtxKey, info),
-    ?match(#{DedEBI := #ded_bearer{qos = #{'Max-Requested-Bandwidth-UL' := 9000}}},
+    Ded1 = dedicated_bearers(CtxKey),
+    ?match(#{DedEBI := #bearer_desc{qos = #{'Max-Requested-Bandwidth-UL' := 9000}}},
 	   Ded1),
 
     %% Now the OLDER one lands. It must be discarded, not committed -- otherwise
@@ -7912,8 +7915,8 @@ gx_rar_same_bearer_update_out_of_order(Config) ->
     send_pdu(Cntl, GtpC, two_bearer_update_response(
 			   UBR1, GtpCDed, [{DedEBI, request_accepted}])),
     ct:sleep(200),
-    #{dedicated := Ded2} = smf_context:test_cmd(gtp, CtxKey, info),
-    ?match(#{DedEBI := #ded_bearer{qos = #{'Max-Requested-Bandwidth-UL' := 9000}}},
+    Ded2 = dedicated_bearers(CtxKey),
+    ?match(#{DedEBI := #bearer_desc{qos = #{'Max-Requested-Bandwidth-UL' := 9000}}},
 	   Ded2),
 
     delete_session(GtpC),
@@ -8042,7 +8045,7 @@ gx_rar_dedicated_bearer_update_message_level_reject(Config) ->
 
     %% rule_change (unlike subscribed_qos) does not delete the bearer -- it
     %% stays installed on its previously confirmed descriptor.
-    #{dedicated := DedicatedAfter} = smf_context:test_cmd(gtp, CtxKey, info),
+    DedicatedAfter = dedicated_bearers(CtxKey),
     ?equal(true, maps:is_key(DedEBI, DedicatedAfter)),
 
     delete_session(GtpC),
@@ -8161,10 +8164,10 @@ gx_rar_two_dedicated_bearers_batched_update(Config) ->
     ?equal([], outstanding_requests()),
 
     %% Both staged descriptors must have committed on the accepted response.
-    #{dedicated := Ded} = smf_context:test_cmd(gtp, CtxKey, info),
+    Ded = dedicated_bearers(CtxKey),
     ?assertEqual(2, length([E || {E, _} <- maps:to_list(Ded), is_integer(E)])),
-    ?match(#{DedEBI1 := #ded_bearer{qos = #{'Max-Requested-Bandwidth-UL' := 7000}},
-	     DedEBI2 := #ded_bearer{qos = #{'Max-Requested-Bandwidth-UL' := 3500}}},
+    ?match(#{DedEBI1 := #bearer_desc{qos = #{'Max-Requested-Bandwidth-UL' := 7000}},
+	     DedEBI2 := #bearer_desc{qos = #{'Max-Requested-Bandwidth-UL' := 3500}}},
 	   Ded),
 
     delete_session(GtpC),
@@ -8287,7 +8290,7 @@ gx_rar_two_dedicated_bearers_batched_delete(Config) ->
     ?equal(false, is_map_key({'Access', DedEBI1}, BearerMap3)),
     ?equal(false, is_map_key({'Access', DedEBI2}, BearerMap3)),
 
-    #{dedicated := DedicatedAfter} = smf_context:test_cmd(gtp, CtxKey, info),
+    DedicatedAfter = dedicated_bearers(CtxKey),
     ?assertNot(maps:is_key(DedEBI1, DedicatedAfter)),
     ?assertNot(maps:is_key(DedEBI2, DedicatedAfter)),
 
@@ -8297,6 +8300,30 @@ gx_rar_two_dedicated_bearers_batched_delete(Config) ->
     wait4tunnels(?TIMEOUT),
     wait4contexts(?TIMEOUT),
 
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+default_bearer_has_a_descriptor() ->
+    [{doc, "The default bearer carries a policy descriptor of its own, marked "
+      "default, alongside the dedicated ones"}].
+default_bearer_has_a_descriptor(Config) ->
+    CtxKey = #context_key{socket = 'irx-socket', id = {imsi, ?'IMSI', 5}},
+    {GtpC, _, _} = create_session(Config),
+
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    #{{'Access', default_ebi} := DefaultEBI} = BearerMap,
+
+    %% Before #90 only dedicated bearers had descriptors, so every path that
+    %% signalled one was dedicated-only by construction rather than by choice.
+    ?match(#{{policy, DefaultEBI} := #bearer_desc{role = default,
+						 ebi = DefaultEBI}}, BearerMap),
+
+    %% ...and it is excluded from the dedicated view explicitly, which is what the
+    %% Update/Delete Bearer paths filter on.
+    ?equal(#{}, smf_gsn_lib:dedicated_bearer_descs(BearerMap)),
+
+    delete_session(GtpC),
     meck_validate(Config),
     ok.
 
@@ -8363,7 +8390,7 @@ gx_rar_removed_rule_on_default_bearer_no_delete(Config) ->
     #{bearers := BearerMap, context := #context{default_bearer_id = DefaultEBI}} =
 	smf_context:test_cmd(gtp, CtxKey, info),
     ?match(#{{qci_arp, 8, {10, 1, 0}} := DefaultEBI}, BearerMap),
-    #{dedicated := DedicatedBefore} = smf_context:test_cmd(gtp, CtxKey, info),
+    DedicatedBefore = dedicated_bearers(CtxKey),
     ?equal(0, map_size(DedicatedBefore)),
 
     %% Now remove that rule in a second RAR. detect_removed_bearers finds
@@ -9213,11 +9240,11 @@ bearer_resource_command_delete(Config) ->
 
 %%--------------------------------------------------------------------
 %% Establish a dedicated bearer bound to a PCC rule whose SDF filter carries a
-%% Gx Packet-Filter-Identifier, so the bearer's #ded_bearer.sdf_to_pf is
+%% Gx Packet-Filter-Identifier, so the bearer's #bearer_desc.sdf_to_pf is
 %% populated -- the reverse map the UE delete_packet_filters path inverts. Drives
 %% a Gx RAR install + the Create Bearer handshake (mirrors
 %% gx_rar_dedicated_bearer_create). Returns {GtpCDed, DedEBI, PfIds}.
-establish_ded_bearer_with_pf(GtpC, Cntl, CtxKey) ->
+establish_bearer_desc_with_pf(GtpC, Cntl, CtxKey) ->
     {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
     #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
 
@@ -9316,23 +9343,24 @@ establish_ded_bearer_with_pf(GtpC, Cntl, CtxKey) ->
 
     ct:sleep(200),
 
-    #{bearers := BearerMap, dedicated := Dedicated} =
+    #{bearers := BearerMap} =
         smf_context:test_cmd(gtp, CtxKey, info),
+        Dedicated = smf_gsn_lib:dedicated_bearer_descs(BearerMap),
     ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap),
-    #{DedEBI := #ded_bearer{sdf_to_pf = SdfToPf}} = Dedicated,
+    #{DedEBI := #bearer_desc{sdf_to_pf = SdfToPf}} = Dedicated,
     PfIds = maps:values(SdfToPf),
     %% The bound SDF filter must have produced a TFT packet-filter id to remove.
     ?match([_ | _], PfIds),
     {GtpCDed, DedEBI, PfIds}.
 
-%% Like establish_ded_bearer_with_pf/3 but binds TWO PCC rules
+%% Like establish_bearer_desc_with_pf/3 but binds TWO PCC rules
 %% (ded-rule-1 / ded-rule-2) sharing the bearer's {QCI, ARP}, each carrying its
 %% own SDF filter with a distinct Gx Packet-Filter-Identifier (pf-1 / pf-2). Both
-%% rules bind onto the ONE dedicated bearer, so its #ded_bearer.sdf_to_pf holds
+%% rules bind onto the ONE dedicated bearer, so its #bearer_desc.sdf_to_pf holds
 %% two entries -- the setup for the delete-that-leaves-survivors Update outcome
 %% (#22 Increment 3). Returns {GtpCDed, DedEBI, PfIdOf1, PfIdOf2}, the two TFT
 %% packet-filter ids (from sdf_to_pf) of pf-1 and pf-2.
-establish_ded_bearer_two_rules(GtpC, Cntl, CtxKey) ->
+establish_bearer_desc_two_rules(GtpC, Cntl, CtxKey) ->
     {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),
     #{aaa_session := SessionOpts} = smf_context:test_cmd(gtp, CtxKey, info),
 
@@ -9436,10 +9464,11 @@ establish_ded_bearer_two_rules(GtpC, Cntl, CtxKey) ->
 
     ct:sleep(200),
 
-    #{bearers := BearerMap, dedicated := Dedicated} =
+    #{bearers := BearerMap} =
         smf_context:test_cmd(gtp, CtxKey, info),
+        Dedicated = smf_gsn_lib:dedicated_bearer_descs(BearerMap),
     ?match(#{{'Access', DedEBI} := #bearer{}}, BearerMap),
-    #{DedEBI := #ded_bearer{rules = Rules, sdf_to_pf = SdfToPf}} = Dedicated,
+    #{DedEBI := #bearer_desc{rules = Rules, sdf_to_pf = SdfToPf}} = Dedicated,
     %% Both rules bound the one bearer, and each SDF filter produced a distinct
     %% TFT packet-filter id, so sdf_to_pf holds exactly two entries.
     ?equal([<<"ded-rule-1">>, <<"ded-rule-2">>], lists:sort(Rules)),
@@ -9464,7 +9493,7 @@ ue_delete_packet_filters_updates_bearer(Config) ->
     ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
 
     {GtpCDed, DedEBI, PfIdOf1, _PfIdOf2} =
-        establish_ded_bearer_two_rules(GtpC, Cntl, CtxKey),
+        establish_bearer_desc_two_rules(GtpC, Cntl, CtxKey),
 
     %% Now make the CCR-Update remove ONE of the two bound rules (ded-rule-1),
     %% leaving ded-rule-2 -> the bearer survives with a shrunken TFT.
@@ -9497,8 +9526,8 @@ ue_delete_packet_filters_updates_bearer(Config) ->
 
     %% The shrunken descriptor was committed on the Update Bearer Response: only
     %% ded-rule-2 survives, and its lone SDF filter leaves one sdf_to_pf entry.
-    #{dedicated := #{DedEBI := #ded_bearer{rules = Rules1, sdf_to_pf = SdfToPf1}}} =
-        smf_context:test_cmd(gtp, CtxKey, info),
+    #{DedEBI := #bearer_desc{rules = Rules1, sdf_to_pf = SdfToPf1}} =
+        dedicated_bearers(CtxKey),
     ?equal([<<"ded-rule-2">>], Rules1),
     ?equal(1, map_size(SdfToPf1)),
 
@@ -9527,7 +9556,7 @@ ue_delete_packet_filters_deletes_bearer(Config) ->
     {GtpC, _, _} = create_session(Config),
     ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
 
-    {GtpCDed, DedEBI, PfIds} = establish_ded_bearer_with_pf(GtpC, Cntl, CtxKey),
+    {GtpCDed, DedEBI, PfIds} = establish_bearer_desc_with_pf(GtpC, Cntl, CtxKey),
 
     %% Now make the CCR-Update remove the bearer's rule (the establishment
     %% confirmation CCR-U above still used the benign 'Update-Gx').
@@ -9580,7 +9609,7 @@ ue_delete_packet_filters_reject(Config) ->
     {GtpC, _, _} = create_session(Config),
     ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
 
-    {_GtpCDed, DedEBI, _PfIds} = establish_ded_bearer_with_pf(GtpC, Cntl, CtxKey),
+    {_GtpCDed, DedEBI, _PfIds} = establish_bearer_desc_with_pf(GtpC, Cntl, CtxKey),
 
     %% Name a packet-filter id the bearer's sdf_to_pf does not hold: the
     %% procedure's pf_ids_to_sdf/2 lift fails ({unknown_pf_id, _}) and
@@ -9627,7 +9656,7 @@ ue_delete_packet_filters_pcrf_reject(Config) ->
     {GtpC, _, _} = create_session(Config),
     ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
 
-    {_GtpCDed, DedEBI, PfIds} = establish_ded_bearer_with_pf(GtpC, Cntl, CtxKey),
+    {_GtpCDed, DedEBI, PfIds} = establish_bearer_desc_with_pf(GtpC, Cntl, CtxKey),
 
     %% Now make the CCR-Update fail (the establishment confirmation CCR-U
     %% above still used the benign 'Update-Gx').
@@ -9686,7 +9715,7 @@ ue_add_packet_filters_updates_bearer(Config) ->
     {GtpC, _, _} = create_session(Config),
     ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
 
-    {GtpCDed, DedEBI, _PfIds} = establish_ded_bearer_with_pf(GtpC, Cntl, CtxKey),
+    {GtpCDed, DedEBI, _PfIds} = establish_bearer_desc_with_pf(GtpC, Cntl, CtxKey),
 
     %% Now make the CCR-Update install a second rule (ded-rule-2), sharing the
     %% established bearer's {QCI, ARP} -> the bearer survives and grows a
@@ -9732,8 +9761,8 @@ ue_add_packet_filters_updates_bearer(Config) ->
     %% The grown descriptor was committed on the Update Bearer Response: both
     %% ded-rule-1 and ded-rule-2 are bound, and each SDF filter contributes a
     %% sdf_to_pf entry.
-    #{dedicated := #{DedEBI := #ded_bearer{rules = Rules1, sdf_to_pf = SdfToPf1}}} =
-        smf_context:test_cmd(gtp, CtxKey, info),
+    #{DedEBI := #bearer_desc{rules = Rules1, sdf_to_pf = SdfToPf1}} =
+        dedicated_bearers(CtxKey),
     ?equal([<<"ded-rule-1">>, <<"ded-rule-2">>], lists:sort(Rules1)),
     ?equal(2, map_size(SdfToPf1)),
 
@@ -9764,7 +9793,7 @@ ue_add_packet_filters_reports_unknown_rule(Config) ->
     {GtpC, _, _} = create_session(Config),
     ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
 
-    {GtpCDed, DedEBI, _PfIds} = establish_ded_bearer_with_pf(GtpC, Cntl, CtxKey),
+    {GtpCDed, DedEBI, _PfIds} = establish_bearer_desc_with_pf(GtpC, Cntl, CtxKey),
 
     %% From here the CCR-Update answer installs ded-rule-2 (dynamic, applies)
     %% AND an unknown predefined rule (fails).
@@ -9825,7 +9854,7 @@ ue_replace_packet_filters_updates_bearer(Config) ->
     {GtpC, _, _} = create_session(Config),
     ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
 
-    {GtpCDed, DedEBI, PfIds} = establish_ded_bearer_with_pf(GtpC, Cntl, CtxKey),
+    {GtpCDed, DedEBI, PfIds} = establish_bearer_desc_with_pf(GtpC, Cntl, CtxKey),
 
     %% Make the CCR-Update reinstall the SAME rule (ded-rule-1, same {QCI,ARP})
     %% with a DIFFERENT Flow-Information -> the bearer's descriptor changes (its
@@ -9871,8 +9900,8 @@ ue_replace_packet_filters_updates_bearer(Config) ->
     %% Same one rule bound, one sdf_to_pf entry (replaced, not added/removed).
     %% That an Update Bearer fired at all proves the same-name reinstall surfaced
     %% a tft delta through detect_modified_bearers.
-    #{dedicated := #{DedEBI := #ded_bearer{rules = Rules1, sdf_to_pf = SdfToPf1}}} =
-        smf_context:test_cmd(gtp, CtxKey, info),
+    #{DedEBI := #bearer_desc{rules = Rules1, sdf_to_pf = SdfToPf1}} =
+        dedicated_bearers(CtxKey),
     ?equal([<<"ded-rule-1">>], Rules1),
     ?equal(1, map_size(SdfToPf1)),
 
@@ -9903,7 +9932,7 @@ ue_qos_change_updates_bearer(Config) ->
     {GtpC, _, _} = create_session(Config),
     ?equal(true, smf_context:test_cmd(gtp, CtxKey, is_alive)),
 
-    {GtpCDed, DedEBI, _PfIds} = establish_ded_bearer_with_pf(GtpC, Cntl, CtxKey),
+    {GtpCDed, DedEBI, _PfIds} = establish_bearer_desc_with_pf(GtpC, Cntl, CtxKey),
 
     %% CCR-U re-installs ded-rule-1 with a new GBR -> bearer QoS changes.
     smf_test_lib:load_aaa_answer_config([{{gx, 'CCR-Update'}, 'Update-Gx-Qos-Change'}]),
@@ -10099,7 +10128,7 @@ mme_delete_bearer_command(Config) ->
     #{bearers := BearerMap1} = smf_context:test_cmd(gtp, CtxKey, info),
     ?equal(false, is_map_key({'Access', DedEBI}, BearerMap1)),
 
-    #{dedicated := DedicatedAfter} = smf_context:test_cmd(gtp, CtxKey, info),
+    DedicatedAfter = dedicated_bearers(CtxKey),
     ?assertNot(maps:is_key(DedEBI, DedicatedAfter)),
 
     delete_session(GtpC2),
@@ -10226,7 +10255,7 @@ mme_delete_bearer_command_multi(Config) ->
     ?equal(false, is_map_key({'Access', DedEBI1}, BearerMap3)),
     ?equal(false, is_map_key({'Access', DedEBI2}, BearerMap3)),
 
-    #{dedicated := DedicatedAfter} = smf_context:test_cmd(gtp, CtxKey, info),
+    DedicatedAfter = dedicated_bearers(CtxKey),
     ?assertNot(maps:is_key(DedEBI1, DedicatedAfter)),
     ?assertNot(maps:is_key(DedEBI2, DedicatedAfter)),
 
@@ -10358,7 +10387,7 @@ mme_delete_bearer_command_partial_reject(Config) ->
     ?equal(false, is_map_key({'Access', DedEBI1}, BearerMap3)),
     ?equal(true,  is_map_key({'Access', DedEBI2}, BearerMap3)),
 
-    #{dedicated := DedicatedAfter} = smf_context:test_cmd(gtp, CtxKey, info),
+    DedicatedAfter = dedicated_bearers(CtxKey),
     ?assertNot(maps:is_key(DedEBI1, DedicatedAfter)),
     ?assert(maps:is_key(DedEBI2, DedicatedAfter)),
 
@@ -10990,6 +11019,13 @@ compensated(Mod) ->
     lists:any(fun({_, {M, terminate, _}, _}) when M =:= Mod -> true;
 		 (_) -> false
 	      end, meck:history(Mod)).
+
+%% Bearer policy descriptors moved into the bearer map under {policy, EBI} (#90).
+%% This is the EBI => #bearer_desc{} view these assertions were written against,
+%% minus the default bearer -- which did not exist as a descriptor before.
+dedicated_bearers(CtxKey) ->
+    #{bearers := BearerMap} = smf_context:test_cmd(gtp, CtxKey, info),
+    smf_gsn_lib:dedicated_bearer_descs(BearerMap).
 
 async_pending_size(CtxKey) ->
     {_, Server} = smf_context:test_cmd(gtp, CtxKey, whereis),

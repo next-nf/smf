@@ -364,7 +364,7 @@ sdf_filter_id(#{'Packet-Filter-Identifier' := [Id | _]}) -> Id;
 sdf_filter_id(#{'Packet-Filter-Identifier' := Id}) when is_binary(Id) -> Id;
 sdf_filter_id(_) -> undefined.
 
-%% pf_ids_to_sdf/2 — invert #ded_bearer.sdf_to_pf for a UE-requested delete.
+%% pf_ids_to_sdf/2 — invert #bearer_desc.sdf_to_pf for a UE-requested delete.
 %% Given the TFT packet-filter ids (0..15) a Bearer Resource Command asks to
 %% remove and the bearer's sdf_to_pf map (#{SDF-handle => TFT-id}), return the
 %% Gx SDF Packet-Filter-Identifier handles the CCR-U must reference (TS 29.212
