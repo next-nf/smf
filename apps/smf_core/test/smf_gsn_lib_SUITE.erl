@@ -54,17 +54,17 @@ normalize_bearer_gbr_aggregates(_Config) ->
                                    'Guaranteed-Bitrate-DL' => 50}]}},
     PCC = #pcc_ctx{rules = set_qci_arp(Rules, 1, {2, 1, 0})},
     D = smf_gsn_lib:normalize_bearer(7, 1, {2, 1, 0}, PCC, 42),
-    ?assertEqual(7, D#ded_bearer.ebi),
-    ?assertEqual(1, D#ded_bearer.qci),
-    ?assertEqual({2, 1, 0}, D#ded_bearer.arp),
-    ?assertEqual({2, 1, 0}, D#ded_bearer.bind_arp),
-    ?assertEqual(42, D#ded_bearer.charging_id),
-    ?assertEqual([<<"r1">>, <<"r2">>], D#ded_bearer.rules),
+    ?assertEqual(7, D#bearer_desc.ebi),
+    ?assertEqual(1, D#bearer_desc.qci),
+    ?assertEqual({2, 1, 0}, D#bearer_desc.arp),
+    ?assertEqual({2, 1, 0}, D#bearer_desc.bind_arp),
+    ?assertEqual(42, D#bearer_desc.charging_id),
+    ?assertEqual([<<"r1">>, <<"r2">>], D#bearer_desc.rules),
     %% GBR QCI 1: bitrates summed across the two bound rules
-    ?assertEqual(150, maps:get('Max-Requested-Bandwidth-UL', D#ded_bearer.qos)),
-    ?assertEqual(250, maps:get('Max-Requested-Bandwidth-DL', D#ded_bearer.qos)),
+    ?assertEqual(150, maps:get('Max-Requested-Bandwidth-UL', D#bearer_desc.qos)),
+    ?assertEqual(250, maps:get('Max-Requested-Bandwidth-DL', D#bearer_desc.qos)),
     %% SDF id from r1's Flow-Information captured against its assigned TFT id
-    ?assertMatch(#{<<"sdf-1">> := _}, D#ded_bearer.sdf_to_pf),
+    ?assertMatch(#{<<"sdf-1">> := _}, D#bearer_desc.sdf_to_pf),
     ok.
 
 detect_modified_bearers_qos_change() ->
@@ -72,7 +72,7 @@ detect_modified_bearers_qos_change() ->
       "the new QoS"}].
 detect_modified_bearers_qos_change(_Config) ->
     ARP = {2, 1, 0},
-    Old = #ded_bearer{ebi = 5, qci = 1, arp = ARP, bind_arp = ARP, charging_id = 9,
+    Old = #bearer_desc{ebi = 5, qci = 1, arp = ARP, bind_arp = ARP, charging_id = 9,
                       qos = #{'QoS-Class-Identifier' => 1,
                               'Max-Requested-Bandwidth-UL' => 100,
                               'Max-Requested-Bandwidth-DL' => 100,
@@ -87,7 +87,7 @@ detect_modified_bearers_qos_change(_Config) ->
                                         'Guaranteed-Bitrate-UL' => 300,
                                         'Guaranteed-Bitrate-DL' => 300}]}}, 1, ARP),
     NewPCC = #pcc_ctx{rules = NewRules},
-    [{5, QoS, _FlowInfo, #ded_bearer{ebi = 5}}] =
+    [{5, QoS, _FlowInfo, #bearer_desc{ebi = 5}}] =
         smf_gsn_lib:detect_modified_bearers(NewPCC, #{5 => Old}),
     ?assertEqual(300, maps:get('Max-Requested-Bandwidth-UL', QoS)),
     ok.
@@ -122,7 +122,7 @@ detect_modified_bearers_after_arp_override(_Config) ->
     %% to the rule ARP (PCRF decision supersedes the subscribed override).
     BindARP = {2, 1, 0},
     WireARP = {5, 1, 0},
-    Old = #ded_bearer{ebi = 5, qci = 1, arp = WireARP, bind_arp = BindARP,
+    Old = #bearer_desc{ebi = 5, qci = 1, arp = WireARP, bind_arp = BindARP,
                       charging_id = 9,
                       qos = #{'QoS-Class-Identifier' => 1,
                               'Max-Requested-Bandwidth-UL' => 100,
@@ -140,8 +140,8 @@ detect_modified_bearers_after_arp_override(_Config) ->
     [{5, QoS, _FlowInfo, New}] =
         smf_gsn_lib:detect_modified_bearers(NewPCC, #{5 => Old}),
     ?assertEqual(300, maps:get('Max-Requested-Bandwidth-UL', QoS)),
-    ?assertEqual(BindARP, New#ded_bearer.arp),
-    ?assertEqual(BindARP, New#ded_bearer.bind_arp),
+    ?assertEqual(BindARP, New#bearer_desc.arp),
+    ?assertEqual(BindARP, New#bearer_desc.bind_arp),
     ok.
 
 bearer_update_cause_class_partitions() ->
