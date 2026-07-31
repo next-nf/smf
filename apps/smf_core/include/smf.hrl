@@ -88,7 +88,17 @@
 	  handle		:: reference()
 	 }).
 
--record(ded_bearer, {
+%% A bearer's POLICY state: the PCC rules bound to it and what they aggregate to.
+%% Kept apart from #bearer{}, which is transport -- merging them would push QoS,
+%% TFT and rule fields into SGi-LAN and CP-function bearers where they mean
+%% nothing. Every Access bearer has one, the default included (#90).
+-record(bearer_desc, {
+	  %% What this bearer IS, recorded rather than derived by comparing the EBI
+	  %% against context.default_bearer_id. The rule that a Delete Bearer Request
+	  %% must never name the LBI (TS 23.401 5.4.4.1) is then a check at the emit
+	  %% step, where the spec rule belongs, instead of a filter bolted onto a
+	  %% detector that should not have returned it.
+	  role = dedicated :: default | dedicated,
 	  ebi		:: 0..15,
 	  qci		:: non_neg_integer(),
 	  arp		:: {0..15, 0..1, 0..1},	%% current (last-signalled) ARP; M5 subscribed-ARP fan-out updates this
