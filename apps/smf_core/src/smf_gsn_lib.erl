@@ -1032,7 +1032,7 @@ resolve_by_bearer_id(_, BearerMap) ->
     get_access_default_bearer(BearerMap).
 
 new_bearer(Interface) ->
-    #bearer{interface = Interface, handle = erlang:unique_integer([monotonic, positive])}.
+    #bearer{interface = Interface, handle = make_ref()}.
 
 new_bearer(Interface, VRF) ->
     (new_bearer(Interface))#bearer{vrf = VRF}.
