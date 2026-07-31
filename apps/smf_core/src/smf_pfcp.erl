@@ -22,7 +22,7 @@
 	 up_inactivity_timer/1]).
 -ignore_xref([f_teid/1, outer_header_removal/1]).
 -export([init_ctx/1, reset_ctx/1,
-	 get_id/3, get_chid/3, get_bearer_key_by_pdr/2, rekey_bearer/3,
+	 get_id/3, get_chid/3, get_bearer_handle_by_pdr/2, release_bearer/2,
 	 update_pfcp_rules/3,
 	 update_teids/3]).
 -export([get_urr_id/4, get_urr_group/2,
@@ -233,48 +233,59 @@ reset_ctx(PCtx) ->
 reset_ctx_timers(PCtx) ->
     PCtx#pfcp_ctx{timers = #{}, timer_by_tref = #{}}.
 
-get_id(Type, Name, #pfcp_ctx{idcnt = Cnt, idmap = IdMap} = PCtx) ->
+get_id(Type, Name, #pfcp_ctx{idmap = IdMap} = PCtx) ->
     Key = {Type, Name},
     case IdMap of
-	#{Key := Id} ->
-	    {Id, PCtx};
-	_ ->
+	#{Key := Id} -> {Id, PCtx};
+	_            -> alloc_id(Type, Key, PCtx)
+    end.
+
+%% Reuse a released id before minting a new one. This matters for `teid`, whose id
+%% becomes the PFCP CHOOSE ID -- one octet (TS 29.244 8.2.3), so a counter that
+%% only ever climbs eventually produces an unencodable value.
+%%
+%% Before #125 the teid id was keyed on {'Access', EBI}, and an EBI is 0..15, so a
+%% bearer torn down and rebuilt at the same EBI silently reused its entry and the
+%% counter stayed bounded. Keying on a per-bearer handle removed that accident, so
+%% the reuse has to be deliberate: release_id/3 hands the id back when the bearer
+%% goes away.
+alloc_id(Type, Key, #pfcp_ctx{idcnt = Cnt, idmap = IdMap, idfree = Free} = PCtx) ->
+    case maps:get(Type, Free, []) of
+	[Id | Rest] ->
+	    {Id, PCtx#pfcp_ctx{idfree = Free#{Type => Rest},
+			       idmap = IdMap#{Key => Id}}};
+	[] ->
 	    Id = maps:get(Type, Cnt, 1),
 	    {Id, PCtx#pfcp_ctx{idcnt = Cnt#{Type => Id + 1},
 			       idmap = IdMap#{Key => Id}}}
     end.
 
-get_chid(PdrId, Key, #pfcp_ctx{chid_by_pdr = M} = PCtx0) ->
-    {Id, PCtx1} = smf_pfcp:get_id(teid, Key, PCtx0),
-    PCtx = PCtx1#pfcp_ctx{chid_by_pdr = M#{PdrId => Key}},
+release_id(Type, Name, #pfcp_ctx{idmap = IdMap, idfree = Free} = PCtx) ->
+    case maps:take({Type, Name}, IdMap) of
+	{Id, IdMap1} ->
+	    PCtx#pfcp_ctx{idmap = IdMap1,
+			  idfree = maps:update_with(Type, [Id | _], [Id], Free)};
+	error ->
+	    PCtx
+    end.
+
+%% Forget a bearer that has gone away: hand its CHOOSE id back and drop the PDRs
+%% that pointed at it. Without this the id pool only grows -- see alloc_id/3.
+release_bearer(Handle, #pfcp_ctx{chid_by_pdr = M} = PCtx) ->
+    release_id(teid, Handle,
+	       PCtx#pfcp_ctx{chid_by_pdr = maps:filter(fun(_, H) -> H =/= Handle end, M)}).
+
+%% get_chid/3 — the CHOOSE id a bearer's PDRs share, keyed on the bearer's stable
+%% HANDLE rather than on its position in the bearer map (#125). A dedicated bearer
+%% is staged before the MME names it (TS 29.274 7.2.3), so its map key changes; its
+%% handle does not, and this is what the UP's allocation is pinned to.
+get_chid(PdrId, Handle, #pfcp_ctx{chid_by_pdr = M} = PCtx0) ->
+    {Id, PCtx1} = smf_pfcp:get_id(teid, Handle, PCtx0),
+    PCtx = PCtx1#pfcp_ctx{chid_by_pdr = M#{PdrId => Handle}},
     {Id, PCtx}.
 
-get_bearer_key_by_pdr(PdrId, #pfcp_ctx{chid_by_pdr = M}) ->
+get_bearer_handle_by_pdr(PdrId, #pfcp_ctx{chid_by_pdr = M}) ->
     maps:get(PdrId, M, undefined).
-
-%% rekey_bearer/3 — move a bearer's PFCP identity from OldKey to NewKey.
-%%
-%% A network-initiated dedicated bearer is provisioned in the UPF BEFORE the MME
-%% assigns its EPS Bearer Id -- the Create Bearer Request carries EBI 0 and the
-%% real value arrives in the response (TS 29.274 7.2.3/7.2.4) -- so it is created
-%% under a provisional key and renamed once the response names it.
-%%
-%% Exactly two things in the PCtx are keyed by the bearer key, and BOTH must move
-%% together: the {teid, Key} entry in idmap that pins the CHOOSE id, and the
-%% chid_by_pdr PdrId -> Key reverse map that routes a Created PDR back to its
-%% bearer. Move only one and the next rule build mints a second CHOOSE id, so the
-%% UP allocates a different F-TEID than the one already advertised over GTP-C.
-rekey_bearer(Key, Key, PCtx) ->
-    PCtx;
-rekey_bearer(OldKey, NewKey, #pfcp_ctx{idmap = IdMap0, chid_by_pdr = M0} = PCtx) ->
-    IdMap = case maps:take({teid, OldKey}, IdMap0) of
-		{Id, Rest} -> Rest#{{teid, NewKey} => Id};
-		error      -> IdMap0
-	    end,
-    ChidByPdr = maps:map(fun(_, K) when K =:= OldKey -> NewKey;
-			    (_, K) -> K
-			 end, M0),
-    PCtx#pfcp_ctx{idmap = IdMap, chid_by_pdr = ChidByPdr}.
 
 get_urr_id(Key, Groups, Info, #pfcp_ctx{urr_by_id = M, urr_by_grp = Grp0} = PCtx0) ->
     {Id, PCtx1} = smf_pfcp:get_id(urr, Key, PCtx0),

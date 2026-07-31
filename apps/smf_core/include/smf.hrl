@@ -69,7 +69,23 @@
 				   'CP-function' | 'LI Function' | undefined,
 	  vrf			:: term(),
 	  local			:: 'undefined' | #fq_teid{} | #ue_ip{},
-	  remote		:: 'undefined' | 'default' | #fq_teid{} | #ue_ip{}
+	  remote		:: 'undefined' | 'default' | #fq_teid{} | #ue_ip{},
+	  %% Stable PFCP identity, set by smf_gsn_lib:new_bearer/1,2 and never
+	  %% changed. The PCtx keys the CHOOSE id and the PdrId -> bearer reverse map
+	  %% on THIS, not on the bearer map key -- so re-keying a bearer in the map (a
+	  %% dedicated bearer is staged before the MME names it, TS 29.274 7.2.3)
+	  %% cannot desynchronise the two and make the UP allocate an F-TEID we have
+	  %% already advertised.
+	  %%
+	  %% A reference, not a counter: it must stay unique for the whole session
+	  %% even when the node handling that session changes. erlang:unique_integer/1
+	  %% is per-VM, so two nodes mint the same values and a migrated session could
+	  %% collide a new bearer with one it brought with it. A ref carries its
+	  %% origin node, so it stays distinct from anything minted elsewhere and
+	  %% survives being serialised across. It never reaches the wire --
+	  %% smf_pfcp_context:make_request_bearer/3 swaps it for the one-octet CHOOSE
+	  %% id before encoding -- so its width costs nothing.
+	  handle		:: reference()
 	 }).
 
 -record(ded_bearer, {
@@ -95,6 +111,7 @@
 
 	  idcnt = #{}		:: map(),
 	  idmap = #{}		:: map(),
+	  idfree = #{}		:: map(),	%% Type -> [Id], see smf_pfcp:release_id/3
 	  urr_by_id = #{}	:: map(),
 	  urr_by_grp = #{}	:: map(),
 	  chid_by_pdr = #{}	:: map(),

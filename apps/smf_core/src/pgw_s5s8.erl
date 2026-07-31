@@ -227,7 +227,7 @@ handle_request(ReqKey,
 
     {AccessTunnel1, AccessBearer1} =
 	case update_tunnel_from_gtp_req(Request, DefaultBearerGroup,
-					AccessTunnel0, #bearer{interface = 'Access'}) of
+					AccessTunnel0, smf_gsn_lib:new_bearer('Access')) of
 	    {ok, Result1} -> Result1;
 	    {error, Err1} -> throw(Err1#ctx_err{context = Context1, tunnel = AccessTunnel0})
 	end,
@@ -779,7 +779,7 @@ handle_response({delete_dedicated_bearers, EBIs},
 		#gtp{type = delete_bearer_response,
 		     ie = #{?'Cause' := #v2_cause{v2_cause = Cause}} = IEs},
 		_Request, State,
-		#{bearers := BearerMap0, dedicated := Ded0} = Data0) ->
+		#{bearers := BearerMap0, dedicated := Ded0, pfcp := PCtx0} = Data0) ->
     %% TS 29.274 7.2.10.2: the response repeats a Bearer Context for every EBI
     %% the request named -- "All the bearer contexts included in the EPS Bearer
     %% IDs IE of the corresponding Delete Bearer Request shall be included" --
@@ -792,8 +792,11 @@ handle_response({delete_dedicated_bearers, EBIs},
 			  smf_gsn_lib:remove_bearer_metadata_for_ebi(
 			    EBI, maps:remove({'Access', EBI}, BM))
 		  end, BearerMap0, Released),
+    %% Hand each released bearer's CHOOSE id back, or the pool only grows and the
+    %% one-octet CHOOSE ID eventually overflows (see smf_pfcp:alloc_id/3).
+    PCtx = release_bearers(Released, BearerMap0, PCtx0),
     Data1 = Data0#{dedicated := maps:without(Released, Ded0),
-		   bearers := BearerMap},
+		   bearers := BearerMap, pfcp := PCtx},
     %% Re-provision PFCP asynchronously (#65). The bearer removal is committed
     %% above either way -- this path always treated a failed modification as
     %% non-fatal -- so only the new PCtx rides on the reply.
@@ -1213,7 +1216,7 @@ stage_additional_bearers(IEs, #context{default_bearer_id = DefaultEBI}) ->
 %% bearer too, in the same establishment exchange.
 stage_additional_bearer(EBI, BearerGroup, {BearerMap0, Ded0, Keys}) ->
     Key = {'Access', EBI},
-    AccessBearer = update_bearer_from_response(BearerGroup, #bearer{interface = 'Access'}),
+    AccessBearer = update_bearer_from_response(BearerGroup, smf_gsn_lib:new_bearer('Access')),
     BearerMap1 = BearerMap0#{Key => AccessBearer},
     case BearerGroup of
 	#{?'Bearer Level QoS' := #v2_bearer_level_quality_of_service{} = BLQoS} ->
@@ -1249,6 +1252,18 @@ send_dedicated_bearers_create(PTI, Contexts, FTEIDs, LinkedEBI, Tunnel) ->
     RequestIEs = gtp_v2_c:build_recovery(create_bearer_request, Tunnel, false, RequestIEs1),
     send_request(Tunnel, ?T3, ?N3, create_bearer_request, RequestIEs,
 		 {create_bearer, FTEIDs}).
+
+%% Release the PFCP identities of bearers that have just been removed. Looked up
+%% in the PRE-removal map, since that is the last place their handles exist.
+release_bearers(EBIs, BearerMap, PCtx) ->
+    lists:foldl(fun(EBI, P) -> release_bearer_key({'Access', EBI}, BearerMap, P) end,
+		PCtx, EBIs).
+
+release_bearer_key(Key, BearerMap, PCtx) ->
+    case BearerMap of
+	#{Key := #bearer{handle = Handle}} -> smf_pfcp:release_bearer(Handle, PCtx);
+	_                                  -> PCtx
+    end.
 
 %% Emit one network-initiated Delete Bearer Request (TS 29.274 §7.2.9.2) carrying a
 %% list of dedicated EBIs. Never carries the LBI — that tears down the whole PDN
@@ -1358,7 +1373,7 @@ stage_new_bearer(#bearer{local = #fq_teid{ip = PgwUIP}} = Default, AccessTunnel,
 		 {QCI, ARP, QoS, FlowInfo}, {BearerMap0, Staged})
   when PgwUIP /= v4, PgwUIP /= v6 ->
     Key = {'Access', {pending, erlang:unique_integer([monotonic, positive])}},
-    BearerMap1 = BearerMap0#{Key => #bearer{interface = 'Access'}},
+    BearerMap1 = BearerMap0#{Key => smf_gsn_lib:new_bearer('Access')},
     case smf_gsn_lib:assign_local_data_teid_like(Key, PCtx0, Default, BearerMap1) of
 	{ok, BearerMap} ->
 	    ChId = smf_gtp_c_socket:get_uniq_id(AccessTunnel#tunnel.socket),
@@ -2275,14 +2290,15 @@ correlate_bearer(Group, ReqFTEIDs) ->
 apply_create_bearer_context(false, PgwFTEID, _Group, Data) ->
     drop_pending_bearer(PgwFTEID, Data);
 apply_create_bearer_context(true, PgwFTEID, Group,
-			    #{bearers := BearerMap0, pcc := PCC, pfcp := PCtx0,
+			    #{bearers := BearerMap0, pcc := PCC, pfcp := PCtx,
 			      pending_bearers := Pending0} = Data0) ->
     case maps:take(PgwFTEID, Pending0) of
 	{{QCI, ARP, Key, ChId}, Pending} ->
 	    %% The MME has now named the bearer, so its provisional key becomes the
-	    %% real one. Rename it in the bearer map AND in the PCtx together (#89)
-	    %% -- smf_pfcp:rekey_bearer/3 explains why splitting them re-allocates
-	    %% the F-TEID we already advertised.
+	    %% real one. Only the bearer map moves: the PCtx keys the bearer's CHOOSE
+	    %% id and its PdrId reverse map on the bearer's stable handle, which this
+	    %% does not touch (#125). Before that, both had to be renamed together or
+	    %% the UP would re-allocate the F-TEID already advertised.
 	    #{?'EPS Bearer ID' := #v2_eps_bearer_id{eps_bearer_id = EBI}} = Group,
 	    AccessBearer = update_bearer_from_response(Group, maps:get(Key, BearerMap0)),
 	    PgwBI = <<EBI:8>>,
@@ -2290,7 +2306,6 @@ apply_create_bearer_context(true, PgwFTEID, Group,
 		#{{'Access', EBI} => AccessBearer,
 		  {qci_arp, QCI, ARP} => EBI,
 		  {bearer_id, PgwBI} => EBI},
-	    PCtx = smf_pfcp:rekey_bearer(Key, {'Access', EBI}, PCtx0),
 	    Desc = smf_gsn_lib:normalize_bearer(EBI, QCI, ARP, PCC, ChId),
 	    Dedicated = maps:get(dedicated, Data0, #{}),
 	    Data1 = Data0#{bearers := BearerMap,
@@ -2343,13 +2358,15 @@ drop_pending_bearer(PgwFTEID, #{bearers := BearerMap, pcc := PCC,
     case maps:take(PgwFTEID, Pending0) of
 	{{QCI, ARP, Key, _ChId}, Pending} ->
 	    BearerMap1 = maps:remove({qci_arp, QCI, ARP}, maps:remove(Key, BearerMap)),
+	    PCtx = release_bearer_key(Key, BearerMap, maps:get(pfcp, Data0)),
 	    case affected_pcc_rules(QCI, ARP, PCC) of
 		[] ->
-		    Data0#{bearers := BearerMap1, pending_bearers := Pending};
+		    Data0#{bearers := BearerMap1, pfcp := PCtx,
+			   pending_bearers := Pending};
 		RuleNames ->
 		    PCC1 = PCC#pcc_ctx{
 			     rules = maps:without(RuleNames, PCC#pcc_ctx.rules)},
-		    Data1 = Data0#{pcc := PCC1, bearers := BearerMap1,
+		    Data1 = Data0#{pcc := PCC1, bearers := BearerMap1, pfcp := PCtx,
 				   pending_bearers := Pending},
 		    report_bearer_failure(RuleNames, Data1)
 	    end;

@@ -35,6 +35,9 @@
 -export([select_vrf/3,
 	 allocate_ips/7, release_context_ips/1]).
 -ignore_xref([select_vrf/3]).		% used in tests
+%% The one place a #bearer{} is born. Every bearer gets its handle here, so the
+%% field is always set and nothing downstream copes with `undefined`.
+-export([new_bearer/1, new_bearer/2]).
 -export([init_tunnel/4,
 	 assign_tunnel_teid/3,
 	 assign_local_data_teid/5,
@@ -1028,6 +1031,12 @@ resolve_by_bearer_id(#{'Bearer-Identifier' := [BId]}, BearerMap) ->
 resolve_by_bearer_id(_, BearerMap) ->
     get_access_default_bearer(BearerMap).
 
+new_bearer(Interface) ->
+    #bearer{interface = Interface, handle = make_ref()}.
+
+new_bearer(Interface, VRF) ->
+    (new_bearer(Interface))#bearer{vrf = VRF}.
+
 %% assign_local_data_teid/5
 assign_local_data_teid(Key, PCtx, NodeOrVRF, TunnelOrIP, BearerMap) ->
     do([error_m ||
@@ -1041,10 +1050,13 @@ assign_local_data_teid_5(Key, PCtx, {VRFs, _} = _NodeCaps,
   when is_map_key(Name, VRFs) ->
     assign_local_data_teid_5(Key, PCtx, maps:get(Name, VRFs), TunnelIP, Bearer);
 
-assign_local_data_teid_5(Key, #pfcp_ctx{features = #{'FTUP' := _}},
-		       #vrf{name = VRF}, TunnelIP, Bearer) ->
+assign_local_data_teid_5(_Key, #pfcp_ctx{features = #{'FTUP' := _}},
+		       #vrf{name = VRF}, TunnelIP, #bearer{handle = Handle} = Bearer) ->
+    %% The CHOOSE placeholder carries the bearer's stable handle, not its map key:
+    %% make_request_bearer/3 turns it into the PCtx's CHOOSE id, and keying that on
+    %% the map key is what forced the rekey #125 removes.
     IPver = ip_ver(TunnelIP),
-    FqTEID = #fq_teid{ip = IPver, teid = {upf, Key}},
+    FqTEID = #fq_teid{ip = IPver, teid = {upf, Handle}},
     {ok, Bearer#bearer{vrf = VRF, local = FqTEID}};
 
 assign_local_data_teid_5(_Key, #pfcp_ctx{} = PCtx,
@@ -1081,9 +1093,10 @@ assign_local_data_teid_like(Key, PCtx, TemplateBearer, BearerMap) ->
 %% FTUP: leave the CHOOSE placeholder; the UP allocates and reports the F-TEID in
 %% the Created PDR of the response (TS 23.214 5.4.3), which
 %% smf_pfcp_context:modify_session_result/3 folds back into the bearer map.
-assign_local_data_teid_like_4(Key, #pfcp_ctx{features = #{'FTUP' := _}},
-			      #bearer{vrf = VRF, local = #fq_teid{ip = IP}}, Bearer) ->
-    FqTEID = #fq_teid{ip = ip_ver(IP), teid = {upf, Key}},
+assign_local_data_teid_like_4(_Key, #pfcp_ctx{features = #{'FTUP' := _}},
+			      #bearer{vrf = VRF, local = #fq_teid{ip = IP}},
+			      #bearer{handle = Handle} = Bearer) ->
+    FqTEID = #fq_teid{ip = ip_ver(IP), teid = {upf, Handle}},
     {ok, Bearer#bearer{vrf = VRF, local = FqTEID}};
 
 %% Non-FTUP (deprecated but still supported): the CP assigns. Reuse the template
